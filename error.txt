@@ -1,0 +1,32 @@
+
+asus@assus-x540sa:~/zig_kernel$ ./run.sh
+=== Building Zig Kernel ===
+build.zig:26:10: error: no field named 'root_source_file' in struct 'Build.ExecutableOptions'
+        .root_source_file = b.path(src/main.zig),
+         ^~~~~~~~~~~~~~~~
+/usr/lib/zig/0.16.0/lib/std/Build.zig:770:31: note: struct declared here
+pub const ExecutableOptions = struct {
+                              ^~~~~~
+referenced by:
+    runBuild__anon_34079: /usr/lib/zig/0.16.0/lib/std/Build.zig:2264:33
+    main: /usr/lib/zig/0.16.0/lib/compiler/build_runner.zig:463:29
+    5 reference(s) hidden; use '-freference-trace=7' to see all references
+asus@assus-x540sa:~/zig_kernel$ 
+
+asus@assus-x540sa:~/zig_kernel$ ./run.sh
+=== Building Zig Kernel ===
+install
+└─ install kernel
+   └─ compile exe kernel Debug x86_64-freestanding 1 errors
+error: failed to check cache: manifest_create AccessDenied
+error: 1 compilation errors
+failed command: /usr/lib/zig/0.16.0/zig build-exe -fllvm -fentry=_start /home/asus/zig_kernel/build/entry.o /home/asus/zig_kernel/build/isr.o -ODebug -target x86_64-freestanding -mcpu x86_64 -Mroot=/home/asus/zig_kernel/src/main.zig --cache-dir .zig-cache --global-cache-dir /home/asus/.cache/zig --name kernel --script /home/asus/zig_kernel/linker.ld --zig-lib-dir /usr/lib/zig/0.16.0/lib/ --listen=-
+
+Build Summary: 3/6 steps succeeded (1 failed)
+install transitive failure
+└─ install kernel transitive failure
+   └─ compile exe kernel Debug x86_64-freestanding 1 errors
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/5395b441bc1ac45998c15de545134cf1/build /usr/lib/zig/0.16.0/zig /usr/lib/zig/0.16.0/lib /home/asus/zig_kernel .zig-cache /home/asus/.cache/zig --seed 0xd52e5c4b -Z5443dcdc60fcf02f
+asus@assus-x540sa:~/zig_kernel$ 

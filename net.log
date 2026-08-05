@@ -1,0 +1,121 @@
+asus@assus-x540sa:~/zig_kernel$ ./run.sh
+=== Building Zig Kernel ===
+=== Creating ISO ===
+xorriso 1.5.6 : RockRidge filesystem manipulator, libburnia project.
+
+Drive current: -outdev 'stdio:kernel.iso'
+Media current: stdio file, overwriteable
+Media status : is blank
+Media summary: 0 sessions, 0 data blocks, 0 data,  855g free
+Added to ISO image: directory '/'='/tmp/grub.Vb8HUh'
+xorriso : UPDATE :     674 files added in 1 seconds
+Added to ISO image: directory '/'='/home/asus/zig_kernel/isodir'
+xorriso : UPDATE :     678 files added in 1 seconds
+xorriso : NOTE : Copying to System Area: 512 bytes from file '/usr/lib/grub/i386-pc/boot_hybrid.img'
+xorriso : UPDATE :  80.54% done
+ISO image produced: 11630 sectors
+Written to medium : 11630 sectors at LBA 0
+Writing to 'stdio:kernel.iso' completed successfully.
+
+=== Launching QEMU ===
+  Network: e1000 NIC, port forward 8080→80
+  Open http://localhost:8080 in host browser to test
+
+[BOOT] Kernel loaded
+[SYSTEM] Initializing...
+[SYSTEM] Multiboot verified OK
+[SYSTEM] PIC initialized
+[IDT] Zeroing entries...
+[IDT] Setting ISR entries 0-31...
+[IDT] Setting IRQ entries 32-47...
+[IDT] Loading IDT register...
+[IDT] IDT loaded OK
+[SYSTEM] IDT loaded (256 entries)
+[SYSTEM] Enabling interrupts...
+[SYSTEM] Interrupts enabled
+[SYSTEM] System init complete
+[BOOT] System init done
+[MEM] Physical memory manager initialized
+[MEM] Total pages: 32768, free: 32427
+[VMM] Virtual memory manager initialized
+[VMM] CR3=0x000000000015D000
+[KERNEL] Initializing kernel...
+[SCHED] Scheduler initialized
+[SCHED] Task 0 registered, entry=0x00000000001272F0
+[SCHED] Task 1 registered, entry=0x00000000001270D0
+[KERNEL] Kernel init done, 0000000000000002 tasks loaded
+[BOOT] Kernel init done
+[SCHED] Running all tasks...
+[TASK] Idle task is running
+[TASK] Hello from kernel task!
+[SHELL] Timer and keyboard IRQ registered
+[SHELL] PCI scanned, 4 devices
+[SHELL] Found network device
+[E1000] MMIO base: 0x00000000FEBC0000
+[E1000] Reset complete
+[E1000] MAC hardcoded (QEMU default)
+[E1000] MAC: 52:54:00:12:34:56
+[E1000] Setting up RX
+[E1000] RX ring at 0x0000000000166550
+[E1000] Setting up TX
+[E1000] TX ring at 0x0000000000166F80
+[E1000] Init complete, link up
+[NET] IP: 10.0.2.15 GW: 10.0.2.2
+[SHELL] Scheduler enabled
+
+=== EXCEPTION: Invalid Opcode ===
+  Error code: 0x0000000000000000
+  RAX=0x0000000000167000 RBX=0x0000000000010000 RCX=0x0000000000000010 RDX=0x000000000000002A
+  RSI=0x0000000000166F50 RDI=0x000000000000000A RBP=0x000000000015C630 RSP=0x000000000015C608
+qemu: terminating on signal 2
+asus@assus-x540sa:~/zig_kernel$ 
+
+[BOOT] Kernel loaded
+[SYSTEM] Initializing...
+[SYSTEM] Multiboot verified OK
+[SYSTEM] PIC initialized
+[IDT] Zeroing entries...
+[IDT] Setting ISR entries 0-31...
+[IDT] Setting IRQ entries 32-47...
+[IDT] Loading IDT register...
+[IDT] IDT loaded OK
+[SYSTEM] IDT loaded (256 entries)
+[SYSTEM] Enabling interrupts...
+[SYSTEM] Interrupts enabled
+[SYSTEM] System init complete
+[BOOT] System init done
+[MEM] Physical memory manager initialized
+[MEM] Total pages: 32768, free: 32427
+[VMM] Virtual memory manager initialized
+[VMM] CR3=0x000000000015D000
+[KERNEL] Initializing kernel...
+[SCHED] Scheduler initialized
+[SCHED] Task 0 registered, entry=0x00000000001272F0
+[SCHED] Task 1 registered, entry=0x00000000001270D0
+[KERNEL] Kernel init done, 0000000000000002 tasks loaded
+[BOOT] Kernel init done
+[SCHED] Running all tasks...
+[TASK] Idle task is running
+[TASK] Hello from kernel task!
+[SHELL] Timer and keyboard IRQ registered
+[SHELL] PCI scanned, 4 devices
+[SHELL] Found network device
+[E1000] MMIO base: 0x00000000FEBC0000
+[E1000] Reset complete
+[E1000] MAC hardcoded (QEMU default)
+[E1000] MAC: 52:54:00:12:34:56
+[E1000] Setting up RX
+[E1000] RX ring at 0x0000000000166550
+[E1000] Setting up TX
+[E1000] TX ring at 0x0000000000166F80
+[E1000] Init complete, link up
+[NET] IP: 10.0.2.15 GW: 10.0.2.2
+[SHELL] Scheduler enabled
+
+=== EXCEPTION: Invalid Opcode ===
+  Error code: 0x0000000000000000
+  RAX=0x0000000000167000 RBX=0x0000000000010000 RCX=0x0000000000000010 RDX=0x000000000000002A
+  RSI=0x0000000000166F50 RDI=0x000000000000000A RBP=0x000000000015C630 RSP=0x000000000015C630
+  RIP=0x00000000001296BE CS=0x0000000000000008 RFLAGS=0x0000000000010206 SS=0x0000000000000010
+qemu: terminating on signal 2
+asus@assus-x540sa:~/zig_kernel$ 
