@@ -1,3 +1,3 @@
 # zigcore
 Kernel maded on zig
-[TODOS](TODO.MD)
+[TODOS](TODO.md)
