@@ -3,13 +3,26 @@ const vga = root.vga;
 const port = root.serial;
 const net = @import("mod.zig");
 const tcp = @import("tcp.zig");
+const dns = @import("dns.zig");
 
 var http_req_buf: [512]u8 = undefined;
 
 pub fn httpGet(host: []const u8, path: []const u8) void {
     tcp.resetState();
 
-    const host_ip: [4]u8 = .{ 10, 0, 2, 2 };
+    // Try to parse host as IP first, otherwise resolve via DNS
+    var host_ip: [4]u8 = undefined;
+    if (parseIp(host)) |ip| {
+        host_ip = ip;
+    } else {
+        const resolved = dns.resolve(host) orelse {
+            vga.setColor(.light_red, .black);
+            vga.write("[HTTP] Failed to resolve host\n");
+            vga.setColor(.white, .black);
+            return;
+        };
+        host_ip = resolved;
+    }
 
     if (!tcp.connect(host_ip, 80)) {
         vga.setColor(.light_red, .black);
@@ -61,6 +74,33 @@ pub fn httpGet(host: []const u8, path: []const u8) void {
     }
 
     tcp.close();
+}
+
+fn parseIp(host: []const u8) ?[4]u8 {
+    var parts: [4]u8 = .{ 0, 0, 0, 0 };
+    var part_idx: usize = 0;
+    var num: u32 = 0;
+    var has_digit = false;
+
+    for (host) |ch| {
+        if (ch == '.') {
+            if (!has_digit or part_idx >= 4) return null;
+            parts[part_idx] = @intCast(num);
+            part_idx += 1;
+            num = 0;
+            has_digit = false;
+        } else if (ch >= '0' and ch <= '9') {
+            num = num * 10 + @as(u32, ch - '0');
+            if (num > 255) return null;
+            has_digit = true;
+        } else {
+            return null; // non-numeric char = not an IP
+        }
+    }
+
+    if (!has_digit or part_idx != 3) return null;
+    parts[part_idx] = @intCast(num);
+    return parts;
 }
 
 fn printResponse(data: []const u8) void {

@@ -2,9 +2,11 @@ const std = @import("std");
 const root = @import("root");
 const vga = root.vga;
 const kb = @import("drivers/keyboard.zig");
+const mouse = @import("drivers/mouse.zig");
 const pci = @import("drivers/pci.zig");
 const e1000 = @import("drivers/e1000.zig");
 const net = @import("net/mod.zig");
+const vga_fb = @import("system/framebuffer.zig");
 
 const info = @import("programs/info.zig");
 const calc = @import("programs/calc.zig");
@@ -42,7 +44,7 @@ const commands = [_][]const u8{
     "help",  "info",    "sysinfo", "mem",  "ps",   "clear", "cls",
     "halt",  "reboot",  "calc",    "color","clock","fib",   "matrix",
     "lua",   "user",    "ping",    "net",  "get",  "wget",
-    "set",   "unset",   "env",
+    "set",   "unset",   "env",     "mouse","resolution",
 };
 
 var cmd_buf: [CMD_MAX]u8 = undefined;
@@ -56,6 +58,8 @@ pub fn run() void {
         _ = e1000.init(dev);
         net.init();
     }
+
+    mouse.init();
 
     root.scheduler_ready = true;
 
@@ -178,6 +182,10 @@ fn execute(cmd: []const u8) void {
         cmdUnset(args);
     } else if (eql(cmd_name, "env")) {
         cmdEnv();
+    } else if (eql(cmd_name, "mouse")) {
+        showMouse();
+    } else if (eql(cmd_name, "resolution")) {
+        cmdResolution(args);
     } else {
         vga.setColor(.light_red, .black);
         vga.write("  Unknown command: '");
@@ -236,6 +244,125 @@ fn pad(n: usize) void {
     }
 }
 
+fn showMouse() void {
+    vga.setColor(.cyan, .black);
+    vga.write("\n  === Mouse Info ===\n\n");
+    vga.setColor(.white, .black);
+
+    if (!mouse.ready) {
+        vga.write("  Mouse not initialized\n\n");
+        return;
+    }
+
+    vga.write("  Position: (");
+    if (mouse.mx < 0) {
+        vga.putChar('-');
+        vga.writeDec(@as(u64, @intCast(-mouse.mx)));
+    } else {
+        vga.writeDec(@as(u64, @intCast(mouse.mx)));
+    }
+    vga.write(", ");
+    if (mouse.my < 0) {
+        vga.putChar('-');
+        vga.writeDec(@as(u64, @intCast(-mouse.my)));
+    } else {
+        vga.writeDec(@as(u64, @intCast(mouse.my)));
+    }
+    vga.write(")\n");
+
+    vga.write("  Buttons: L=");
+    vga.write(if (mouse.left_button) "ON" else "off");
+    vga.write("  R=");
+    vga.write(if (mouse.right_button) "ON" else "off");
+    vga.write("  M=");
+    vga.write(if (mouse.middle_button) "ON" else "off");
+    vga.write("\n");
+
+    vga.write("  Delta: dx=");
+    if (mouse.dx < 0) {
+        vga.putChar('-');
+        vga.writeDec(@as(u64, @intCast(-mouse.dx)));
+    } else {
+        vga.writeDec(@as(u64, @intCast(mouse.dx)));
+    }
+    vga.write(" dy=");
+    if (mouse.dy < 0) {
+        vga.putChar('-');
+        vga.writeDec(@as(u64, @intCast(-mouse.dy)));
+    } else {
+        vga.writeDec(@as(u64, @intCast(mouse.dy)));
+    }
+    vga.write("\n\n");
+}
+
+fn cmdResolution(args: []const u8) void {
+    if (!vga.isFbActive()) {
+        vga.setColor(.light_red, .black);
+        vga.write("  Framebuffer not available. Only VGA text mode.\n");
+        vga.setColor(.white, .black);
+        return;
+    }
+
+    if (args.len == 0) {
+        vga.setColor(.cyan, .black);
+        vga.write("\n  === Resolution ===\n\n");
+        vga.setColor(.white, .black);
+        vga.write("  Current: ");
+        vga.writeDec(vga_fb.fb_width);
+        vga.write("x");
+        vga.writeDec(vga_fb.fb_height);
+        vga.write(" (");
+        vga.writeDec(vga_fb.cols);
+        vga.write("x");
+        vga.writeDec(vga_fb.rows);
+        vga.write(" chars)\n\n");
+        vga.write("  Usage: resolution <width>x<height>\n");
+        vga.write("  Examples:\n");
+        vga.write("    resolution 640x480\n");
+        vga.write("    resolution 800x600\n");
+        vga.write("    resolution 1024x768\n");
+        vga.write("    resolution 1280x720\n\n");
+        return;
+    }
+
+    // Parse WxH
+    var w: u32 = 0;
+    var h: u32 = 0;
+    var found_x = false;
+    for (args) |ch| {
+        if (ch == 'x' or ch == 'X') {
+            found_x = true;
+        } else if (ch >= '0' and ch <= '9') {
+            if (!found_x) {
+                w = w * 10 + @as(u32, ch - '0');
+            } else {
+                h = h * 10 + @as(u32, ch - '0');
+            }
+        }
+    }
+
+    if (w == 0 or h == 0 or !found_x) {
+        vga.setColor(.light_red, .black);
+        vga.write("  Usage: resolution <width>x<height>\n");
+        vga.setColor(.white, .black);
+        return;
+    }
+
+    vga.setResolution(w, h);
+    vga.clear();
+    vga.setColor(.light_green, .black);
+    vga.write("  Resolution: ");
+    vga.writeDec(w);
+    vga.write("x");
+    vga.writeDec(h);
+    vga.write(" (");
+    vga.writeDec(vga_fb.cols);
+    vga.write("x");
+    vga.writeDec(vga_fb.rows);
+    vga.write(" chars)\n");
+    vga.setColor(.white, .black);
+}
+
 fn printHelp() void {
     vga.setColor(.cyan, .black);
     vga.write("\n  === Commands ===\n\n");
@@ -264,7 +391,10 @@ fn printHelp() void {
     vga.write("    net           Network interface info\n");
     vga.write("    ping [ip]     Ping (default: gateway)\n");
     vga.write("    get <url>     Fetch URL (CLI web browser)\n\n");
-    vga.write("  Keys: Tab=complete, Up/Down=history\n\n");
+    vga.write("  Input:\n");
+    vga.write("    mouse         Show mouse info\n");
+    vga.write("    resolution    Change screen resolution (framebuffer)\n\n");
+    vga.write("  Keys: Tab=complete, Up/Down=history, PgUp/PgDn=scroll\n\n");
 }
 
 fn cmdSet(args: []const u8) void {
@@ -500,6 +630,18 @@ fn readLineEnhanced(buf: []u8, max_len: usize) usize {
                     history_pos = -1;
                     clearLine(pos);
                     pos = 0;
+                }
+            } else if (ch == kb.KEY_PAGE_UP) {
+                if (vga_fb.active) {
+                    vga_fb.scrollBack(vga_fb.rows - 1);
+                } else {
+                    vga.scrollBackText(vga.getRows() - 1);
+                }
+            } else if (ch == kb.KEY_PAGE_DOWN) {
+                if (vga_fb.active) {
+                    vga_fb.scrollForward(vga_fb.rows - 1);
+                } else {
+                    vga.scrollForwardText(vga.getRows() - 1);
                 }
             } else if (ch == kb.KEY_TAB) {
                 pos = tabComplete(buf, pos);

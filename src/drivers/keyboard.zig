@@ -33,11 +33,18 @@ pub fn init() void {
 }
 
 fn irqHandler(_: *isr_mod.InterruptFrame) void {
-    const scancode = port_io.inb(KB_DATA);
-    const next = (ring_head + 1) % RING_SIZE;
-    if (next != ring_tail) {
-        scancode_ring[ring_head] = scancode;
-        ring_head = next;
+    // Drain all pending keyboard bytes. Status bit 5 = 1 means mouse data.
+    while (true) {
+        const status = port_io.inb(KB_STATUS);
+        if ((status & 0x01) == 0) break; // output buffer empty
+        if ((status & 0x20) != 0) break; // mouse data (bit 5 = 1), skip
+
+        const scancode = port_io.inb(KB_DATA);
+        const next = (ring_head + 1) % RING_SIZE;
+        if (next != ring_tail) {
+            scancode_ring[ring_head] = scancode;
+            ring_head = next;
+        }
     }
 }
 
@@ -60,6 +67,8 @@ pub const KEY_DOWN: u8 = 0x81;
 pub const KEY_LEFT: u8 = 0x82;
 pub const KEY_RIGHT: u8 = 0x83;
 pub const KEY_TAB: u8 = 0x84;
+pub const KEY_PAGE_UP: u8 = 0x85;
+pub const KEY_PAGE_DOWN: u8 = 0x86;
 
 pub fn pollKey() ?u8 {
     while (true) {
@@ -82,6 +91,8 @@ pub fn pollKey() ?u8 {
                 0x4B => KEY_LEFT,
                 0x4D => KEY_RIGHT,
                 0x09 => KEY_TAB,
+                0x49 => KEY_PAGE_UP,
+                0x51 => KEY_PAGE_DOWN,
                 else => 0,
             };
         }

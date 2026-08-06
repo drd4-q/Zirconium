@@ -13,7 +13,17 @@ var colors: [HEIGHT][WIDTH]u8 = undefined;
 pub fn run() void {
     vga.clear();
 
-    // Init columns with random-ish heights
+    // Zero-init screen and colors
+    var si: usize = 0;
+    while (si < HEIGHT) : (si += 1) {
+        var sj: usize = 0;
+        while (sj < WIDTH) : (sj += 1) {
+            screen[si][sj] = ' ';
+            colors[si][sj] = 0;
+        }
+    }
+
+    // Init columns with random-ish starting heights
     var i: usize = 0;
     while (i < WIDTH) : (i += 1) {
         columns[i] = @intCast((i * 7 + 13) % HEIGHT);
@@ -25,26 +35,27 @@ pub fn run() void {
         i = 0;
         while (i < WIDTH) : (i += 1) {
             const col = columns[i];
+            const col_usize: usize = col;
 
-            if (col > 0 and col < HEIGHT) {
-                screen[col - 1][i] = ' ';
-                colors[col - 1][i] = 0x0A;
+            if (col_usize > 0 and col_usize < HEIGHT) {
+                screen[col_usize - 1][i] = ' ';
+                colors[col_usize - 1][i] = 0x02;
             }
 
-            if (col < HEIGHT) {
-                screen[col][i] = getRandomChar(frame, i);
-                colors[col][i] = 0x0F;
-                if (col > 1) {
-                    screen[col - 1][i] = getRandomChar(frame + 1, i);
-                    colors[col - 1][i] = 0x0A;
+            if (col_usize < HEIGHT) {
+                screen[col_usize][i] = getRandomChar(frame, @intCast(i));
+                colors[col_usize][i] = 0x0F;
+                if (col_usize > 1) {
+                    screen[col_usize - 1][i] = getRandomChar(frame +% 1, @intCast(i));
+                    colors[col_usize - 1][i] = 0x0A;
                 }
-                if (col > 2) {
-                    screen[col - 2][i] = getRandomChar(frame + 2, i);
-                    colors[col - 2][i] = 0x02;
+                if (col_usize > 2) {
+                    screen[col_usize - 2][i] = getRandomChar(frame +% 2, @intCast(i));
+                    colors[col_usize - 2][i] = 0x02;
                 }
             }
 
-            if (col >= HEIGHT + 5) {
+            if (col_usize >= HEIGHT + 5) {
                 columns[i] = 0;
             } else {
                 columns[i] = col + 1;
@@ -63,6 +74,8 @@ pub fn run() void {
             }
         }
 
+        timer.sleep(50);
+
         if (kb.pollKey() != null) {
             vga.clear();
             return;
@@ -76,8 +89,8 @@ fn vgaBuffer() [*]volatile u16 {
     return @ptrFromInt(0xB8000);
 }
 
-fn getRandomChar(seed: u32, x: usize) u8 {
-    const hash = seed * 2654435761 +% @as(u32, @intCast(x)) * 2246822519;
-    const idx = @as(u8, @intCast(hash % 94));
+fn getRandomChar(seed: u32, x: u32) u8 {
+    const hash = seed *% 2654435761 +% x *% 2246822519;
+    const idx: u8 = @intCast(hash % 94);
     return idx + 0x21;
 }

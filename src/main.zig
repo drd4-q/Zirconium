@@ -40,6 +40,12 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     gdt.init(@intFromPtr(&scheduler.tasks[0].kernel_stack) + @import("kernel/task.zig").KERNEL_STACK_SIZE);
     serial.serialWrite("[BOOT] GDT initialized with ring 3 segments\n");
 
+    // Initialize framebuffer from multiboot info (before system_init which uses VGA)
+    vga.initFb(mbi_ptr);
+    if (vga.isFbActive()) {
+        serial.serialWrite("[BOOT] Framebuffer active\n");
+    }
+
     system_init.init(magic, mbi_ptr);
     serial.serialWrite("[BOOT] System init done\n");
 

@@ -4,8 +4,8 @@
 - Kernel boots via Multiboot/GRUB, identity-mapped 2MB pages
 - VGA + serial output, keyboard driver (IRQ1), timer (PIT 100Hz), PCI, e1000 NIC
 - PMM + VMM (OOM handling fixed), scheduler with kernel + user tasks
-- TCP/IP stack (ARP, IP, ICMP, TCP, HTTP), web server on port 8080→80
-- Shell with commands: help, clear, calc, clock, ping, get, net, ps, mem, reboot, matrix, fib, lua, user
+- TCP/IP stack (ARP, IP, ICMP, TCP, HTTP), DNS resolver, UDP support
+- Shell with commands: help, clear, calc, clock, ping, get, net, ps, mem, reboot, matrix, fib, lua, user, mouse, set/unset/env
 - GDT with ring 0+3 segments, IDT (256 entries + INT 0x80 DPL3), PIC, TSS
 - Syscall interface (INT 0x80): write, read, sleep, time, exit (fork/exec stubs)
 - ELF loader, ring 3 context switch via iretq, address spaces per process
@@ -22,6 +22,7 @@
 - [x] Fix VMM/address_space nextPageTable OOM (was returning undefined)
 - [x] Fix keyboard init command byte (0x47→0x45, was disabling keyboard scan)
 - [x] Fix syscall exit code display for values >= 100
+- [x] Fix matrix command (init arrays, add timer.sleep between frames, u16 bounds)
 - [ ] Test all shell commands after stable boot
 
 ### Lua integration
@@ -47,8 +48,8 @@
 
 ### Networking improvements
 - [ ] DHCP client (currently hardcoded 10.0.2.15)
-- [ ] DNS resolver
-- [ ] UDP support
+- [x] DNS resolver (UDP to 10.0.2.3)
+- [x] UDP support (basic send/receive for DNS)
 - [ ] Socket API for user-space programs
 
 ### Memory management
@@ -63,7 +64,7 @@
 - [ ] Process groups / sessions
 
 ### Driver improvements
-- [ ] PS/2 mouse driver
+- [x] PS/2 mouse driver
 - [ ] AHCI/virtio-blk disk driver
 - [ ] Virtio-net driver (better than e1000 for QEMU)
 - [ ] PCI enumeration improvements
@@ -73,7 +74,9 @@
 - [x] Command history (up/down arrows, 16 entries circular buffer)
 - [ ] Pipes (cmd1 | cmd2)
 - [ ] I/O redirection (cmd > file, cmd < file)
-- [x] Environment variables (set KEY=VALUE, unset KEY, env)
+- [x] Environment variables (set KEY=V, unset K, env)
+- [x] Scrollback buffer (PageUp/PageDown, 512 lines)
+- [x] Resolution command (framebuffer, change resolution at runtime)
 
 ### Build / tooling
 - [ ] Automated test suite
@@ -86,4 +89,4 @@
 - [ ] APIC timer (replace PIT)
 - [ ] ACPI support
 - [ ] USB driver
-- [ ] GUI / window manager (framebuffer)
+- [ ] GUI / window manager (framebuffer console with mouse cursor)

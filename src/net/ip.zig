@@ -4,6 +4,7 @@ const port = root.serial;
 const net = @import("mod.zig");
 const icmp = @import("icmp.zig");
 const tcp = @import("tcp.zig");
+const udp = @import("udp.zig");
 
 pub fn handlePacket(frame: []const u8) void {
     if (frame.len < 34) return;
@@ -28,6 +29,7 @@ pub fn handlePacket(frame: []const u8) void {
     switch (protocol) {
         1 => icmp.handlePacket(frame, ihl),
         6 => tcp.handlePacket(frame, ihl),
+        17 => udp.handlePacket(frame, ihl),
         else => {},
     }
 }

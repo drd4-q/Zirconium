@@ -1,4 +1,5 @@
 const std = @import("std");
+const fb = @import("framebuffer.zig");
 
 pub const VGA_WIDTH: usize = 80;
 pub const VGA_HEIGHT: usize = 25;
@@ -28,6 +29,44 @@ pub var cursor_col: usize = 0;
 pub var fg_color: Color = .white;
 pub var bg_color: Color = .black;
 
+const MAX_COLS: usize = 80;
+const MAX_ROWS: usize = 50;
+
+// Text-mode scrollback
+const SCROLLBACK_LINES: usize = 512;
+var scrollback: [SCROLLBACK_LINES][MAX_COLS]u16 = undefined;
+var sb_head: usize = 0;
+var sb_count: usize = 0;
+
+var screen_mirror: [MAX_ROWS][MAX_COLS]u16 = undefined;
+var saved_screen: [MAX_ROWS][MAX_COLS]u16 = undefined;
+var saved_cursor_row: usize = 0;
+var saved_cursor_col: usize = 0;
+pub var scroll_view: bool = false;
+pub var scroll_view_line: usize = 0;
+
+pub fn initFb(mbi_ptr: u32) void {
+    fb.initFromMultiboot(mbi_ptr);
+}
+
+pub fn isFbActive() bool {
+    return fb.active;
+}
+
+pub fn getCols() usize {
+    if (fb.active) return fb.cols;
+    return VGA_WIDTH;
+}
+
+pub fn getRows() usize {
+    if (fb.active) return fb.rows;
+    return VGA_HEIGHT;
+}
+
+pub fn setResolution(w: u32, h: u32) void {
+    fb.setResolution(w, h);
+}
+
 fn colorByte() u8 {
     return @intFromEnum(bg_color) << 4 | @intFromEnum(fg_color);
 }
@@ -36,17 +75,24 @@ fn vgaEntry(ch: u8, clr: u8) u16 {
     return @as(u16, ch) | (@as(u16, clr) << 8);
 }
 
-fn vgaBuffer() [*]volatile u16 {
+fn textBuffer() [*]volatile u16 {
     return @ptrFromInt(VGA_BUFFER);
 }
 
 pub fn clear() void {
+    if (fb.active) {
+        fb.setColorFromVga(@intFromEnum(fg_color), @intFromEnum(bg_color));
+        fb.clear();
+        cursor_row = 0;
+        cursor_col = 0;
+        return;
+    }
     const blank = vgaEntry(' ', colorByte());
     var y: usize = 0;
     while (y < VGA_HEIGHT) : (y += 1) {
         var x: usize = 0;
         while (x < VGA_WIDTH) : (x += 1) {
-            vgaBuffer()[y * VGA_WIDTH + x] = blank;
+            textBuffer()[y * VGA_WIDTH + x] = blank;
         }
     }
     cursor_row = 0;
@@ -56,28 +102,55 @@ pub fn clear() void {
 fn newline() void {
     cursor_col = 0;
     cursor_row += 1;
-    if (cursor_row >= VGA_HEIGHT) {
-        scroll();
-        cursor_row = VGA_HEIGHT - 1;
+    if (cursor_row >= getRows()) {
+        if (fb.active) {
+            fb.scrollUp();
+            cursor_row = fb.rows - 1;
+        } else {
+            scroll();
+            cursor_row = VGA_HEIGHT - 1;
+        }
     }
 }
 
 fn scroll() void {
+    if (!fb.active) {
+        // Save top line to scrollback
+        var x: usize = 0;
+        while (x < VGA_WIDTH) : (x += 1) {
+            scrollback[sb_head][x] = textBuffer()[x]; // row 0
+        }
+        sb_head = (sb_head + 1) % SCROLLBACK_LINES;
+        if (sb_count < SCROLLBACK_LINES) sb_count += 1;
+    }
     var y: usize = 1;
     while (y < VGA_HEIGHT) : (y += 1) {
         var x: usize = 0;
         while (x < VGA_WIDTH) : (x += 1) {
-            vgaBuffer()[(y - 1) * VGA_WIDTH + x] = vgaBuffer()[y * VGA_WIDTH + x];
+            textBuffer()[(y - 1) * VGA_WIDTH + x] = textBuffer()[y * VGA_WIDTH + x];
         }
     }
     const blank = vgaEntry(' ', colorByte());
     var x: usize = 0;
     while (x < VGA_WIDTH) : (x += 1) {
-        vgaBuffer()[(VGA_HEIGHT - 1) * VGA_WIDTH + x] = blank;
+        textBuffer()[(VGA_HEIGHT - 1) * VGA_WIDTH + x] = blank;
     }
 }
 
 pub fn putChar(ch: u8) void {
+    if (fb.active) {
+        fb.setColorFromVga(@intFromEnum(fg_color), @intFromEnum(bg_color));
+        fb.putChar(ch);
+        cursor_row = fb.cursor_row;
+        cursor_col = fb.cursor_col;
+        return;
+    }
+
+    // Exit scroll view on any input
+    if (scroll_view) {
+        exitScrollViewText();
+    }
+
     if (ch == '\n') {
         newline();
         return;
@@ -95,7 +168,7 @@ pub fn putChar(ch: u8) void {
         }
         return;
     }
-    vgaBuffer()[cursor_row * VGA_WIDTH + cursor_col] = vgaEntry(ch, colorByte());
+    textBuffer()[cursor_row * VGA_WIDTH + cursor_col] = vgaEntry(ch, colorByte());
     cursor_col += 1;
     if (cursor_col >= VGA_WIDTH) {
         newline();
@@ -152,4 +225,90 @@ pub fn writeDec(value: u64) void {
     while (i < 20) : (i += 1) {
         putChar(buf[i]);
     }
+}
+
+fn syncMirrorFromBuffer() void {
+    var y: usize = 0;
+    while (y < VGA_HEIGHT) : (y += 1) {
+        var x: usize = 0;
+        while (x < VGA_WIDTH) : (x += 1) {
+            screen_mirror[y][x] = textBuffer()[y * VGA_WIDTH + x];
+        }
+    }
+}
+
+fn restoreMirrorToBuffer() void {
+    var y: usize = 0;
+    while (y < VGA_HEIGHT) : (y += 1) {
+        var x: usize = 0;
+        while (x < VGA_WIDTH) : (x += 1) {
+            textBuffer()[y * VGA_WIDTH + x] = screen_mirror[y][x];
+        }
+    }
+}
+
+pub fn scrollBackText(lines: usize) void {
+    if (fb.active) return;
+    if (sb_count == 0) return;
+
+    if (!scroll_view) {
+        syncMirrorFromBuffer();
+        saved_screen = screen_mirror;
+        saved_cursor_row = cursor_row;
+        saved_cursor_col = cursor_col;
+        scroll_view = true;
+        scroll_view_line = sb_count;
+    }
+
+    if (scroll_view_line > lines) {
+        scroll_view_line -= lines;
+    } else {
+        scroll_view_line = 1;
+    }
+
+    renderScrollViewText();
+}
+
+pub fn scrollForwardText(lines: usize) void {
+    if (fb.active) return;
+    if (!scroll_view) return;
+
+    scroll_view_line += lines;
+    if (scroll_view_line >= sb_count) {
+        exitScrollViewText();
+        return;
+    }
+
+    renderScrollViewText();
+}
+
+fn renderScrollViewText() void {
+    var screen_row: usize = 0;
+    var sb_idx: usize = sb_count - scroll_view_line;
+
+    while (screen_row < VGA_HEIGHT and sb_idx < sb_count) : (screen_row += 1) {
+        const ring_idx = (sb_head + sb_idx) % SCROLLBACK_LINES;
+        var x: usize = 0;
+        while (x < VGA_WIDTH) : (x += 1) {
+            textBuffer()[screen_row * VGA_WIDTH + x] = scrollback[ring_idx][x];
+        }
+        sb_idx += 1;
+    }
+    while (screen_row < VGA_HEIGHT) : (screen_row += 1) {
+        const blank = vgaEntry(' ', 0x07);
+        var x: usize = 0;
+        while (x < VGA_WIDTH) : (x += 1) {
+            textBuffer()[screen_row * VGA_WIDTH + x] = blank;
+        }
+    }
+}
+
+pub fn exitScrollViewText() void {
+    if (fb.active) return;
+    if (!scroll_view) return;
+    scroll_view = false;
+    screen_mirror = saved_screen;
+    cursor_row = saved_cursor_row;
+    cursor_col = saved_cursor_col;
+    restoreMirrorToBuffer();
 }

@@ -62,6 +62,8 @@ pub fn unmask(irq: u8) void {
         port_io.outb(PIC1_DATA, port_io.inb(PIC1_DATA) & ~(@as(u8, 1) << @as(u3, @intCast(irq))));
     } else if (irq < 16) {
         port_io.outb(PIC2_DATA, port_io.inb(PIC2_DATA) & ~(@as(u8, 1) << @as(u3, @intCast(irq - 8))));
+        // Slave PIC connects to master via IRQ2 — must also unmask it
+        port_io.outb(PIC1_DATA, port_io.inb(PIC1_DATA) & ~(@as(u8, 1) << 2));
     }
 }
 
