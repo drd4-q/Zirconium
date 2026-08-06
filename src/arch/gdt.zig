@@ -22,7 +22,7 @@ const TssEntry = packed struct {
 
 extern fn load_gdt(ptr: u64) void;
 
-pub const Tss = extern struct {
+pub const Tss = packed struct {
     reserved0: u32 = 0,
     rsp0: u64 = 0,
     rsp1: u64 = 0,

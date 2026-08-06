@@ -1,7 +1,5 @@
-const root = @import("root");
 const port_io = @import("../arch/port.zig");
 const isr_mod = @import("../arch/isr.zig");
-const serial = @import("../system/serial.zig");
 
 const PIT_FREQ: u32 = 1193182;
 const TARGET_FREQ: u32 = 100;
@@ -25,14 +23,14 @@ pub fn init() void {
 
 fn irqHandler(_: *isr_mod.InterruptFrame) void {
     ticks += 1;
-    updateTime();
     if (@import("root").scheduler_ready) {
         @import("../kernel/scheduler.zig").scheduleTick();
     }
 }
 
 pub fn sleep(ms: u32) void {
-    const target = ticks + @as(u64, ms);
+    const target = ticks + @as(u64, ms) / 10; // 100 Hz tick = 10 ms
+    asm volatile ("sti");
     while (ticks < target) {
         asm volatile ("hlt");
     }

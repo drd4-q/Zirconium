@@ -39,8 +39,8 @@ pub fn allocPage() ?usize {
         if (bitmap[byte_idx] != 0xFF) {
             var bit: u8 = 0;
             while (bit < 8) : (bit += 1) {
-                if (bitmap[byte_idx] & (@as(u8, 1) << bit) == 0) {
-                    bitmap[byte_idx] |= @as(u8, 1) << bit;
+                if (bitmap[byte_idx] & (@as(u8, 1) << @intCast(bit)) == 0) {
+                    bitmap[byte_idx] |= @as(u8, 1) << @intCast(bit);
                     free_pages -= 1;
                     return (byte_idx * 8 + bit) * PAGE_SIZE;
                 }
@@ -60,7 +60,7 @@ pub fn allocPages(count: usize) ?usize {
 
         var bit: u8 = 0;
         while (bit < 8) : (bit += 1) {
-            if (bitmap[start_byte] & (@as(u8, 1) << bit) != 0) continue;
+            if (bitmap[start_byte] & (@as(u8, 1) << @intCast(bit)) != 0) continue;
 
             const start_page = start_byte * 8 + bit;
             var found: usize = 0;
@@ -69,7 +69,7 @@ pub fn allocPages(count: usize) ?usize {
             while (found < count and check_page < TOTAL_PAGES) {
                 const check_byte = check_page / 8;
                 const check_bit: u8 = @intCast(check_page % 8);
-                if (bitmap[check_byte] & (@as(u8, 1) << check_bit) != 0) break;
+                if (bitmap[check_byte] & (@as(u8, 1) << @intCast(check_bit)) != 0) break;
                 found += 1;
                 check_page += 1;
             }

@@ -14,7 +14,7 @@ pub fn getCurrentCr3() u64 {
 }
 
 pub fn invalidatePage(vaddr: u64) void {
-    asm volatile ("invlpg (%[addr])" : : [addr] "r" (vaddr) : "memory");
+    asm volatile ("invlpg (%[addr])" : : [addr] "r" (vaddr) : .{ .memory = true });
 }
 
 fn getTableEntry(table: [*]u64, index: u16) u64 {

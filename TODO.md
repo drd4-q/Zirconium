@@ -14,15 +14,15 @@
 ## What needs to be done
 
 ### Critical — boot stability
-- [ ] Verify kernel boots past GDT init (latest fix: TssEntry alignment)
-- [ ] Solve SSE #UD mystery (movups/xorps cause #UD despite CR4.OSFXSR=1)
+- [x] Verify kernel boots past GDT init (latest fix: TssEntry alignment)
+- [x] Solve SSE #UD mystery (movups/xorps cause #UD despite CR4.OSFXSR=1)
 - [ ] Test all shell commands after stable boot
 
 ### Lua integration
-- [ ] Uncomment lua import in shell.zig
-- [ ] Add `lua` command back to shell dispatcher
+- [x] Uncomment lua import in shell.zig
+- [x] Add `lua` command back to shell dispatcher
 - [ ] Test Lua REPL in kernel
-- [ ] Fix any compilation issues with Lua code on Zig 0.16
+- [x] Fix any compilation issues with Lua code on Zig 0.16
 
 ### User-space (ring 3)
 - [ ] ELF loader — load user binaries into address space

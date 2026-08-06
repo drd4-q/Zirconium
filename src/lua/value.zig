@@ -9,7 +9,9 @@ pub const ValueType = enum {
     function,
     native_fn,
     closure,
+    lua_func,   // user-defined Lua function (LuaFunc* stored as anyopaque)
 };
+
 
 pub const Value = struct {
     type: ValueType = .nil,
@@ -19,6 +21,8 @@ pub const Value = struct {
     table_val: ?*Table = null,
     closure_val: ?*Closure = null,
     native_fn_val: ?*const fn ([]Value) Value = null,
+    lua_func_val: ?*anyopaque = null,   // points to LuaFunc (defined in vm.zig)
+
 
     pub fn nil() Value {
         return .{ .type = .nil };
@@ -46,6 +50,10 @@ pub const Value = struct {
 
     pub fn fromClosure(c: *Closure) Value {
         return .{ .type = .closure, .closure_val = c };
+    }
+
+    pub fn fromLuaFunc(lf: anytype) Value {
+        return .{ .type = .lua_func, .lua_func_val = @ptrCast(lf) };
     }
 
     pub fn isTruthy(self: Value) bool {

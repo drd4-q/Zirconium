@@ -2,75 +2,70 @@
 
 ## What this is
 
-Bare-metal x86_64 OS kernel written in Zig. Boots via Multiboot (GRUB), sets up long mode (identity-mapped 2MB pages), runs a shell with programs, a TCP/IP network stack over an e1000 NIC, and a Lua interpreter. Ring 3 user-space support with syscall interface. Runs in QEMU.
+Bare-metal x86_64 OS kernel in Zig. Multiboot (GRUB) boot, identity-mapped 2MB pages, a shell with programs, a custom TCP/IP stack over an e1000 NIC, ring 3 user-space with INT 0x80 syscalls, and a minimal Lua interpreter. Runs in QEMU.
 
-## Build and run
+## Build & run
 
 ```bash
-./run.sh          # build → create ISO → launch QEMU (full cycle)
-zig build          # build only (output: zig-out/bin/kernel)
+zig build    # build only → zig-out/bin/kernel
+./run.sh     # build → grub-mkrescue ISO → launch QEMU (Linux/macOS)
+run.bat      # Windows equivalent (see below)
 ```
 
-`run.sh` calls `zig build`, then `grub-mkrescue` to produce `kernel.iso`, then launches QEMU. QEMU forwards host port 8080 → guest port 80.
+**Zig version: 0.16.0.** `build.zig.zon` says 0.14.0 but that is stale — `tools/bin2zig.zig` uses Zig 0.16 std APIs (`std.process.Init`, `std.Io.Dir`, `std.Options.debug_io`). `zig build` only compiles on 0.16.
 
-**External toolchain dependencies:** GNU `as` (assembler), `grub-mkrescue` (ISO creation), `qemu-system-x86_64`.
+**Toolchain deps:** GNU `as` (builds `src/entry.S` + `src/arch/isr.S`), `grub-mkrescue`, `qemu-system-x86_64`. The kernel requires the LLVM backend (`use_llvm = true`).
 
-**Minimum Zig version:** 0.14.0 (per `build.zig.zon`).
+**Run paths differ by OS:**
+- `./run.sh` boots the GRUB ISO. QEMU forwards host 8080 → guest 80.
+- `run.bat` (Windows, adds `C:\Program Files\qemu` to PATH) does NOT use GRUB: it patches the built ELF — sets `e_machine` (byte offset 18) from 0x3e to 3, saving it as `zig-out\bin\kernel32` — and boots with QEMU `-kernel`.
 
-**Target:** x86_64-freestanding, ReleaseFast preferred. Build strips SSE/AVX features via `cpu_features_sub`.
+**No test suite, no CI.** `zig build` is the only automated check. On crash/triple-fault, read `qemu.log` (QEMU runs with `-d int,cpu_reset -D qemu.log`).
+
+**Embedded user binary (codegen):** `build.zig` compiles `src/user/test.zig` (freestanding ELF, image base 0x2000000), runs host tool `tools/bin2zig.zig` to emit it as a Zig byte array, and injects it as the anonymous module `user_test_bin`. The shell `user` command loads it via `scheduler.addElfUserTask` (`src/kernel/elf.zig:loadElf`). Editing `src/user/test.zig` re-embeds it on the next `zig build`.
+
+**Network gotcha:** the guest is an HTTP *client* — `get`/`wget` fetches from the gateway 10.0.2.2 (= the host), and nothing listens on guest:80 despite the "open localhost:8080" comment in `run.sh`.
 
 ## Architecture
 
 **Boot sequence** (`src/entry.S` → `src/main.zig`):
-1. `entry.S`: 32-bit Multiboot entry → sets up identity-mapped page tables (4 PDs, 2MB pages) → enables long mode → jumps to `_start64` → calls `kernel_entry`
-2. `main.zig:kernel_entry`: serial init → GDT (with ring 3 segments) → system init (PIC, IDT) → PMM → VMM → kernel modules (scheduler tasks) → scheduler → shell
+1. `entry.S`: 32-bit Multiboot entry → zeroes 6 page tables → identity maps 4 GB (4 PDs × 512 × 2MB pages) → enables long mode → calls `kernel_entry`.
+2. `main.zig:35 kernel_entry`: serial → GDT (ring 3 segments + TSS) → system init (PIC, IDT) → PMM → VMM → `kernel_init.init()` (registers kernel tasks) → `scheduler.runAll()` → `shell.run()`.
 
 **Key source layout:**
-- `src/entry.S` — 32-bit asm bootstrap, page table setup, GDT, long mode switch
-- `src/arch/` — GDT (ring 0+3 segments, TSS), IDT (256 entries + syscall gate 0x80), PIC, port I/O, ISR handlers (`isr.S` + `isr.zig`)
-- `src/kernel/` — PMM, VMM, scheduler, task management, address spaces, syscall handler
-- `src/system/` — serial, VGA, init, panic handler
-- `src/drivers/` — keyboard, timer, PCI, e1000 NIC
-- `src/net/` — ARP, IP, ICMP, TCP, HTTP (custom stack)
-- `src/programs/` — shell commands (calc, clock, ping, web server, Lua REPL, etc.)
-- `src/shell.zig` — command dispatcher, shell loop
-- `src/lua/` — Minimal Lua interpreter (lexer/parser/VM/API bindings)
+- `src/arch/` — GDT, IDT (256 entries + INT 0x80 DPL3 gate), PIC, port I/O, ISR/IRQ handlers (`isr.S` + `isr.zig`)
+- `src/kernel/` — pmm, vmm, scheduler, task, address_space, elf, syscall
+- `src/system/` — serial, vga, init, panic
+- `src/drivers/` — keyboard, timer (PIT 100 Hz), pci, e1000
+- `src/net/` — arp, ip, icmp, tcp, http; `mod.zig` is the public interface
+- `src/programs/` — shell commands; `src/shell.zig:execute` dispatches them
+- `src/lua/` — interpreter; `mod.zig` re-exports lexer/parser/vm/value/api
 
-**No external Zig dependencies.** Everything is self-contained.
+**The scheduler is not preemptive:** `scheduler.runAll()` runs each registered task to completion in order (kernel tasks called directly; the user task via `jumpToUser`), then returns to the shell. `TIME_SLICE` is stored but unused.
 
-## User-space support
+## User-space (ring 3)
 
-**GDT segments:**
-- 0x08: Kernel code (DPL=0)
-- 0x10: Kernel data (DPL=0)
-- 0x18: User code (DPL=3)
-- 0x20: User data (DPL=3)
-- 0x38: TSS
+**GDT selectors** (`src/arch/gdt.zig`): 0x08 kernel code, 0x10 kernel data, 0x18|3 user code, 0x20|3 user data, 0x40 TSS (plus duplicate 0x28/0x30 kernel segments).
 
-**Syscall interface:** INT 0x80 with standard ABI (rax=syscall number, rdi/rsi/rdx=args). Syscalls: write(1), read(2), sleep(10), time(11), exit(60).
+**Syscalls:** INT 0x80; numbers in `src/kernel/syscall.zig` (rax=num, rdi/rsi/rdx=args). write=1, read=2, open=3, close=4, sleep=10, time=11, fork=57, exec=59, exit=60. Only write/read/sleep/time/exit are implemented; fork/exec/open/close return errors.
 
-**Address space management** (`src/kernel/address_space.zig`): Per-process PML4 page tables, create/destroy/switch, user page mapping with PAGE_USER flag.
-
-**Task structure** (`src/kernel/task.zig`): Supports kernel and user tasks with separate kernel/user stacks, saved register state (rax-r15, rip, rsp, rflags, cs, ss), and per-task address space.
+**Address spaces** (`src/kernel/address_space.zig`): per-task PML4, create/destroy/switch, user pages mapped with PAGE_USER. `user` shell command loads the compiled-in ELF into a fresh address space and jumps to ring 3.
 
 ## Lua interpreter
 
-Minimal Lua 5.x port in Zig (`src/lua/`):
-- **Lexer** (`src/lua/lexer.zig`): Tokenizer for Lua source
-- **Parser** (`src/lua/parser.zig`): Recursive descent parser → AST
-- **VM** (`src/lua/vm.zig`): Tree-walking interpreter with global variables
-- **API** (`src/lua/api.zig`): Kernel bindings via syscalls (vga_write, serial_write, sleep, read_key, print, type, tostring, tonumber)
-- **REPL** (`src/programs/lua.zig`): Interactive Lua shell, run via `lua` command
+`src/lua/` — lexer, recursive-descent parser → AST, tree-walking VM. Runs via the `lua` shell command (`src/programs/lua.zig`; 128 KB `FixedBufferAllocator` heap).
 
-Supported Lua features: variables, arithmetic/comparison/logical operators, if/elseif/else, while/repeat loops, numeric for loops, functions (declared but not yet callable), string concatenation.
+- Native bindings live in `src/lua/api.zig` and are registered in `vm.zig:VM.init` (globals: `print`, `vga_write`, `serial_write`, `sleep`, `read_key`, `time`, plus `math.*` and `string.*` tables). Add new bindings there.
+- User-defined `function` definitions are parsed and callable (`vm.callFunction`).
+- No Lua modules/standard libraries beyond the above.
 
 ## Conventions
 
-- Root module is `src/main.zig`. Other modules import it via `@import("root")` to access public decls (e.g. `root.vga`, `root.serial`, `root.scheduler`).
-- Kernel entry point is `kernel_entry` (exported in `src/main.zig:30`), called from assembly. The assembler files (`src/entry.S`, `src/arch/isr.S`) are built with GNU `as`, not Zig's built-in assembler.
-- VGA output is the primary user interface. Serial (`/dev/ttyS0`) is for debug logging.
-- Hardcoded network config: IP `10.0.2.15`, gateway `10.0.2.2` (QEMU user-mode default).
-- New shell commands go in `src/programs/`, imported and dispatched in `shell.zig:execute`.
-- New Lua bindings go in `src/lua/api.zig`, registered in `src/lua/vm.zig:init`.
-- Inline assembly uses Zig 0.14+ clobber syntax: `: .{ .rax = true, .memory = true }` (not string lists).
-- `std.ArrayList` in Zig 0.14+ has no `.init()` — use `.empty` or fixed-size stack arrays instead.
+- `src/main.zig` is the root module and re-exports `vga`, `serial`, `scheduler`, `pmm`, `vmm`; other files reach them via `@import("root")` (e.g. `root.vga`).
+- `kernel_entry` is exported `callconv(.c)` and called from asm; `syscall_handler` and `main.zig:panic` are similarly exported for asm/ABI use. `main.zig` defines its own `pub fn panic` (prints to VGA+serial, halts) — the std one is unused.
+- Assembler files are built with GNU `as`. Inline asm uses Zig 0.16+ clobber syntax: `: .{ .rax = true, .memory = true }`.
+- VGA is the user-facing UI; serial (`/dev/ttyS0`) is debug logging. Don't use std output facilities in kernel code.
+- Hardcoded network config: IP 10.0.2.15, gateway 10.0.2.2, HTTP always targets 10.0.2.2:80.
+- New shell commands: create `src/programs/<name>.zig`, then import + dispatch it in `shell.zig:execute` and list it in `printHelp`.
+- Build target: x86_64-freestanding, ReleaseFast default; SSE3–AVX2 stripped via `cpu_features_sub` in `build.zig`.
+- No `.gitignore`: `.zig-cache/`, `zig-out/`, `isodir/`, `kernel.iso`, `qemu.log`, `*.o` are build noise — don't commit them.

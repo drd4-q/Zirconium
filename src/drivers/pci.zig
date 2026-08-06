@@ -107,7 +107,7 @@ pub fn scan() void {
 
 pub fn enableBusMaster(bus: u8, dev: u8, func: u8) void {
     const v08 = readConfig(bus, dev, func, 0x04);
-    writeConfig(bus, dev, func, 0x04, v08 | (1 << 2) | 1);
+    writeConfig(bus, dev, func, 0x04, v08 | (1 << 2) | (1 << 1) | 1);
 }
 
 pub fn findDevice(vendor: u16, dev_id: u16) ?*PciDevice {

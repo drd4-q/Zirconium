@@ -2,52 +2,32 @@ const std = @import("std");
 const ValueMod = @import("value.zig");
 const Value = ValueMod.Value;
 
-// Syscall numbers
-const SYS_WRITE: u64 = 1;
-const SYS_READ: u64 = 2;
-const SYS_SLEEP: u64 = 10;
-const SYS_TIME: u64 = 11;
+// Lua API runs in kernel mode — call kernel subsystems directly.
+// No syscall instruction needed (that's only for ring-3 user programs).
+const vga = @import("root").vga;
+const serial = @import("root").serial;
+const timer = @import("../drivers/timer.zig");
+const kb = @import("../drivers/keyboard.zig");
 
-fn syscall3(num: u64, arg1: u64, arg2: u64, arg3: u64) u64 {
-    return asm volatile (
-        \\syscall
-        : [ret] "={rax}" (-> u64),
-        : [num] "{rax}" (num),
-          [arg1] "{rdi}" (arg1),
-          [arg2] "{rsi}" (arg2),
-          [arg3] "{rdx}" (arg3),
-        : .{ .rcx = true, .r11 = true, .memory = true }
-    );
-}
-
-fn syscall1(num: u64, arg1: u64) u64 {
-    return asm volatile (
-        \\syscall
-        : [ret] "={rax}" (-> u64),
-        : [num] "{rax}" (num),
-          [arg1] "{rdi}" (arg1),
-        : .{ .rcx = true, .r11 = true, .memory = true }
-    );
+fn vgaWriteKernel(str: []const u8) void {
+    vga.write(str);
 }
 
 fn serialWriteKernel(str: []const u8) void {
-    _ = syscall3(SYS_WRITE, 3, @intFromPtr(str.ptr), str.len);
-}
-
-fn vgaWriteKernel(str: []const u8) void {
-    _ = syscall3(SYS_WRITE, 1, @intFromPtr(str.ptr), str.len);
-}
-
-fn readFromStdin(buf: []u8) usize {
-    return syscall3(SYS_READ, 0, @intFromPtr(buf.ptr), buf.len);
+    serial.serialWrite(str);
 }
 
 fn sleepKernel(ms: u64) void {
-    _ = syscall1(SYS_SLEEP, ms);
+    timer.sleep(@intCast(ms));
 }
 
 fn getTimeKernel() u64 {
-    return syscall1(SYS_TIME, 0);
+    timer.updateTime();
+    return @as(u64, timer.hours) * 3600 + @as(u64, timer.minutes) * 60 + @as(u64, timer.seconds);
+}
+
+fn readKeyKernel() ?u8 {
+    return kb.pollKey();
 }
 
 pub fn luaPrint(args: []Value) Value {
@@ -73,6 +53,7 @@ pub fn luaPrint(args: []Value) Value {
                 const str = arg.string_val orelse "";
                 vgaWriteKernel(str);
             },
+            .function, .native_fn, .closure, .lua_func => vgaWriteKernel("<function>"),
             else => vgaWriteKernel("<value>"),
         }
     }
@@ -88,7 +69,7 @@ pub fn luaType(args: []Value) Value {
         .number => "number",
         .string => "string",
         .table => "table",
-        .function, .native_fn, .closure => "function",
+        .function, .native_fn, .closure, .lua_func => "function",
     };
     return Value.fromString(type_name);
 }
@@ -107,6 +88,7 @@ pub fn luaToString(args: []Value) Value {
             return Value.fromString(str);
         },
         .string => return args[0],
+        .function, .native_fn, .closure, .lua_func => return Value.fromString("<function>"),
         else => return Value.fromString("<value>"),
     }
 }
@@ -162,10 +144,45 @@ pub fn luaSleep(args: []Value) Value {
 
 pub fn luaReadKey(args: []Value) Value {
     _ = args;
-    var buf: [1]u8 = undefined;
-    const count = readFromStdin(&buf);
-    if (count > 0) {
-        return Value.fromString(buf[0..1]);
+    // Poll keyboard — returns ASCII code as number, or nil if no key pressed.
+    // Lua code: local ch = read_key(); if ch then vga_write(tostring(ch)) end
+    if (readKeyKernel()) |ch| {
+        return Value.fromNumber(@floatFromInt(ch));
     }
+    return Value.nil();
+}
+
+// Additional Lua standard library functions
+pub fn luaTime(args: []Value) Value {
+    _ = args;
+    return Value.fromNumber(@floatFromInt(getTimeKernel()));
+}
+
+pub fn luaError(args: []Value) Value {
+    if (args.len > 0 and args[0].type == .string) {
+        vgaWriteKernel("error: ");
+        vgaWriteKernel(args[0].string_val orelse "(nil)");
+        vgaWriteKernel("\n");
+    }
+    return Value.nil();
+}
+
+pub fn luaAssert(args: []Value) Value {
+    if (args.len == 0 or !args[0].isTruthy()) {
+        vgaWriteKernel("assertion failed!\n");
+    }
+    if (args.len > 0) return args[0];
+    return Value.nil();
+}
+
+pub fn luaIpairs(args: []Value) Value {
+    _ = args;
+    // Stub — not fully implemented
+    return Value.nil();
+}
+
+pub fn luaPairs(args: []Value) Value {
+    _ = args;
+    // Stub — not fully implemented
     return Value.nil();
 }

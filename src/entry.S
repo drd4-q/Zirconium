@@ -130,7 +130,7 @@ _start:
     movl %eax, %cr3
 
     movl %cr4, %eax
-    orl $(1 << 5), %eax
+    orl $((1 << 5) | (1 << 9) | (1 << 10)), %eax
     movl %eax, %cr4
 
     movl $0xC0000080, %ecx
@@ -139,7 +139,8 @@ _start:
     wrmsr
 
     movl %cr0, %eax
-    orl $((1 << 31) | (1 << 0)), %eax
+    andl $0xFFFFFFFB, %eax
+    orl $((1 << 1) | (1 << 31) | (1 << 0)), %eax
     movl %eax, %cr0
 
     lgdt gdt64_pointer

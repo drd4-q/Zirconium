@@ -1,9 +1,7 @@
 const std = @import("std");
 const root = @import("root");
 const vga = root.vga;
-const port = root.serial;
 const kb = @import("drivers/keyboard.zig");
-const timer = @import("drivers/timer.zig");
 const pci = @import("drivers/pci.zig");
 const e1000 = @import("drivers/e1000.zig");
 const net = @import("net/mod.zig");
@@ -19,29 +17,22 @@ const sysinfo = @import("programs/sysinfo.zig");
 const mem_mod = @import("programs/mem.zig");
 const fib = @import("programs/fib.zig");
 const matrix = @import("programs/matrix.zig");
-// const lua_prog = @import("programs/lua.zig");
+const lua_prog = @import("programs/lua.zig");
+
 
 var cmd_buf: [128]u8 = undefined;
 
 pub fn run() void {
     kb.init();
-    timer.init();
-
-    port.serialWrite("[SHELL] Timer and keyboard IRQ registered\n");
 
     pci.scan();
-    port.serialWrite("[SHELL] PCI scanned, ");
-    port.serialWriteDec(pci.device_count);
-    port.serialWrite(" devices\n");
 
     if (pci.findByClass(0x02, 0x00)) |dev| {
-        port.serialWrite("[SHELL] Found network device\n");
         _ = e1000.init(dev);
         net.init();
     }
 
     root.scheduler_ready = true;
-    port.serialWrite("[SHELL] Scheduler enabled\n");
 
     vga.clear();
     printBanner();
@@ -120,7 +111,22 @@ fn execute(cmd: []const u8) void {
         showPs();
     } else if (eql(cmd_name, "fib")) {
         fib.run();
+    } else if (eql(cmd_name, "lua")) {
+        lua_prog.run();
+        vga.clear();
+        printBanner();
+    } else if (eql(cmd_name, "user")) {
+        const sched = root.scheduler;
+        const user_test_bin = @import("user_test_bin");
+        vga.write("[SHELL] Spawning user-space ELF task...\n");
+        if (sched.addElfUserTask(&user_test_bin.data)) |task_id| {
+            _ = task_id;
+            sched.runAll();
+        } else {
+            vga.write("[SHELL] Error: failed to spawn user task\n");
+        }
     } else if (eql(cmd_name, "matrix")) {
+
         matrix.run();
         vga.clear();
         printBanner();
@@ -129,7 +135,7 @@ fn execute(cmd: []const u8) void {
     } else if (eql(cmd_name, "halt")) {
         vga.setColor(.light_red, .black);
         vga.write("\n  System halted.\n");
-        port.serialWrite("\n[BOOT] System halted by user.\n");
+        root.serial.serialWrite("\n[BOOT] System halted by user.\n");
         while (true) {
             asm volatile ("cli; hlt");
         }
@@ -216,7 +222,9 @@ fn printHelp() void {
     vga.write("    color         VGA color palette demo\n");
     vga.write("    clock         Real-time clock\n");
     vga.write("    fib           Fibonacci sequence (F0-F40)\n");
-    vga.write("    matrix        Matrix rain animation\n\n");
+    vga.write("    matrix        Matrix rain animation\n");
+    vga.write("    lua           Lua 5.x REPL interpreter\n\n");
+
     vga.write("  Network:\n");
     vga.write("    net           Network interface info\n");
     vga.write("    ping [ip]     Ping (default: gateway)\n");

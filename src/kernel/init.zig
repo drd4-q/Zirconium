@@ -23,8 +23,13 @@ pub fn init() void {
 
     scheduler.init();
 
+    @import("../drivers/timer.zig").init();
+
     _ = scheduler.addKernelTask(&idleTask);
     _ = scheduler.addKernelTask(&helloTask);
+
+    const user_test_bin = @import("user_test_bin");
+    _ = scheduler.addElfUserTask(&user_test_bin.data);
 
     vga.setColor(.magenta, .black);
     vga.write("[KERNEL] Kernel init done, ");

@@ -33,14 +33,14 @@ SECTIONS
     }
 
     __kernel_start = ADDR(.multiboot);
-    __kernel_end = ADDR(.bss);
-
     .stack (NOLOAD) : ALIGN(16)
     {
         __stack_bottom = .;
         . += 16384;
         __stack_top = .;
     }
+
+    __kernel_end = __stack_top;
 
     /DISCARD/ :
     {

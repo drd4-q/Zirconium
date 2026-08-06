@@ -3,7 +3,10 @@ const pmm = @import("pmm.zig");
 const vmm = @import("vmm.zig");
 const serial = @import("../system/serial.zig");
 
-pub const USER_BASE: u64 = 0x400000; // User code starts at 4MB (after kernel)
+extern const __kernel_start: u8;
+extern const __kernel_end: u8;
+
+pub const USER_BASE: u64 = 0x2000000; // User code starts at 32MB (after kernel)
 pub const USER_STACK_TOP: u64 = 0x80000000; // 2GB - user stack top
 pub const USER_STACK_SIZE: u64 = 0x10000; // 64KB user stack
 
@@ -28,7 +31,20 @@ pub const AddressSpace = struct {
         serial.serialWriteHex(pml4_page);
         serial.serialWrite("\n");
 
-        return .{ .pml4_phys = pml4_page };
+        const addr_space = AddressSpace{ .pml4_phys = pml4_page };
+        const kernel_start = @intFromPtr(&__kernel_start);
+        const kernel_end = @intFromPtr(&__kernel_end);
+        
+        serial.serialWrite("[ADDRSPACE] kernel_start = 0x");
+        serial.serialWriteHex(kernel_start);
+        serial.serialWrite(", kernel_end = 0x");
+        serial.serialWriteHex(kernel_end);
+        serial.serialWrite("\n");
+        
+        // Map kernel identity region in user PML4 (no PAGE_USER)
+        addr_space.mapKernelRange(0, 0, kernel_end, vmm.PAGE_WRITE);
+
+        return addr_space;
     }
 
     pub fn destroy(self: AddressSpace) void {
@@ -85,8 +101,8 @@ pub const AddressSpace = struct {
         const pt_idx: u16 = @intCast((vaddr >> 12) & 0x1FF);
 
         const pml4: [*]u64 = @ptrFromInt(self.pml4_phys);
-        const pdpt = nextPageTable(pml4, pml4_idx, vmm.PAGE_WRITE);
-        const pd = nextPageTable(pdpt, pdpt_idx, vmm.PAGE_WRITE);
+        const pdpt = nextPageTable(pml4, pml4_idx, vmm.PAGE_WRITE | vmm.PAGE_USER);
+        const pd = nextPageTable(pdpt, pdpt_idx, vmm.PAGE_WRITE | vmm.PAGE_USER);
 
         if (flags & vmm.PAGE_SIZE != 0) {
             setTableEntry(pd, pd_idx, paddr, flags | vmm.PAGE_PRESENT);
@@ -94,14 +110,14 @@ pub const AddressSpace = struct {
             return;
         }
 
-        const pt = nextPageTable(pd, pd_idx, vmm.PAGE_WRITE);
+        const pt = nextPageTable(pd, pd_idx, vmm.PAGE_WRITE | vmm.PAGE_USER);
         setTableEntry(pt, pt_idx, paddr, flags | vmm.PAGE_PRESENT);
         vmm.invalidatePage(vaddr);
     }
 
     pub fn mapUserRange(self: AddressSpace, vaddr_start: u64, paddr_start: u64, size: u64, flags: u64) void {
-        var vaddr = vaddr_start & ~0xFFF;
-        var paddr = paddr_start & ~0xFFF;
+        var vaddr = vaddr_start & ~@as(u64, 0xFFF);
+        var paddr = paddr_start & ~@as(u64, 0xFFF);
         const end = vaddr_start + size;
 
         while (vaddr < end) : ({
@@ -109,6 +125,19 @@ pub const AddressSpace = struct {
             paddr += 0x1000;
         }) {
             self.mapUserPage(vaddr, paddr, flags | vmm.PAGE_USER);
+        }
+    }
+
+    pub fn mapKernelRange(self: AddressSpace, vaddr_start: u64, paddr_start: u64, size: u64, flags: u64) void {
+        var vaddr = vaddr_start & ~@as(u64, 0xFFF);
+        var paddr = paddr_start & ~@as(u64, 0xFFF);
+        const end = vaddr_start + size;
+
+        while (vaddr < end) : ({
+            vaddr += 0x1000;
+            paddr += 0x1000;
+        }) {
+            self.mapUserPage(vaddr, paddr, flags);
         }
     }
 };

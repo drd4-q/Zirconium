@@ -19,29 +19,53 @@ pub const VM = struct {
 
     pub fn init(allocator: std.mem.Allocator) VM {
         var globals = Table.init(allocator) orelse unreachable;
-        // Register built-in functions
-        const print_val = Value.fromNativeFn(&Api.luaPrint);
-        globals.set(Value.fromString("print"), print_val, allocator);
-        const type_val = Value.fromNativeFn(&Api.luaType);
-        globals.set(Value.fromString("type"), type_val, allocator);
-        const tostring_val = Value.fromNativeFn(&Api.luaToString);
-        globals.set(Value.fromString("tostring"), tostring_val, allocator);
-        const tonumber_val = Value.fromNativeFn(&Api.luaToNumber);
-        globals.set(Value.fromString("tonumber"), tonumber_val, allocator);
-        const vga_write_val = Value.fromNativeFn(&Api.luaVgaWrite);
-        globals.set(Value.fromString("vga_write"), vga_write_val, allocator);
-        const serial_write_val = Value.fromNativeFn(&Api.luaSerialWrite);
-        globals.set(Value.fromString("serial_write"), serial_write_val, allocator);
-        const sleep_val = Value.fromNativeFn(&Api.luaSleep);
-        globals.set(Value.fromString("sleep"), sleep_val, allocator);
-        const read_key_val = Value.fromNativeFn(&Api.luaReadKey);
-        globals.set(Value.fromString("read_key"), read_key_val, allocator);
+
+        // === Core functions ===
+        globals.set(Value.fromString("print"),   Value.fromNativeFn(&Api.luaPrint),   allocator);
+        globals.set(Value.fromString("type"),    Value.fromNativeFn(&Api.luaType),    allocator);
+        globals.set(Value.fromString("tostring"),Value.fromNativeFn(&Api.luaToString),allocator);
+        globals.set(Value.fromString("tonumber"),Value.fromNativeFn(&Api.luaToNumber),allocator);
+        globals.set(Value.fromString("assert"),  Value.fromNativeFn(&Api.luaAssert),  allocator);
+        globals.set(Value.fromString("error"),   Value.fromNativeFn(&Api.luaError),   allocator);
+        globals.set(Value.fromString("ipairs"),  Value.fromNativeFn(&Api.luaIpairs),  allocator);
+        globals.set(Value.fromString("pairs"),   Value.fromNativeFn(&Api.luaPairs),   allocator);
+
+        // === Kernel API ===
+        globals.set(Value.fromString("vga_write"),   Value.fromNativeFn(&Api.luaVgaWrite),   allocator);
+        globals.set(Value.fromString("serial_write"), Value.fromNativeFn(&Api.luaSerialWrite), allocator);
+        globals.set(Value.fromString("sleep"),        Value.fromNativeFn(&Api.luaSleep),       allocator);
+        globals.set(Value.fromString("read_key"),     Value.fromNativeFn(&Api.luaReadKey),     allocator);
+        globals.set(Value.fromString("time"),         Value.fromNativeFn(&Api.luaTime),        allocator);
+
+        // === math table ===
+        const math_table = allocator.create(Table) catch unreachable;
+        math_table.* = Table.init(allocator) orelse unreachable;
+        math_table.set(Value.fromString("floor"),  Value.fromNativeFn(&luaMathFloor),  allocator);
+        math_table.set(Value.fromString("ceil"),   Value.fromNativeFn(&luaMathCeil),   allocator);
+        math_table.set(Value.fromString("abs"),    Value.fromNativeFn(&luaMathAbs),    allocator);
+        math_table.set(Value.fromString("sqrt"),   Value.fromNativeFn(&luaMathSqrt),   allocator);
+        math_table.set(Value.fromString("max"),    Value.fromNativeFn(&luaMathMax),    allocator);
+        math_table.set(Value.fromString("min"),    Value.fromNativeFn(&luaMathMin),    allocator);
+        math_table.set(Value.fromString("pi"),     Value.fromNumber(3.14159265358979), allocator);
+        math_table.set(Value.fromString("huge"),   Value.fromNumber(std.math.inf(f64)), allocator);
+        globals.set(Value.fromString("math"), Value.fromTable(math_table), allocator);
+
+        // === string table ===
+        const str_table = allocator.create(Table) catch unreachable;
+        str_table.* = Table.init(allocator) orelse unreachable;
+        str_table.set(Value.fromString("len"),  Value.fromNativeFn(&luaStringLen),  allocator);
+        str_table.set(Value.fromString("sub"),  Value.fromNativeFn(&luaStringSub),  allocator);
+        str_table.set(Value.fromString("rep"),  Value.fromNativeFn(&luaStringRep),  allocator);
+        str_table.set(Value.fromString("upper"),Value.fromNativeFn(&luaStringUpper),allocator);
+        str_table.set(Value.fromString("lower"),Value.fromNativeFn(&luaStringLower),allocator);
+        globals.set(Value.fromString("string"), Value.fromTable(str_table), allocator);
 
         return .{
             .globals = globals,
             .allocator = allocator,
         };
     }
+
 
     pub fn eval(self: *VM, stmts: []ast.Stmt) VMError!Value {
         var result = Value.nil();
@@ -133,14 +157,21 @@ pub const VM = struct {
                 }
                 break :blk try self.execBlock(fs.body);
             },
-            .function_def => blk: {
-                // Function definitions are treated as expressions for now
-                break :blk Value.nil();
+            .function_def => |fd| blk: {
+                // Anonymous function — store as LuaFunc value
+                const lf = self.allocator.create(LuaFunc) catch break :blk Value.nil();
+                lf.* = .{ .params = fd.params, .body = fd.body };
+                break :blk Value.fromLuaFunc(lf);
             },
             .local_function_def => |lfd| blk: {
-                self.globals.set(Value.fromString(lfd.name), Value.nil(), self.allocator);
+                // Named local function — store in globals
+                const lf = self.allocator.create(LuaFunc) catch break :blk Value.nil();
+                lf.* = .{ .params = lfd.params, .body = lfd.body };
+                const fn_val = Value.fromLuaFunc(lf);
+                self.globals.set(Value.fromString(lfd.name), fn_val, self.allocator);
                 break :blk Value.nil();
             },
+
             .return_stmt => |rs| blk: {
                 if (rs.len > 0) {
                     break :blk try self.evalExpr(rs[0]);
@@ -206,10 +237,23 @@ pub const VM = struct {
                 break :blk Value.fromTable(table);
             },
             .method_call => |mc| blk: {
-                const base = try self.evalExpr(mc.base.*);
-                _ = mc.method;
-                _ = mc.args;
-                break :blk base;
+                // table:method(args) => look up method in table, call with table as first arg
+                const base_val = try self.evalExpr(mc.base.*);
+                var method_val = Value.nil();
+                if (base_val.type == .table) {
+                    if (base_val.table_val) |t| {
+                        method_val = t.get(Value.fromString(mc.method)) orelse Value.nil();
+                    }
+                }
+                var args: [33]Value = undefined;
+                args[0] = base_val; // self
+                var arg_count: usize = 1;
+                for (mc.args) |arg| {
+                    if (arg_count >= 33) break;
+                    args[arg_count] = try self.evalExpr(arg);
+                    arg_count += 1;
+                }
+                break :blk try self.callFunction(method_val, args[0..arg_count]);
             },
         };
     }
@@ -347,11 +391,60 @@ pub const VM = struct {
         }
     }
 
-    fn callFunction(_: *VM, func: Value, args: []Value) VMError!Value {
+    fn callFunction(self: *VM, func: Value, args: []Value) VMError!Value {
         switch (func.type) {
             .native_fn => {
                 if (func.native_fn_val) |f| {
                     return f(args);
+                }
+                return Value.nil();
+            },
+            .lua_func => {
+                // Call a user-defined Lua function
+                if (func.lua_func_val) |lf_opaque| {
+                    const lf: *LuaFunc = @ptrCast(@alignCast(lf_opaque));
+                    // Save old globals state by creating a local scope overlay
+                    // (simple approach: bind params into globals, save/restore old values)
+                    var saved: [32]struct { name: []const u8, val: Value } = undefined;
+                    const param_count = @min(lf.params.len, args.len);
+                    var saved_count: usize = 0;
+
+                    // Bind parameters
+                    var i: usize = 0;
+                    while (i < param_count) : (i += 1) {
+                        saved[saved_count] = .{
+                            .name = lf.params[i],
+                            .val = self.globals.get(Value.fromString(lf.params[i])) orelse Value.nil(),
+                        };
+                        saved_count += 1;
+                        self.globals.set(Value.fromString(lf.params[i]), args[i], self.allocator);
+                    }
+                    // Bind missing params to nil
+                    while (i < lf.params.len) : (i += 1) {
+                        saved[saved_count] = .{
+                            .name = lf.params[i],
+                            .val = self.globals.get(Value.fromString(lf.params[i])) orelse Value.nil(),
+                        };
+                        saved_count += 1;
+                        self.globals.set(Value.fromString(lf.params[i]), Value.nil(), self.allocator);
+                    }
+
+                    const result = self.execBlock(lf.body) catch |err| {
+                        // Restore params on error
+                        var j: usize = 0;
+                        while (j < saved_count) : (j += 1) {
+                            self.globals.set(Value.fromString(saved[j].name), saved[j].val, self.allocator);
+                        }
+                        return err;
+                    };
+
+                    // Restore param bindings
+                    var j: usize = 0;
+                    while (j < saved_count) : (j += 1) {
+                        self.globals.set(Value.fromString(saved[j].name), saved[j].val, self.allocator);
+                    }
+
+                    return result;
                 }
                 return Value.nil();
             },
@@ -360,3 +453,83 @@ pub const VM = struct {
         return Value.nil();
     }
 };
+
+// ==============================
+// LuaFunc — user-defined function
+// ==============================
+pub const LuaFunc = struct {
+    params: []const []const u8,
+    body: []ast.Stmt,
+};
+
+// ==============================
+// math.* native implementations
+// ==============================
+fn luaMathFloor(args: []Value) Value {
+    if (args.len == 0 or args[0].type != .number) return Value.nil();
+    return Value.fromNumber(@floor(args[0].number_val));
+}
+fn luaMathCeil(args: []Value) Value {
+    if (args.len == 0 or args[0].type != .number) return Value.nil();
+    return Value.fromNumber(@ceil(args[0].number_val));
+}
+fn luaMathAbs(args: []Value) Value {
+    if (args.len == 0 or args[0].type != .number) return Value.nil();
+    return Value.fromNumber(@abs(args[0].number_val));
+}
+fn luaMathSqrt(args: []Value) Value {
+    if (args.len == 0 or args[0].type != .number) return Value.nil();
+    return Value.fromNumber(std.math.sqrt(args[0].number_val));
+}
+fn luaMathMax(args: []Value) Value {
+    if (args.len == 0) return Value.nil();
+    var m = args[0].number_val;
+    for (args[1..]) |a| {
+        if (a.type == .number and a.number_val > m) m = a.number_val;
+    }
+    return Value.fromNumber(m);
+}
+fn luaMathMin(args: []Value) Value {
+    if (args.len == 0) return Value.nil();
+    var m = args[0].number_val;
+    for (args[1..]) |a| {
+        if (a.type == .number and a.number_val < m) m = a.number_val;
+    }
+    return Value.fromNumber(m);
+}
+
+// ==============================
+// string.* native implementations
+// ==============================
+fn luaStringLen(args: []Value) Value {
+    if (args.len == 0 or args[0].type != .string) return Value.fromNumber(0);
+    const s = args[0].string_val orelse "";
+    return Value.fromNumber(@floatFromInt(s.len));
+}
+fn luaStringSub(args: []Value) Value {
+    if (args.len < 2 or args[0].type != .string) return Value.nil();
+    const s = args[0].string_val orelse "";
+    const i_raw: isize = @intFromFloat(args[1].number_val);
+    const j_raw: isize = if (args.len >= 3 and args[2].type == .number)
+        @intFromFloat(args[2].number_val)
+    else
+        @intCast(s.len);
+    const len: isize = @intCast(s.len);
+    const i: usize = @intCast(@max(0, if (i_raw < 0) len + i_raw else i_raw - 1));
+    const j: usize = @intCast(@min(len, if (j_raw < 0) len + j_raw + 1 else j_raw));
+    if (i >= j or i >= s.len) return Value.fromString("");
+    return Value.fromString(s[i..@min(j, s.len)]);
+}
+fn luaStringRep(args: []Value) Value {
+    _ = args;
+    // Stub — requires allocator, skip for now
+    return Value.fromString("");
+}
+fn luaStringUpper(args: []Value) Value {
+    _ = args;
+    return Value.fromString(""); // Stub
+}
+fn luaStringLower(args: []Value) Value {
+    _ = args;
+    return Value.fromString(""); // Stub
+}

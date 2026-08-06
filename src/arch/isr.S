@@ -116,11 +116,15 @@ isr_common:
     iretq
 
 # Syscall entry point (INT 0x80)
+# INT 0x80 is a normal IDT interrupt gate (DPL=3).
+# When called from ring 3, the CPU automatically switches RSP to TSS.RSP0
+# and pushes SS, RSP, RFLAGS, CS, RIP onto the kernel stack.
+# We push a fake error_code=0 and int_num=0x80 to match InterruptFrame layout,
+# then call syscall_handler exactly like isr_common calls isr_handler.
 .global syscall_entry
 syscall_entry:
-    swapgs
-    movq %rsp, %gs:16       # Save user RSP in per-CPU area (we'll use a fixed address)
-    movq %gs:8, %rsp        # Load kernel RSP
+    pushq $0          # error_code = 0
+    pushq $0x80       # int_num = 0x80
 
     pushq %rax
     pushq %rbx
@@ -157,7 +161,7 @@ syscall_entry:
     popq %rbx
     popq %rax
 
-    swapgs
+    addq $16, %rsp    # pop int_num + error_code
     iretq
 
 .global load_gdt
@@ -182,3 +186,65 @@ load_gdt:
 load_idt:
     lidt (%rdi)
     ret
+
+# switch_to_user(rdi=user_rsp, rsi=user_rip, rdx=user_cs, rcx=user_ss, r8=user_rflags)
+.global switch_to_user
+switch_to_user:
+    # Save kernel callee-saved registers
+    pushq %rbx
+    pushq %rbp
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+
+    # Save kernel stack pointer
+    movq %rsp, scheduler_kernel_rsp(%rip)
+
+    # Push iretq frame
+    pushq %rcx  # SS
+    pushq %rdi  # RSP
+    pushq %r8   # RFLAGS
+    pushq %rdx  # CS
+    pushq %rsi  # RIP
+
+    # Clear all GPRs to prevent information leak to user space
+    xorq %rax, %rax
+    xorq %rbx, %rbx
+    xorq %rcx, %rcx
+    xorq %rdx, %rdx
+    xorq %rsi, %rsi
+    xorq %rdi, %rdi
+    xorq %rbp, %rbp
+    xorq %r8,  %r8
+    xorq %r9,  %r9
+    xorq %r10, %r10
+    xorq %r11, %r11
+    xorq %r12, %r12
+    xorq %r13, %r13
+    xorq %r14, %r14
+    xorq %r15, %r15
+
+    iretq
+
+# sys_exit_return()
+.global sys_exit_return
+sys_exit_return:
+    # Switch back to kernel stack
+    movq scheduler_kernel_rsp(%rip), %rsp
+
+    # Restore kernel callee-saved registers
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbp
+    popq %rbx
+
+    ret
+
+.data
+.global scheduler_kernel_rsp
+scheduler_kernel_rsp:
+    .quad 0
+

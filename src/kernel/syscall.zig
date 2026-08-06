@@ -21,6 +21,7 @@ pub const SyscallNumber = enum(u64) {
 };
 
 var kernel_rsp: u64 = 0;
+extern fn sys_exit_return() callconv(.c) noreturn;
 
 pub fn initKernelStack(rsp: u64) void {
     kernel_rsp = rsp;
@@ -99,14 +100,28 @@ pub export fn syscall_handler(frame: *isr_mod.InterruptFrame) callconv(.c) void 
             frame.rax = total_seconds;
         },
         .SYS_EXIT => {
+            const exit_code = frame.rdi;
             // Mark current task as finished
             if (scheduler.current_task >= 0) {
                 scheduler.tasks[@intCast(scheduler.current_task)].state = .finished;
             }
-            // TODO: context switch to next task
             vga.setColor(.yellow, .black);
-            vga.write("\n[USER] Process exited\n");
-            frame.rax = 0;
+            vga.write("\n[USER] Process exited with code ");
+            // Simple decimal print
+            if (exit_code < 10) {
+                vga.putChar(@intCast('0' + exit_code));
+            } else {
+                vga.putChar(@intCast('0' + exit_code / 10));
+                vga.putChar(@intCast('0' + exit_code % 10));
+            }
+            vga.write("\n");
+            vga.setColor(.white, .black);
+
+            // Switch back to kernel page table
+            asm volatile ("movq %[cr3], %%cr3" : : [cr3] "r" (scheduler.kernel_cr3) : .{ .memory = true });
+
+            // Restore kernel stack and return to runAll()
+            sys_exit_return();
         },
         .SYS_FORK => {
             // Simplified fork - just return -1 (not implemented)
