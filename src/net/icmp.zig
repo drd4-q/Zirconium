@@ -26,11 +26,14 @@ pub fn handlePacket(frame: []const u8, ihl: usize) void {
 fn sendReply(request_frame: []const u8, ihl: usize) void {
     const src_ip = [4]u8{ request_frame[26], request_frame[27], request_frame[28], request_frame[29] };
 
+    // Get MAC from ARP cache
+    const dst_mac = net.resolveMac(src_ip) orelse net.gateway_mac;
+
     @memset(&reply_buf, 0);
 
-    reply_buf[0] = net.gateway_mac[0]; reply_buf[1] = net.gateway_mac[1];
-    reply_buf[2] = net.gateway_mac[2]; reply_buf[3] = net.gateway_mac[3];
-    reply_buf[4] = net.gateway_mac[4]; reply_buf[5] = net.gateway_mac[5];
+    reply_buf[0] = dst_mac[0]; reply_buf[1] = dst_mac[1];
+    reply_buf[2] = dst_mac[2]; reply_buf[3] = dst_mac[3];
+    reply_buf[4] = dst_mac[4]; reply_buf[5] = dst_mac[5];
     reply_buf[6] = net.our_mac[0]; reply_buf[7] = net.our_mac[1];
     reply_buf[8] = net.our_mac[2]; reply_buf[9] = net.our_mac[3];
     reply_buf[10] = net.our_mac[4]; reply_buf[11] = net.our_mac[5];
@@ -56,15 +59,17 @@ fn sendReply(request_frame: []const u8, ihl: usize) void {
 
 pub fn ping(target: [4]u8, count: u32) void {
     _ = net.ensureArp(target);
+    const target_mac = net.resolveMac(target) orelse net.gateway_mac;
+
     var i: u32 = 0;
     while (i < count) : (i += 1) {
         last_rtt = 0;
 
         @memset(&ping_buf, 0);
 
-        ping_buf[0] = net.gateway_mac[0]; ping_buf[1] = net.gateway_mac[1];
-        ping_buf[2] = net.gateway_mac[2]; ping_buf[3] = net.gateway_mac[3];
-        ping_buf[4] = net.gateway_mac[4]; ping_buf[5] = net.gateway_mac[5];
+        ping_buf[0] = target_mac[0]; ping_buf[1] = target_mac[1];
+        ping_buf[2] = target_mac[2]; ping_buf[3] = target_mac[3];
+        ping_buf[4] = target_mac[4]; ping_buf[5] = target_mac[5];
         ping_buf[6] = net.our_mac[0]; ping_buf[7] = net.our_mac[1];
         ping_buf[8] = net.our_mac[2]; ping_buf[9] = net.our_mac[3];
         ping_buf[10] = net.our_mac[4]; ping_buf[11] = net.our_mac[5];

@@ -81,7 +81,8 @@ pub fn handlePacket(frame: []const u8, ihl: usize) void {
 }
 
 fn sendPacket(dst_ip: [4]u8, dst_port_val: u16, flags_val: u8, payload: ?[]const u8) void {
-    _ = net.ensureArp(dst_ip);
+    // Get MAC from ARP cache
+    const dst_mac = net.resolveMac(dst_ip) orelse net.gateway_mac;
 
     @memset(&tcp_tx_buf, 0);
 
@@ -90,7 +91,7 @@ fn sendPacket(dst_ip: [4]u8, dst_port_val: u16, flags_val: u8, payload: ?[]const
     const ip_total = 20 + tcp_hdr_len + data_len;
 
     // Ethernet
-    @memcpy(tcp_tx_buf[0..6], &net.gateway_mac);
+    @memcpy(tcp_tx_buf[0..6], &dst_mac);
     @memcpy(tcp_tx_buf[6..12], &net.our_mac);
     tcp_tx_buf[12] = 0x08; tcp_tx_buf[13] = 0x00;
 

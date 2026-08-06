@@ -233,6 +233,10 @@ fn jumpToUser(t: *task.Task) void {
 
 pub fn scheduleTick() void {
     tick_count += 1;
+    // Call net tick every 100 ticks (~1 second at 100Hz)
+    if (tick_count % 100 == 0) {
+        @import("../net/mod.zig").tick();
+    }
 }
 
 pub fn taskCount() usize {

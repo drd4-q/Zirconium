@@ -5,9 +5,12 @@ const net = @import("mod.zig");
 const ip_mod = @import("ip.zig");
 const e1000 = @import("../drivers/e1000.zig");
 const dns = @import("dns.zig");
+const dhcp = @import("dhcp.zig");
 
-pub const DNS_SERVER: [4]u8 = .{ 10, 0, 2, 3 };
+pub var dns_server: [4]u8 = .{ 10, 0, 2, 3 };
 pub const DNS_PORT: u16 = 53;
+pub const DHCP_SERVER_PORT: u16 = 67;
+pub const DHCP_CLIENT_PORT: u16 = 68;
 
 var udp_tx_buf: [42 + 1500]u8 align(16) = undefined;
 
@@ -30,11 +33,18 @@ pub fn handlePacket(frame: []const u8, ihl: usize) void {
 
     if (dst_port == DNS_PORT) {
         dns.handleResponse(frame, ihl, 8);
+    } else if (dst_port == DHCP_CLIENT_PORT) {
+        dhcp.handleResponse(frame, ihl, 8);
     }
 }
 
 pub fn sendPacket(dst_ip: [4]u8, dst_port_val: u16, src_port_val: u16, payload: []const u8) void {
-    _ = net.ensureArp(dst_ip);
+    // Resolve destination MAC via ARP cache
+    const dst_mac = net.resolveMac(dst_ip) orelse {
+        // ARP request + poll
+        _ = net.ensureArp(dst_ip);
+        return;
+    };
 
     @memset(&udp_tx_buf, 0);
 
@@ -42,7 +52,7 @@ pub fn sendPacket(dst_ip: [4]u8, dst_port_val: u16, src_port_val: u16, payload: 
     const ip_total: u16 = 20 + udp_hdr_len + @as(u16, @intCast(payload.len));
 
     // Ethernet
-    @memcpy(udp_tx_buf[0..6], &net.gateway_mac);
+    @memcpy(udp_tx_buf[0..6], &dst_mac);
     @memcpy(udp_tx_buf[6..12], &net.our_mac);
     udp_tx_buf[12] = 0x08;
     udp_tx_buf[13] = 0x00;

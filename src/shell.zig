@@ -20,6 +20,9 @@ const mem_mod = @import("programs/mem.zig");
 const fib = @import("programs/fib.zig");
 const matrix = @import("programs/matrix.zig");
 const lua_prog = @import("programs/lua.zig");
+const arp_cache = @import("net/arp_cache.zig");
+const dhcp_mod = @import("net/dhcp.zig");
+const dns_mod = @import("net/dns.zig");
 
 const HISTORY_SIZE: usize = 16;
 const CMD_MAX: usize = 128;
@@ -45,6 +48,7 @@ const commands = [_][]const u8{
     "halt",  "reboot",  "calc",    "color","clock","fib",   "matrix",
     "lua",   "user",    "ping",    "net",  "get",  "wget",
     "set",   "unset",   "env",     "mouse","resolution",
+    "dhcp",  "arpcache","nslookup",
 };
 
 var cmd_buf: [CMD_MAX]u8 = undefined;
@@ -186,6 +190,12 @@ fn execute(cmd: []const u8) void {
         showMouse();
     } else if (eql(cmd_name, "resolution")) {
         cmdResolution(args);
+    } else if (eql(cmd_name, "dhcp")) {
+        dhcp_mod.run();
+    } else if (eql(cmd_name, "arpcache")) {
+        arp_cache.printCache();
+    } else if (eql(cmd_name, "nslookup")) {
+        cmdNslookup(args);
     } else {
         vga.setColor(.light_red, .black);
         vga.write("  Unknown command: '");
@@ -363,6 +373,31 @@ fn cmdResolution(args: []const u8) void {
     vga.setColor(.white, .black);
 }
 
+fn cmdNslookup(args: []const u8) void {
+    if (args.len == 0) {
+        vga.setColor(.light_red, .black);
+        vga.write("  Usage: nslookup <hostname>\n");
+        vga.setColor(.white, .black);
+        return;
+    }
+
+    if (dns_mod.resolve(args)) |ip| {
+        vga.setColor(.light_green, .black);
+        vga.write("  ");
+        vga.write(args);
+        vga.write(" -> ");
+        net.printIp(ip);
+        vga.write("\n");
+        vga.setColor(.white, .black);
+    } else {
+        vga.setColor(.light_red, .black);
+        vga.write("  Failed to resolve ");
+        vga.write(args);
+        vga.write("\n");
+        vga.setColor(.white, .black);
+    }
+}
+
 fn printHelp() void {
     vga.setColor(.cyan, .black);
     vga.write("\n  === Commands ===\n\n");
@@ -390,7 +425,10 @@ fn printHelp() void {
     vga.write("  Network:\n");
     vga.write("    net           Network interface info\n");
     vga.write("    ping [ip]     Ping (default: gateway)\n");
-    vga.write("    get <url>     Fetch URL (CLI web browser)\n\n");
+    vga.write("    get <url>     Fetch URL (CLI web browser)\n");
+    vga.write("    dhcp          Auto-configure IP via DHCP\n");
+    vga.write("    arpcache      Show ARP cache table\n");
+    vga.write("    nslookup <h>  DNS lookup\n\n");
     vga.write("  Input:\n");
     vga.write("    mouse         Show mouse info\n");
     vga.write("    resolution    Change screen resolution (framebuffer)\n\n");

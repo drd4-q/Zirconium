@@ -5,6 +5,8 @@ const pci = @import("../drivers/pci.zig");
 const e1000 = @import("../drivers/e1000.zig");
 const net = @import("../net/mod.zig");
 const tcp = @import("../net/tcp.zig");
+const arp_cache = @import("../net/arp_cache.zig");
+const dhcp_mod = @import("../net/dhcp.zig");
 
 pub fn run() void {
     vga.setColor(.cyan, .black);
@@ -17,6 +19,11 @@ pub fn run() void {
 
     vga.write("  Our IP:   ");
     net.printIp(net.our_ip);
+    if (dhcp_mod.lease_valid) {
+        vga.setColor(.light_green, .black);
+        vga.write(" (DHCP)");
+    }
+    vga.setColor(.white, .black);
     vga.write("\n");
 
     vga.write("  Gateway:  ");
@@ -48,5 +55,8 @@ pub fn run() void {
         .established => vga.write("ESTABLISHED"),
         .fin_wait => vga.write("FIN_WAIT"),
     }
-    vga.write("\n");
+    vga.write("\n\n");
+
+    // Show ARP cache
+    arp_cache.printCache();
 }

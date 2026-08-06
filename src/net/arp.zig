@@ -3,6 +3,7 @@ const vga = root.vga;
 const port = root.serial;
 const net = @import("mod.zig");
 const e1000 = @import("../drivers/e1000.zig");
+const arp_cache = @import("arp_cache.zig");
 
 pub fn handlePacket(frame: []const u8) void {
     if (frame.len < 42) return;
@@ -13,15 +14,43 @@ pub fn handlePacket(frame: []const u8) void {
     const sender_mac = arp[8..14];
 
     if (opcode == 0x0002) { // ARP Reply
-        if (sender_ip[0] == net.gateway_ip[0] and
-            sender_ip[1] == net.gateway_ip[1] and
-            sender_ip[2] == net.gateway_ip[2] and
-            sender_ip[3] == net.gateway_ip[3])
+        const ip: [4]u8 = .{ sender_ip[0], sender_ip[1], sender_ip[2], sender_ip[3] };
+        const mac: [6]u8 = .{ sender_mac[0], sender_mac[1], sender_mac[2], sender_mac[3], sender_mac[4], sender_mac[5] };
+
+        // Insert into ARP cache
+        arp_cache.insert(ip, mac);
+
+        // Legacy: keep gateway_mac/mac_known for compatibility
+        if (ip[0] == net.gateway_ip[0] and
+            ip[1] == net.gateway_ip[1] and
+            ip[2] == net.gateway_ip[2] and
+            ip[3] == net.gateway_ip[3])
         {
-            @memcpy(&net.gateway_mac, sender_mac[0..6]);
+            @memcpy(&net.gateway_mac, &mac);
             net.mac_known = true;
-            port.serialWrite("[ARP] Gateway MAC resolved\n");
         }
+
+        port.serialWrite("[ARP] Reply: ");
+        port.serialWriteDec(ip[0]);
+        port.serialWrite(".");
+        port.serialWriteDec(ip[1]);
+        port.serialWrite(".");
+        port.serialWriteDec(ip[2]);
+        port.serialWrite(".");
+        port.serialWriteDec(ip[3]);
+        port.serialWrite(" -> ");
+        port.serialWriteHex(mac[0]);
+        port.serialWrite(":");
+        port.serialWriteHex(mac[1]);
+        port.serialWrite(":");
+        port.serialWriteHex(mac[2]);
+        port.serialWrite(":");
+        port.serialWriteHex(mac[3]);
+        port.serialWrite(":");
+        port.serialWriteHex(mac[4]);
+        port.serialWrite(":");
+        port.serialWriteHex(mac[5]);
+        port.serialWrite("\n");
     } else if (opcode == 0x0001) { // ARP Request
         const target_ip = arp[18..22];
         if (target_ip[0] == net.our_ip[0] and
@@ -29,9 +58,51 @@ pub fn handlePacket(frame: []const u8) void {
             target_ip[2] == net.our_ip[2] and
             target_ip[3] == net.our_ip[3])
         {
+            // Cache the sender's MAC too
+            const sip: [4]u8 = .{ sender_ip[0], sender_ip[1], sender_ip[2], sender_ip[3] };
+            const smac: [6]u8 = .{ sender_mac[0], sender_mac[1], sender_mac[2], sender_mac[3], sender_mac[4], sender_mac[5] };
+            arp_cache.insert(sip, smac);
+
             sendReply(sender_mac, sender_ip);
         }
     }
+}
+
+pub fn resolve(target_ip: [4]u8) void {
+    // Check cache first
+    if (arp_cache.lookup(target_ip)) |_| {
+        return;
+    }
+
+    // Send ARP request
+    request(target_ip);
+}
+
+pub fn resolveWait(target_ip: [4]u8) bool {
+    // Check cache first
+    if (arp_cache.lookup(target_ip)) |_| {
+        return true;
+    }
+
+    // Send ARP request
+    request(target_ip);
+
+    var timeout: u32 = 0;
+    while (timeout < 200) : (timeout += 1) {
+        net.poll();
+        if (arp_cache.lookup(target_ip)) |_| {
+            return true;
+        }
+        var j: u32 = 0;
+        while (j < 50000) : (j += 1) {
+            asm volatile ("nop");
+        }
+    }
+    return false;
+}
+
+pub fn getMac(target_ip: [4]u8) ?[6]u8 {
+    return arp_cache.lookup(target_ip);
 }
 
 var arp_tx_buf: [42]u8 align(16) = undefined;

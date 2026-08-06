@@ -5,8 +5,6 @@ const port = root.serial;
 const net = @import("mod.zig");
 const udp = @import("udp.zig");
 
-const DNS_SERVER = udp.DNS_SERVER;
-
 var dns_rx_buf: [512]u8 = undefined;
 var dns_rx_len: usize = 0;
 var dns_rx_ready: bool = false;
@@ -27,7 +25,7 @@ pub fn resolve(hostname: []const u8) ?[4]u8 {
     vga.write("...\n");
     vga.setColor(.white, .black);
 
-    udp.sendPacket(DNS_SERVER, 53, 43210, dns_rx_buf[0..pkt_len]);
+    udp.sendPacket(udp.dns_server, 53, 43210, dns_rx_buf[0..pkt_len]);
 
     // Poll for response
     var timeout: u32 = 0;
