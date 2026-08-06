@@ -5,7 +5,8 @@
 - VGA + serial output, keyboard driver (IRQ1), timer (PIT 100Hz), PCI, e1000 NIC
 - PMM (bitmap page allocator) + VMM (page tables) + kernel heap (kmalloc/kfree/krealloc)
 - TCP/IP stack (ARP, IP, ICMP, TCP, HTTP), DNS resolver, UDP, DHCP, ARP cache
-- Shell with commands: help, clear, calc, clock, ping, get, net, ps, mem, reboot, matrix, fib, lua, user, mouse, set/unset/env, dhcp, arpcache, nslookup, resolution
+- VFS layer + ramfs (ls, cat, touch, mkdir, rm, write, cd, mount)
+- Shell with commands: help, clear, calc, clock, ping, get, net, ps, mem, reboot, matrix, fib, lua, user, mouse, set/unset/env, dhcp, arpcache, nslookup, resolution, ls, cat, touch, mkdir, rm, write, cd, mount
 - GDT with ring 0+3 segments, IDT (256 entries + INT 0x80 DPL3), PIC, TSS
 - Syscall interface (INT 0x80): write, read, sleep, time, exit (fork/exec stubs)
 - ELF loader, ring 3 context switch via iretq, address spaces per process
@@ -45,9 +46,11 @@
 - [ ] Run Lua as a user-space process (ring 3)
 
 ### Filesystem / storage
-- [ ] Virtual filesystem (VFS) layer
+- [x] Virtual filesystem (VFS) layer
+- [x] RAM filesystem (ramfs) with directories /dev, /tmp, /etc
+- [x] Shell commands: ls, cat, touch, mkdir, rm, write, cd, mount
 - [ ] Disk driver (ATA/AHCI or virtio-blk)
-- [ ] Filesystem (FAT16/ext2/ramfs)
+- [ ] Persistent filesystem (FAT16/ext2)
 - [ ] Load programs from disk instead of compiled-in
 
 ### Networking

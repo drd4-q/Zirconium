@@ -62,6 +62,14 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     kalloc.init();
     vga.write("[BOOT] Kernel heap initialized\n");
 
+    vga.write("[BOOT] Initializing filesystem...\n");
+    const ramfs = @import("fs/ramfs.zig");
+    const vfs = @import("fs/vfs.zig");
+    vfs.init();
+    ramfs.init();
+    ramfs.registerMount();
+    vga.write("[BOOT] Filesystem initialized\n");
+
     vga.write("[BOOT] Initializing Kernel modules...\n");
     kernel_init.init();
     vga.write("[BOOT] Kernel modules initialized\n");

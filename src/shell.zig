@@ -23,6 +23,8 @@ const lua_prog = @import("programs/lua.zig");
 const arp_cache = @import("net/arp_cache.zig");
 const dhcp_mod = @import("net/dhcp.zig");
 const dns_mod = @import("net/dns.zig");
+const files = @import("programs/files.zig");
+const vfs = @import("fs/vfs.zig");
 
 const HISTORY_SIZE: usize = 16;
 const CMD_MAX: usize = 128;
@@ -49,6 +51,8 @@ const commands = [_][]const u8{
     "lua",   "user",    "ping",    "net",  "get",  "wget",
     "set",   "unset",   "env",     "mouse","resolution",
     "dhcp",  "arpcache","nslookup",
+    "ls",    "cat",     "touch",   "mkdir","rm",  "write", "cd",
+    "mount",
 };
 
 var cmd_buf: [CMD_MAX]u8 = undefined;
@@ -196,6 +200,22 @@ fn execute(cmd: []const u8) void {
         arp_cache.printCache();
     } else if (eql(cmd_name, "nslookup")) {
         cmdNslookup(args);
+    } else if (eql(cmd_name, "ls")) {
+        files.cmdLs(args);
+    } else if (eql(cmd_name, "cat")) {
+        files.cmdCat(args);
+    } else if (eql(cmd_name, "touch")) {
+        files.cmdTouch(args);
+    } else if (eql(cmd_name, "mkdir")) {
+        files.cmdMkdir(args);
+    } else if (eql(cmd_name, "rm")) {
+        files.cmdRm(args);
+    } else if (eql(cmd_name, "write")) {
+        files.cmdWrite(args);
+    } else if (eql(cmd_name, "cd")) {
+        files.cmdCd(args);
+    } else if (eql(cmd_name, "mount")) {
+        vfs.printMounts();
     } else {
         vga.setColor(.light_red, .black);
         vga.write("  Unknown command: '");
@@ -429,6 +449,15 @@ fn printHelp() void {
     vga.write("    dhcp          Auto-configure IP via DHCP\n");
     vga.write("    arpcache      Show ARP cache table\n");
     vga.write("    nslookup <h>  DNS lookup\n\n");
+    vga.write("  Filesystem:\n");
+    vga.write("    ls [path]     List directory\n");
+    vga.write("    cat <file>    Print file contents\n");
+    vga.write("    touch <file>  Create empty file\n");
+    vga.write("    mkdir <dir>   Create directory\n");
+    vga.write("    rm <file>     Remove file\n");
+    vga.write("    write <f> <t> Write text to file\n");
+    vga.write("    cd [path]     Change directory\n");
+    vga.write("    mount         List mounted filesystems\n\n");
     vga.write("  Input:\n");
     vga.write("    mouse         Show mouse info\n");
     vga.write("    resolution    Change screen resolution (framebuffer)\n\n");
