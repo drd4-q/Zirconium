@@ -1,5 +1,6 @@
 const pmm = @import("pmm.zig");
 const serial = @import("../system/serial.zig");
+const panic = @import("../system/panic.zig");
 
 pub const PAGE_PRESENT: u64 = 1 << 0;
 pub const PAGE_WRITE: u64 = 1 << 1;
@@ -31,7 +32,7 @@ fn nextPageTable(table: [*]u64, index: u16, flags: u64) [*]u64 {
         return @ptrFromInt(entry & PAGE_ADDR_MASK);
     }
 
-    const new_page = pmm.allocPage() orelse return undefined;
+    const new_page = pmm.allocPage() orelse panic.kernelPanic("VMM: out of memory allocating page table");
     @memset(@as([*]u8, @ptrFromInt(new_page))[0..4096], 0);
     setTableEntry(table, index, new_page, flags | PAGE_PRESENT);
     return @ptrFromInt(new_page);

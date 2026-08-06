@@ -241,6 +241,7 @@ sys_exit_return:
     popq %rbp
     popq %rbx
 
+    sti
     ret
 
 .data

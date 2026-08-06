@@ -27,7 +27,7 @@ pub fn init() void {
 
     port_io.outb(0x64, 0x60);
     while ((port_io.inb(KB_STATUS) & 2) != 0) {}
-    port_io.outb(KB_DATA, 0x47);
+    port_io.outb(KB_DATA, 0x45);
 
     isr_mod.registerIrq(1, irqHandler);
 }
@@ -46,6 +46,11 @@ fn readScancode() ?u8 {
     const sc = scancode_ring[ring_tail];
     ring_tail = (ring_tail + 1) % RING_SIZE;
     return sc;
+}
+
+pub fn flush() void {
+    ring_head = 0;
+    ring_tail = 0;
 }
 
 pub fn pollKey() ?u8 {

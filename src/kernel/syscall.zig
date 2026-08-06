@@ -107,13 +107,7 @@ pub export fn syscall_handler(frame: *isr_mod.InterruptFrame) callconv(.c) void 
             }
             vga.setColor(.yellow, .black);
             vga.write("\n[USER] Process exited with code ");
-            // Simple decimal print
-            if (exit_code < 10) {
-                vga.putChar(@intCast('0' + exit_code));
-            } else {
-                vga.putChar(@intCast('0' + exit_code / 10));
-                vga.putChar(@intCast('0' + exit_code % 10));
-            }
+            vga.writeDec(exit_code);
             vga.write("\n");
             vga.setColor(.white, .black);
 

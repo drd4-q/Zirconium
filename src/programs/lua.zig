@@ -7,12 +7,14 @@ const parser_mod = @import("../lua/parser.zig");
 const ast_mod = @import("../lua/ast.zig");
 const value_mod = @import("../lua/value.zig");
 const Value = value_mod.Value;
+const kb = @import("../drivers/keyboard.zig");
 
 var vm: ?vm_mod.VM = null;
 var arena: std.heap.ArenaAllocator = undefined;
+var gpa: std.heap.FixedBufferAllocator = undefined;
 
 fn initLua() void {
-    var gpa = std.heap.FixedBufferAllocator.init(&_heap_buf);
+    gpa = std.heap.FixedBufferAllocator.init(&_heap_buf);
     arena = std.heap.ArenaAllocator.init(gpa.allocator());
     vm = vm_mod.VM.init(arena.allocator());
 }
@@ -70,6 +72,8 @@ pub fn run() void {
         initLua();
     }
 
+    kb.flush();
+
     vga.clear();
     printBanner();
 
@@ -116,6 +120,7 @@ pub fn run() void {
         };
 
         printResult(result);
+        kb.flush();
     }
 }
 
@@ -146,7 +151,5 @@ fn readLine(buf: []u8, max_len: usize) usize {
 }
 
 fn readKey() ?u8 {
-    // Use the keyboard driver directly for now
-    const kb = @import("../drivers/keyboard.zig");
     return kb.pollKey();
 }

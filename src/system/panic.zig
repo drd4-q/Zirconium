@@ -3,6 +3,7 @@ const root = @import("root");
 const vga = root.vga;
 
 pub fn kernelPanic(msg: []const u8) noreturn {
+    asm volatile ("cli");
     vga.setColor(.light_red, .black);
     vga.write("\n!!! KERNEL PANIC !!!\n");
     vga.write("Message: ");
@@ -15,6 +16,7 @@ pub fn kernelPanic(msg: []const u8) noreturn {
 }
 
 pub fn panicWithCode(msg: []const u8, code: u64) noreturn {
+    asm volatile ("cli");
     vga.setColor(.light_red, .black);
     vga.write("\n!!! KERNEL PANIC !!!\n");
     vga.write("Message: ");
