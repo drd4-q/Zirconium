@@ -43,7 +43,7 @@ var saved_screen: [MAX_ROWS][MAX_COLS]u16 = undefined;
 var saved_cursor_row: usize = 0;
 var saved_cursor_col: usize = 0;
 pub var scroll_view: bool = false;
-pub var scroll_view_line: usize = 0;
+var view_offset: usize = 0; // how many lines from the end of scrollback we're viewing
 
 pub fn initFb(mbi_ptr: u32) void {
     fb.initFromMultiboot(mbi_ptr);
@@ -257,13 +257,13 @@ pub fn scrollBackText(lines: usize) void {
         saved_cursor_row = cursor_row;
         saved_cursor_col = cursor_col;
         scroll_view = true;
-        scroll_view_line = sb_count;
+        view_offset = 0;
     }
 
-    if (scroll_view_line > lines) {
-        scroll_view_line -= lines;
+    if (view_offset + lines <= sb_count) {
+        view_offset += lines;
     } else {
-        scroll_view_line = 1;
+        view_offset = sb_count;
     }
 
     renderScrollViewText();
@@ -273,8 +273,9 @@ pub fn scrollForwardText(lines: usize) void {
     if (fb.active) return;
     if (!scroll_view) return;
 
-    scroll_view_line += lines;
-    if (scroll_view_line >= sb_count) {
+    if (view_offset > lines) {
+        view_offset -= lines;
+    } else {
         exitScrollViewText();
         return;
     }
@@ -283,23 +284,35 @@ pub fn scrollForwardText(lines: usize) void {
 }
 
 fn renderScrollViewText() void {
-    var screen_row: usize = 0;
-    var sb_idx: usize = sb_count - scroll_view_line;
+    // view_offset: 0 = newest scrollback line at bottom, sb_count = oldest at top
+    // We show min(view_offset, VGA_HEIGHT) scrollback lines at top of screen
+    // Then the saved screen below
 
-    while (screen_row < VGA_HEIGHT and sb_idx < sb_count) : (screen_row += 1) {
+    const num_sb = if (view_offset > VGA_HEIGHT) VGA_HEIGHT else view_offset;
+    var screen_row: usize = 0;
+
+    // Show scrollback lines (oldest visible at top)
+    // The line at view_offset from the end is at screen row 0
+    var i: usize = 0;
+    while (i < num_sb) : (i += 1) {
+        // sb_idx: index from oldest (0) to newest (sb_count-1)
+        const sb_idx = sb_count - view_offset + i;
         const ring_idx = (sb_head + sb_idx) % SCROLLBACK_LINES;
         var x: usize = 0;
         while (x < VGA_WIDTH) : (x += 1) {
             textBuffer()[screen_row * VGA_WIDTH + x] = scrollback[ring_idx][x];
         }
-        sb_idx += 1;
+        screen_row += 1;
     }
+
+    // Show saved screen below scrollback
+    var saved_row: usize = 0;
     while (screen_row < VGA_HEIGHT) : (screen_row += 1) {
-        const blank = vgaEntry(' ', 0x07);
         var x: usize = 0;
         while (x < VGA_WIDTH) : (x += 1) {
-            textBuffer()[screen_row * VGA_WIDTH + x] = blank;
+            textBuffer()[screen_row * VGA_WIDTH + x] = saved_screen[saved_row][x];
         }
+        saved_row += 1;
     }
 }
 

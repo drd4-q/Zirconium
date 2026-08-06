@@ -389,14 +389,9 @@ fn renderScrollView() void {
         redrawRow(screen_row);
         sb_idx += 1;
     }
-    // Clear remaining rows
+    // Restore saved screen below scrollback lines
     while (screen_row < rows) : (screen_row += 1) {
-        {
-            var c: usize = 0;
-            while (c < MAX_COLS) : (c += 1) {
-                screen_mirror[screen_row][c] = 0;
-            }
-        }
+        screen_mirror[screen_row] = saved_screen[screen_row];
         redrawRow(screen_row);
     }
 
