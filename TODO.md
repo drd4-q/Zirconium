@@ -69,11 +69,11 @@
 - [ ] PCI enumeration improvements
 
 ### Shell improvements
-- [ ] Tab completion
-- [ ] Command history (up/down arrows)
+- [x] Tab completion (auto-complete from known commands, show matches on ambiguous)
+- [x] Command history (up/down arrows, 16 entries circular buffer)
 - [ ] Pipes (cmd1 | cmd2)
 - [ ] I/O redirection (cmd > file, cmd < file)
-- [ ] Environment variables
+- [x] Environment variables (set KEY=VALUE, unset KEY, env)
 
 ### Build / tooling
 - [ ] Automated test suite

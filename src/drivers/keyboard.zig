@@ -53,9 +53,39 @@ pub fn flush() void {
     ring_tail = 0;
 }
 
+var e0_prefix: bool = false;
+
+pub const KEY_UP: u8 = 0x80;
+pub const KEY_DOWN: u8 = 0x81;
+pub const KEY_LEFT: u8 = 0x82;
+pub const KEY_RIGHT: u8 = 0x83;
+pub const KEY_TAB: u8 = 0x84;
+
 pub fn pollKey() ?u8 {
     while (true) {
         const sc = readScancode() orelse return null;
+
+        if (sc == 0xE0) {
+            e0_prefix = true;
+            continue;
+        }
+
+        if (e0_prefix) {
+            e0_prefix = false;
+            if (sc & 0x80 != 0) {
+                handleKeyRelease(sc & 0x7F);
+                continue;
+            }
+            return switch (sc) {
+                0x48 => KEY_UP,
+                0x50 => KEY_DOWN,
+                0x4B => KEY_LEFT,
+                0x4D => KEY_RIGHT,
+                0x09 => KEY_TAB,
+                else => 0,
+            };
+        }
+
         if (sc & 0x80 != 0) {
             handleKeyRelease(sc & 0x7F);
             continue;
