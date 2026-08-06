@@ -35,6 +35,28 @@ pub fn run() void {
     vga.writeDec((root.pmm.total_pages - root.pmm.free_pages) * 4 / 1024);
     vga.write(" MB\n\n");
 
+    // Kernel heap stats
+    vga.setColor(.yellow, .black);
+    vga.write("  Kernel Heap:\n");
+    vga.setColor(.white, .black);
+    vga.write("    Heap size:    ");
+    vga.writeDec(root.kalloc.heap_size);
+    vga.write(" bytes (");
+    vga.writeDec(root.kalloc.heap_size / 1024);
+    vga.write(" KB)\n");
+    vga.write("    Used:         ");
+    vga.writeDec(root.kalloc.used_size);
+    vga.write(" bytes\n");
+    vga.write("    Free:         ");
+    vga.writeDec(root.kalloc.heap_size - root.kalloc.used_size);
+    vga.write(" bytes\n");
+    vga.write("    Allocations:  ");
+    vga.writeDec(root.kalloc.alloc_count);
+    vga.write("\n");
+    vga.write("    Frees:        ");
+    vga.writeDec(root.kalloc.free_count);
+    vga.write("\n");
+
     vga.setColor(.yellow, .black);
     vga.write("  Pointer sizes:\n");
     vga.setColor(.white, .black);

@@ -3,14 +3,18 @@
 ## Current state
 - Kernel boots via Multiboot/GRUB, identity-mapped 2MB pages
 - VGA + serial output, keyboard driver (IRQ1), timer (PIT 100Hz), PCI, e1000 NIC
-- PMM + VMM (OOM handling fixed), scheduler with kernel + user tasks
-- TCP/IP stack (ARP, IP, ICMP, TCP, HTTP), DNS resolver, UDP support
-- Shell with commands: help, clear, calc, clock, ping, get, net, ps, mem, reboot, matrix, fib, lua, user, mouse, set/unset/env
+- PMM (bitmap page allocator) + VMM (page tables) + kernel heap (kmalloc/kfree/krealloc)
+- TCP/IP stack (ARP, IP, ICMP, TCP, HTTP), DNS resolver, UDP, DHCP, ARP cache
+- Shell with commands: help, clear, calc, clock, ping, get, net, ps, mem, reboot, matrix, fib, lua, user, mouse, set/unset/env, dhcp, arpcache, nslookup, resolution
 - GDT with ring 0+3 segments, IDT (256 entries + INT 0x80 DPL3), PIC, TSS
 - Syscall interface (INT 0x80): write, read, sleep, time, exit (fork/exec stubs)
 - ELF loader, ring 3 context switch via iretq, address spaces per process
 - Lua interpreter (lexer, parser, AST, VM, API) — compiled and working
 - Keyboard flush support for clean input between programs
+- PS/2 mouse driver with IRQ12
+- Framebuffer support (Multiboot FBFLAG, CP437 bitmap font)
+- Scrollback buffer (512 lines, VGA text mode + framebuffer)
+- Environment variables (set/unset/env)
 
 ## What needs to be done
 
@@ -46,18 +50,28 @@
 - [ ] Filesystem (FAT16/ext2/ramfs)
 - [ ] Load programs from disk instead of compiled-in
 
-### Networking improvements
-- [ ] DHCP client (currently hardcoded 10.0.2.15)
+### Networking
 - [x] DNS resolver (UDP to 10.0.2.3)
 - [x] UDP support (basic send/receive for DNS)
+- [x] DHCP client (discover/offer/request/ack, auto-configures IP/gateway/DNS)
+- [x] ARP cache (32-entry table with TTL, auto-eviction)
 - [ ] Socket API for user-space programs
+- [ ] TCP improvements (retransmission, window scaling, congestion control)
+- [ ] ICMP RTT measurement
+- [ ] UDP socket abstraction
 
 ### Memory management
+- [x] Physical page allocator (PMM bitmap, 4KB pages)
+- [x] Virtual memory manager (VMM, page tables, mapPage/unmapPage)
+- [x] Kernel heap allocator (kmalloc/kfree/krealloc, free-list with coalescing)
 - [ ] User-space heap allocator (malloc/free via syscall)
 - [ ] Shared memory between processes
 - [ ] Copy-on-write fork
 
 ### Process management
+- [x] Scheduler with kernel + user tasks
+- [x] ELF loader
+- [x] Address spaces per process
 - [ ] exec syscall (load and run ELF binary)
 - [ ] waitpid / exit with status
 - [ ] Signals (SIGTERM, SIGKILL, etc.)
@@ -72,11 +86,11 @@
 ### Shell improvements
 - [x] Tab completion (auto-complete from known commands, show matches on ambiguous)
 - [x] Command history (up/down arrows, 16 entries circular buffer)
-- [ ] Pipes (cmd1 | cmd2)
-- [ ] I/O redirection (cmd > file, cmd < file)
 - [x] Environment variables (set KEY=V, unset K, env)
 - [x] Scrollback buffer (PageUp/PageDown, 512 lines)
 - [x] Resolution command (framebuffer, change resolution at runtime)
+- [ ] Pipes (cmd1 | cmd2)
+- [ ] I/O redirection (cmd > file, cmd < file)
 
 ### Build / tooling
 - [ ] Automated test suite

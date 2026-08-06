@@ -6,6 +6,7 @@ const shell = @import("shell.zig");
 pub const scheduler = @import("kernel/scheduler.zig");
 pub const pmm = @import("kernel/pmm.zig");
 pub const vmm = @import("kernel/vmm.zig");
+pub const kalloc = @import("kernel/kalloc.zig");
 const kernel_init = @import("kernel/init.zig");
 const gdt = @import("arch/gdt.zig");
 
@@ -56,6 +57,10 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     vga.write("[BOOT] Initializing VMM...\n");
     vmm.init();
     vga.write("[BOOT] VMM initialized\n");
+
+    vga.write("[BOOT] Initializing kernel heap...\n");
+    kalloc.init();
+    vga.write("[BOOT] Kernel heap initialized\n");
 
     vga.write("[BOOT] Initializing Kernel modules...\n");
     kernel_init.init();
