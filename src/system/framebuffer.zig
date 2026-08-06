@@ -384,7 +384,7 @@ fn renderScrollView() void {
     // sb_idx is the line at the top of the screen
 
     while (screen_row < rows and sb_idx < sb_count) : (screen_row += 1) {
-        const ring_idx = (sb_head + sb_idx) % SCROLLBACK_LINES;
+        const ring_idx = (sb_head + SCROLLBACK_LINES - sb_count + sb_idx) % SCROLLBACK_LINES;
         screen_mirror[screen_row] = scrollback[ring_idx];
         redrawRow(screen_row);
         sb_idx += 1;

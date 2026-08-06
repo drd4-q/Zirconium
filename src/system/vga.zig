@@ -247,9 +247,20 @@ fn restoreMirrorToBuffer() void {
     }
 }
 
+fn pushCurrentScreenToScrollback() void {
+    var y: usize = 0;
+    while (y < VGA_HEIGHT) : (y += 1) {
+        var x: usize = 0;
+        while (x < VGA_WIDTH) : (x += 1) {
+            scrollback[sb_head][x] = textBuffer()[y * VGA_WIDTH + x];
+        }
+        sb_head = (sb_head + 1) % SCROLLBACK_LINES;
+        if (sb_count < SCROLLBACK_LINES) sb_count += 1;
+    }
+}
+
 pub fn scrollBackText(lines: usize) void {
     if (fb.active) return;
-    if (sb_count == 0) return;
 
     if (!scroll_view) {
         syncMirrorFromBuffer();
@@ -258,12 +269,15 @@ pub fn scrollBackText(lines: usize) void {
         saved_cursor_col = cursor_col;
         scroll_view = true;
         view_offset = 0;
+        pushCurrentScreenToScrollback();
     }
 
-    if (view_offset + lines <= sb_count) {
-        view_offset += lines;
-    } else {
-        view_offset = sb_count;
+    if (sb_count > 0) {
+        if (view_offset + lines <= sb_count) {
+            view_offset += lines;
+        } else {
+            view_offset = sb_count;
+        }
     }
 
     renderScrollViewText();
@@ -297,7 +311,7 @@ fn renderScrollViewText() void {
     while (i < num_sb) : (i += 1) {
         // sb_idx: index from oldest (0) to newest (sb_count-1)
         const sb_idx = sb_count - view_offset + i;
-        const ring_idx = (sb_head + sb_idx) % SCROLLBACK_LINES;
+        const ring_idx = (sb_head + SCROLLBACK_LINES - sb_count + sb_idx) % SCROLLBACK_LINES;
         var x: usize = 0;
         while (x < VGA_WIDTH) : (x += 1) {
             textBuffer()[screen_row * VGA_WIDTH + x] = scrollback[ring_idx][x];
