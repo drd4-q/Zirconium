@@ -1,2 +1,3 @@
 # zigcore
-kernel maded on zig
+Kernel maded on zig
+[TODOS](TODO.md)
