@@ -1,8 +1,8 @@
 # zigcore
 A minimalist operating system kernel written in Zig.
 
-[![Project Status](https://shields.io)](#)
-[![Roadmap](https://shields.io)](TODO.md)
+[![Project Status](https://img.shields.io/badge/status-active-brightgreen)](#)
+[![Roadmap](https://img.shields.io/badge/tasks-TODOs-blue)](TODO.md)
 
 ---
 
