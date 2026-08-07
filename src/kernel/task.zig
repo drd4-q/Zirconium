@@ -47,4 +47,6 @@ pub const Task = struct {
     saved_state: SavedState = .{},
     time_slice: u64 = 0,
     address_space: ?@import("address_space.zig").AddressSpace = null,
+    parent_id: i32 = -1,
+    exit_code: i32 = 0,
 };

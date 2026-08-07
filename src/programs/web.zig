@@ -1,8 +1,6 @@
 const root = @import("root");
 const vga = root.vga;
 const kb = @import("../drivers/keyboard.zig");
-const net = @import("../net/mod.zig");
-const tcp = @import("../net/tcp.zig");
 const http = @import("../net/http.zig");
 
 var url_buf: [256]u8 = undefined;

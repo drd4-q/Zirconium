@@ -5,6 +5,10 @@ const serial = @import("../system/serial.zig");
 const port_io = @import("../arch/port.zig");
 const isr_mod = @import("../arch/isr.zig");
 const scheduler = @import("scheduler.zig");
+const task = @import("task.zig");
+const address_space = @import("address_space.zig");
+const pmm = @import("pmm.zig");
+const vmm = @import("vmm.zig");
 const kb = @import("../drivers/keyboard.zig");
 const timer = @import("../drivers/timer.zig");
 
@@ -15,9 +19,10 @@ pub const SyscallNumber = enum(u64) {
     SYS_CLOSE = 4,
     SYS_SLEEP = 10,
     SYS_TIME = 11,
-    SYS_EXIT = 60,
     SYS_FORK = 57,
     SYS_EXEC = 59,
+    SYS_EXIT = 60,
+    SYS_WAITPID = 61,
 };
 
 var kernel_rsp: u64 = 0;
@@ -25,6 +30,22 @@ extern fn sys_exit_return() callconv(.c) noreturn;
 
 pub fn initKernelStack(rsp: u64) void {
     kernel_rsp = rsp;
+}
+
+fn readUserStr(ptr: u64, max_len: usize) ?[256]u8 {
+    var buf: [256]u8 = undefined;
+    const user_ptr: [*]const u8 = @ptrFromInt(ptr);
+    var i: usize = 0;
+    while (i < @min(max_len, 255)) : (i += 1) {
+        const ch = user_ptr[i];
+        if (ch == 0) {
+            buf[i] = 0;
+            return buf;
+        }
+        buf[i] = ch;
+    }
+    buf[255] = 0;
+    return buf;
 }
 
 pub export fn syscall_handler(frame: *isr_mod.InterruptFrame) callconv(.c) void {
@@ -101,9 +122,20 @@ pub export fn syscall_handler(frame: *isr_mod.InterruptFrame) callconv(.c) void 
         },
         .SYS_EXIT => {
             const exit_code = frame.rdi;
-            // Mark current task as finished
+            // Mark current task as finished and store exit code
             if (scheduler.current_task >= 0) {
-                scheduler.tasks[@intCast(scheduler.current_task)].state = .finished;
+                const idx: usize = @intCast(scheduler.current_task);
+                scheduler.tasks[idx].state = .finished;
+                scheduler.tasks[idx].exit_code = @intCast(exit_code);
+
+                // Wake up parent if it's waiting via waitpid
+                const parent_id = scheduler.tasks[idx].parent_id;
+                if (parent_id >= 0) {
+                    const parent: usize = @intCast(parent_id);
+                    if (scheduler.tasks[parent].state == .blocked) {
+                        scheduler.tasks[parent].state = .ready;
+                    }
+                }
             }
             vga.setColor(.yellow, .black);
             vga.write("\n[USER] Process exited with code ");
@@ -118,12 +150,208 @@ pub export fn syscall_handler(frame: *isr_mod.InterruptFrame) callconv(.c) void 
             sys_exit_return();
         },
         .SYS_FORK => {
-            // Simplified fork - just return -1 (not implemented)
-            frame.rax = @bitCast(@as(isize, -1));
+            const current_idx = scheduler.current_task;
+            if (current_idx < 0) {
+                frame.rax = @bitCast(@as(isize, -1));
+                return;
+            }
+            const parent = &scheduler.tasks[@intCast(current_idx)];
+
+            if (scheduler.task_count >= task.MAX_TASKS) {
+                frame.rax = @bitCast(@as(isize, -11)); // EAGAIN
+                return;
+            }
+
+            // Clone address space
+            const parent_as = parent.address_space orelse {
+                frame.rax = @bitCast(@as(isize, -1));
+                return;
+            };
+            const child_as = parent_as.cloneUserSpace() orelse {
+                frame.rax = @bitCast(@as(isize, -12)); // ENOMEM
+                return;
+            };
+
+            // Allocate child user stack
+            const child_stack_phys = pmm.allocPages(task.USER_STACK_SIZE / 4096) orelse {
+                child_as.destroy();
+                frame.rax = @bitCast(@as(isize, -12));
+                return;
+            };
+
+            // Map child user stack
+            const user_stack_virt = address_space.USER_STACK_TOP - task.USER_STACK_SIZE;
+            child_as.mapUserRange(user_stack_virt, child_stack_phys, task.USER_STACK_SIZE, vmm.PAGE_WRITE | vmm.PAGE_USER);
+
+            // Copy parent stack contents to child via physical addresses
+            const parent_stack_phys = parent.user_stack_phys;
+            const parent_stack_ptr: [*]const u8 = @ptrFromInt(parent_stack_phys);
+            const child_stack_ptr: [*]u8 = @ptrFromInt(child_stack_phys);
+            @memcpy(child_stack_ptr[0..task.USER_STACK_SIZE], parent_stack_ptr[0..task.USER_STACK_SIZE]);
+
+            // Create child task
+            const child_idx = scheduler.task_count;
+            const child = &scheduler.tasks[child_idx];
+            child.* = .{};
+            child.id = @intCast(child_idx);
+            child.state = .ready;
+            child.task_type = .user;
+            child.entry_point = parent.entry_point;
+            child.time_slice = 10;
+            child.address_space = child_as;
+            child.user_stack_phys = child_stack_phys;
+            child.parent_id = @intCast(parent.id);
+
+            // Copy parent register state
+            child.saved_state.rax = 0; // child gets 0
+            child.saved_state.rbx = frame.rbx;
+            child.saved_state.rcx = frame.rcx;
+            child.saved_state.rdx = frame.rdx;
+            child.saved_state.rsi = frame.rsi;
+            child.saved_state.rdi = frame.rdi;
+            child.saved_state.rbp = frame.rbp;
+            child.saved_state.r8 = frame.r8;
+            child.saved_state.r9 = frame.r9;
+            child.saved_state.r10 = frame.r10;
+            child.saved_state.r11 = frame.r11;
+            child.saved_state.r12 = frame.r12;
+            child.saved_state.r13 = frame.r13;
+            child.saved_state.r14 = frame.r14;
+            child.saved_state.r15 = frame.r15;
+            child.saved_state.rip = frame.rip;
+            child.saved_state.rsp = frame.rsp;
+            child.saved_state.rflags = frame.rflags;
+            child.saved_state.cs = frame.cs;
+            child.saved_state.ss = frame.ss;
+
+            scheduler.task_count += 1;
+
+            serial.serialWrite("[SYSCALL] fork: child pid=");
+            serial.serialWriteDec(child.id);
+            serial.serialWrite("\n");
+
+            // Parent gets child PID
+            frame.rax = child.id;
         },
         .SYS_EXEC => {
-            // Simplified exec - not implemented
-            frame.rax = @bitCast(@as(isize, -1));
+            const path_ptr = frame.rdi;
+            const maybe_path = readUserStr(path_ptr, 255);
+            if (maybe_path == null) {
+                frame.rax = @bitCast(@as(isize, -14)); // EFAULT
+                return;
+            }
+            const path = maybe_path.?;
+
+            // Find path length
+            var path_len: usize = 0;
+            while (path[path_len] != 0 and path_len < 255) : (path_len += 1) {}
+
+            serial.serialWrite("[SYSCALL] exec: ");
+            serial.serialWrite(path[0..path_len]);
+            serial.serialWrite("\n");
+
+            const task_idx = scheduler.current_task;
+            if (task_idx < 0) {
+                frame.rax = @bitCast(@as(isize, -1));
+                return;
+            }
+            const t = &scheduler.tasks[@intCast(task_idx)];
+
+            // Free old user stack
+            if (t.user_stack_phys != 0) {
+                pmm.freePages(t.user_stack_phys, task.USER_STACK_SIZE / 4096);
+                t.user_stack_phys = 0;
+            }
+
+            // Destroy old address space (frees user pages + page tables)
+            if (t.address_space) |old_as| {
+                old_as.destroy();
+                t.address_space = null;
+            }
+
+            // Create new address space
+            const new_as = address_space.AddressSpace.create() orelse {
+                serial.serialWrite("[SYSCALL] exec: failed to create address space\n");
+                frame.rax = @bitCast(@as(isize, -12)); // ENOMEM
+                return;
+            };
+            t.address_space = new_as;
+
+            // Load ELF from VFS
+            const entry_vaddr = @import("elf.zig").loadElfFromPath(new_as, path[0..path_len]) catch |err| {
+                serial.serialWrite("[SYSCALL] exec: failed to load ELF: ");
+                serial.serialWrite(@errorName(err));
+                serial.serialWrite("\n");
+                new_as.destroy();
+                t.address_space = null;
+                frame.rax = @bitCast(@as(isize, -8)); // ENOEXEC
+                return;
+            };
+
+            // Allocate new user stack
+            const user_stack_phys = pmm.allocPages(task.USER_STACK_SIZE / 4096) orelse {
+                serial.serialWrite("[SYSCALL] exec: failed to allocate stack\n");
+                new_as.destroy();
+                t.address_space = null;
+                frame.rax = @bitCast(@as(isize, -12));
+                return;
+            };
+            t.user_stack_phys = user_stack_phys;
+
+            // Map user stack
+            const user_stack_virt = address_space.USER_STACK_TOP - task.USER_STACK_SIZE;
+            new_as.mapUserRange(user_stack_virt, user_stack_phys, task.USER_STACK_SIZE, vmm.PAGE_WRITE);
+
+            // Update task state
+            t.entry_point = entry_vaddr;
+            t.state = .ready;
+
+            // Update the interrupt frame to return to the new program
+            frame.rip = entry_vaddr;
+            frame.rsp = address_space.USER_STACK_TOP - 8;
+            frame.cs = @import("../arch/gdt.zig").USER_CODE_SEL;
+            frame.ss = @import("../arch/gdt.zig").USER_DATA_SEL;
+            frame.rflags = 0x200; // IF=1
+
+            // Switch to new address space before returning
+            new_as.switchTo();
+
+            // Return 0 to the new program (rax in frame will be the return value)
+            frame.rax = 0;
+
+            serial.serialWrite("[SYSCALL] exec: jumping to 0x");
+            serial.serialWriteHex(entry_vaddr);
+            serial.serialWrite("\n");
+        },
+        .SYS_WAITPID => {
+            // rdi = pid to wait for (-1 = any child)
+            const wait_pid: i32 = @intCast(@as(i64, @bitCast(frame.rdi)));
+            const current_idx = scheduler.current_task;
+            if (current_idx < 0) {
+                frame.rax = @bitCast(@as(isize, -1));
+                return;
+            }
+            const parent_id = scheduler.tasks[@intCast(current_idx)].id;
+
+            // Search for a finished child
+            var found: i32 = -1;
+            var i: usize = 0;
+            while (i < scheduler.task_count) : (i += 1) {
+                const t = &scheduler.tasks[i];
+                if (t.parent_id != @as(i32, @intCast(parent_id))) continue;
+                if (t.state != .finished) continue;
+                if (wait_pid != -1 and t.id != @as(u32, @intCast(wait_pid))) continue;
+                found = @intCast(i);
+                break;
+            }
+
+            if (found >= 0) {
+                // Return child PID; exit_code stored in rax of the child's exit
+                frame.rax = scheduler.tasks[@intCast(found)].id;
+            } else {
+                // No finished child found
+                frame.rax = @bitCast(@as(isize, -1)); // ECHILD
+            }
         },
         else => {
             serial.serialWrite("[SYSCALL] Unknown syscall: ");

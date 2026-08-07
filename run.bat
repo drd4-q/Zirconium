@@ -11,7 +11,7 @@ for %%a in (%*) do (
     )
 )
 
-echo === Building Zig Kernel ===
+echo === Building Zirconium ===
 zig build
 
 echo === Creating ISO ===
@@ -21,17 +21,27 @@ copy zig-out\bin\kernel isodir\boot\kernel.bin
 copy grub.cfg isodir\boot\grub\grub.cfg
 grub-mkrescue -o kernel.iso isodir
 
+REM Create disk image if missing
+if not exist disk.img (
+    echo === Creating 64MB disk image ===
+    dd if=/dev/zero of=disk.img bs=1M count=64 2>nul
+    echo disk.img created (64MB raw)
+)
+
 echo === Launching QEMU ===
 echo  Network: e1000 NIC, port forward 8080-^>80
+echo  Disk: virtio-blk 64MB
 echo  Open http://localhost:8080 in host browser to test
 echo !VNC_MSG!
 echo.
 
 qemu-system-x86_64 ^
     -cdrom kernel.iso ^
-    -m 128M ^
+    -m 512M ^
     -device e1000,netdev=net0 ^
     -netdev user,id=net0,hostfwd=tcp::8080-:80 ^
+    -drive if=none,id=hd0,file=disk.img,format=raw ^
+    -device virtio-blk,drive=hd0 ^
     !DISPLAY_MODE! ^
     -serial stdio ^
     -d int,cpu_reset ^

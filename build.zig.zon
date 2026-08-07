@@ -1,7 +1,7 @@
 .{
-    .name = .zig_kernel,
+    .name = .zirconium,
     .version = "0.1.0",
-    .fingerprint = 0x1182412c47ca3da8,
+    .fingerprint = 0x5f615ad6639c8ae8,
     .minimum_zig_version = "0.14.0",
     .dependencies = .{},
     .paths = .{

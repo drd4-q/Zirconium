@@ -49,7 +49,7 @@ pub const AddressSpace = struct {
     }
 
     pub fn destroy(self: AddressSpace) void {
-        // Free user-space page tables (entries 0-255)
+        // Free user-space page tables and their backing physical pages (entries 0-255)
         const pml4: [*]u64 = @ptrFromInt(self.pml4_phys);
         var i: u16 = 0;
         while (i < 256) : (i += 1) {
@@ -64,7 +64,9 @@ pub const AddressSpace = struct {
                 const pdpt_entry = pdpt[j];
                 if (pdpt_entry & vmm.PAGE_PRESENT == 0) continue;
                 if (pdpt_entry & vmm.PAGE_SIZE != 0) {
-                    // 1GB page - just free the PDPT entry's referenced page
+                    // 1GB page — free the 2MB-aligned physical region
+                    const phys = pdpt_entry & 0x000FFFFFC0000000;
+                    pmm.freePages(phys, 512); // 512 × 2MB pages
                     continue;
                 }
 
@@ -75,9 +77,25 @@ pub const AddressSpace = struct {
                 while (k < 512) : (k += 1) {
                     const pd_entry = pd[k];
                     if (pd_entry & vmm.PAGE_PRESENT == 0) continue;
-                    if (pd_entry & vmm.PAGE_SIZE != 0) continue;
+
+                    if (pd_entry & vmm.PAGE_SIZE != 0) {
+                        // 2MB page — free the physical region
+                        const phys = pd_entry & 0x000FFFFFE0000000;
+                        pmm.freePages(phys, 512); // 512 × 4KB pages
+                        continue;
+                    }
 
                     const pt_phys = pd_entry & 0x000FFFFFFFFFF000;
+                    const pt: [*]u64 = @ptrFromInt(pt_phys);
+
+                    // Free each 4KB page mapped in this PT
+                    var l: u16 = 0;
+                    while (l < 512) : (l += 1) {
+                        const pt_entry = pt[l];
+                        if (pt_entry & vmm.PAGE_PRESENT == 0) continue;
+                        const page_phys = pt_entry & 0x000FFFFFFFFFF000;
+                        pmm.freePage(page_phys);
+                    }
                     pmm.freePage(pt_phys);
                 }
                 pmm.freePage(pd_phys);
@@ -85,6 +103,101 @@ pub const AddressSpace = struct {
             pmm.freePage(pdpt_phys);
         }
         pmm.freePage(self.pml4_phys);
+    }
+
+    pub fn cloneUserSpace(parent: AddressSpace) ?AddressSpace {
+        var child = create() orelse return null;
+        const parent_pml4: [*]const u64 = @ptrFromInt(parent.pml4_phys);
+        const child_pml4: [*]u64 = @ptrFromInt(child.pml4_phys);
+
+        var pml4_idx: u16 = 0;
+        while (pml4_idx < 256) : (pml4_idx += 1) {
+            const pml4_entry = parent_pml4[pml4_idx];
+            if (pml4_entry & vmm.PAGE_PRESENT == 0) continue;
+
+            const parent_pdpt_phys = pml4_entry & 0x000FFFFFFFFFF000;
+            const parent_pdpt: [*]const u64 = @ptrFromInt(parent_pdpt_phys);
+
+            const child_pdpt_page = pmm.allocPage() orelse {
+                child.destroy();
+                return null;
+            };
+            @memset(@as([*]u8, @ptrFromInt(child_pdpt_page))[0..4096], 0);
+            child_pml4[pml4_idx] = (child_pdpt_page & 0x000FFFFFFFFFF000) | (pml4_entry & 0xFFF) | vmm.PAGE_PRESENT;
+            const child_pdpt: [*]u64 = @ptrFromInt(child_pdpt_page);
+
+            var pdpt_idx: u16 = 0;
+            while (pdpt_idx < 512) : (pdpt_idx += 1) {
+                const pdpt_entry = parent_pdpt[pdpt_idx];
+                if (pdpt_entry & vmm.PAGE_PRESENT == 0) continue;
+
+                if (pdpt_entry & vmm.PAGE_SIZE != 0) {
+                    const phys = pdpt_entry & 0x000FFFFFC0000000;
+                    const new_phys = pmm.allocPages(512) orelse {
+                        child.destroy();
+                        return null;
+                    };
+                    @memcpy(@as([*]u8, @ptrFromInt(new_phys))[0 .. 512 * 2048], @as([*]const u8, @ptrFromInt(phys))[0 .. 512 * 2048]);
+                    child_pdpt[pdpt_idx] = (new_phys & 0x000FFFFFC0000000) | (pdpt_entry & 0xFFF) | vmm.PAGE_PRESENT;
+                    continue;
+                }
+
+                const parent_pd_phys = pdpt_entry & 0x000FFFFFFFFFF000;
+                const parent_pd: [*]const u64 = @ptrFromInt(parent_pd_phys);
+
+                const child_pd_page = pmm.allocPage() orelse {
+                    child.destroy();
+                    return null;
+                };
+                @memset(@as([*]u8, @ptrFromInt(child_pd_page))[0..4096], 0);
+                child_pdpt[pdpt_idx] = (child_pd_page & 0x000FFFFFFFFFF000) | (pdpt_entry & 0xFFF) | vmm.PAGE_PRESENT;
+                const child_pd: [*]u64 = @ptrFromInt(child_pd_page);
+
+                var pd_idx: u16 = 0;
+                while (pd_idx < 512) : (pd_idx += 1) {
+                    const pd_entry = parent_pd[pd_idx];
+                    if (pd_entry & vmm.PAGE_PRESENT == 0) continue;
+
+                    if (pd_entry & vmm.PAGE_SIZE != 0) {
+                        const phys = pd_entry & 0x000FFFFFE0000000;
+                        const new_phys = pmm.allocPages(512) orelse {
+                            child.destroy();
+                            return null;
+                        };
+                        @memcpy(@as([*]u8, @ptrFromInt(new_phys))[0 .. 512 * 4096], @as([*]const u8, @ptrFromInt(phys))[0 .. 512 * 4096]);
+                        child_pd[pd_idx] = (new_phys & 0x000FFFFFE0000000) | (pd_entry & 0xFFF) | vmm.PAGE_PRESENT;
+                        continue;
+                    }
+
+                    const parent_pt_phys = pd_entry & 0x000FFFFFFFFFF000;
+                    const parent_pt: [*]const u64 = @ptrFromInt(parent_pt_phys);
+
+                    const child_pt_page = pmm.allocPage() orelse {
+                        child.destroy();
+                        return null;
+                    };
+                    @memset(@as([*]u8, @ptrFromInt(child_pt_page))[0..4096], 0);
+                    child_pd[pd_idx] = (child_pt_page & 0x000FFFFFFFFFF000) | (pd_entry & 0xFFF) | vmm.PAGE_PRESENT;
+                    const child_pt: [*]u64 = @ptrFromInt(child_pt_page);
+
+                    var pt_idx: u16 = 0;
+                    while (pt_idx < 512) : (pt_idx += 1) {
+                        const pt_entry = parent_pt[pt_idx];
+                        if (pt_entry & vmm.PAGE_PRESENT == 0) continue;
+
+                        const page_phys = pt_entry & 0x000FFFFFFFFFF000;
+                        const new_page = pmm.allocPage() orelse {
+                            child.destroy();
+                            return null;
+                        };
+                        @memcpy(@as([*]u8, @ptrFromInt(new_page))[0..4096], @as([*]const u8, @ptrFromInt(page_phys))[0..4096]);
+                        child_pt[pt_idx] = (new_page & 0x000FFFFFFFFFF000) | (pt_entry & 0xFFF) | vmm.PAGE_PRESENT;
+                    }
+                }
+            }
+        }
+
+        return child;
     }
 
     pub fn switchTo(self: AddressSpace) void {

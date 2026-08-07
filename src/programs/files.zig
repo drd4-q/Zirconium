@@ -246,10 +246,13 @@ pub fn cmdCd(args: []const u8) void {
         return;
     }
 
+    // Resolve to absolute path first
+    const abs_path = vfs.resolveAbsolute(args);
+
     // Check if directory exists
-    if (vfs.stat(args)) |st| {
+    if (vfs.stat(abs_path)) |st| {
         if (st.file_type == .directory) {
-            vfs.setCwd(args);
+            vfs.setCwd(abs_path);
             return;
         }
     }

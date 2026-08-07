@@ -4,11 +4,15 @@ const port = root.serial;
 const net = @import("mod.zig");
 const ip_mod = @import("ip.zig");
 const e1000 = @import("../drivers/e1000.zig");
+const timer = @import("../drivers/timer.zig");
 
 pub var last_rtt: u32 = 0;
+pub var last_rtt_ms: u32 = 0;
 
 var reply_buf: [98]u8 align(16) = undefined;
 var ping_buf: [98]u8 align(16) = undefined;
+var ping_send_tick: u64 = 0;
+var ping_id: u16 = 0;
 
 pub fn handlePacket(frame: []const u8, ihl: usize) void {
     if (frame.len < 14 + ihl + 8) return;
@@ -18,7 +22,12 @@ pub fn handlePacket(frame: []const u8, ihl: usize) void {
     if (icmp_type == 0x08) { // Echo Request
         sendReply(frame, ihl);
     } else if (icmp_type == 0x00) { // Echo Reply
-        last_rtt = 1;
+        const reply_id = (@as(u16, icmp_data[6]) << 8) | icmp_data[7];
+        if (reply_id == ping_id) {
+            const elapsed = timer.ticks -% ping_send_tick;
+            last_rtt_ms = @intCast(@min(elapsed * 10, 0xFFFFFFFF)); // ticks * 10ms
+            last_rtt = 1;
+        }
         port.serialWrite("[ICMP] Reply received\n");
     }
 }
@@ -59,28 +68,40 @@ fn sendReply(request_frame: []const u8, ihl: usize) void {
 
 pub fn ping(target: [4]u8, count: u32) void {
     _ = net.ensureArp(target);
-    const target_mac = net.resolveMac(target) orelse net.gateway_mac;
 
     var i: u32 = 0;
     while (i < count) : (i += 1) {
         last_rtt = 0;
+        last_rtt_ms = 0;
+        ping_id +%= 1;
+
+        const target_mac = net.resolveMac(target) orelse net.gateway_mac;
 
         @memset(&ping_buf, 0);
 
-        ping_buf[0] = target_mac[0]; ping_buf[1] = target_mac[1];
-        ping_buf[2] = target_mac[2]; ping_buf[3] = target_mac[3];
-        ping_buf[4] = target_mac[4]; ping_buf[5] = target_mac[5];
-        ping_buf[6] = net.our_mac[0]; ping_buf[7] = net.our_mac[1];
-        ping_buf[8] = net.our_mac[2]; ping_buf[9] = net.our_mac[3];
-        ping_buf[10] = net.our_mac[4]; ping_buf[11] = net.our_mac[5];
-        ping_buf[12] = 0x08; ping_buf[13] = 0x00;
+        ping_buf[0] = target_mac[0];
+        ping_buf[1] = target_mac[1];
+        ping_buf[2] = target_mac[2];
+        ping_buf[3] = target_mac[3];
+        ping_buf[4] = target_mac[4];
+        ping_buf[5] = target_mac[5];
+        ping_buf[6] = net.our_mac[0];
+        ping_buf[7] = net.our_mac[1];
+        ping_buf[8] = net.our_mac[2];
+        ping_buf[9] = net.our_mac[3];
+        ping_buf[10] = net.our_mac[4];
+        ping_buf[11] = net.our_mac[5];
+        ping_buf[12] = 0x08;
+        ping_buf[13] = 0x00;
 
         ip_mod.buildHeader(net.our_ip, target, 1, 64, ping_buf[14..34]);
 
         ping_buf[34] = 0x08; // Type: Echo Request
         ping_buf[35] = 0x00; // Code
-        ping_buf[36] = 0x00; ping_buf[37] = 0x00; // Checksum
-        ping_buf[38] = 0x00; ping_buf[39] = 0x01; // ID
+        ping_buf[36] = 0x00;
+        ping_buf[37] = 0x00; // Checksum
+        ping_buf[38] = @intCast(ping_id >> 8);
+        ping_buf[39] = @intCast(ping_id & 0xFF); // ID
         ping_buf[40] = @intCast(i >> 8);
         ping_buf[41] = @intCast(i & 0xFF); // Sequence
 
@@ -88,6 +109,7 @@ pub fn ping(target: [4]u8, count: u32) void {
         ping_buf[36] = @intCast(cs >> 8);
         ping_buf[37] = @intCast(cs & 0xFF);
 
+        ping_send_tick = timer.ticks;
         e1000.transmit(ping_buf[0..98]);
 
         vga.write("  Pinging ");
@@ -105,7 +127,9 @@ pub fn ping(target: [4]u8, count: u32) void {
 
         if (last_rtt != 0) {
             vga.setColor(.light_green, .black);
-            vga.write("reply received\n");
+            vga.write("reply received time=");
+            vga.writeDec(last_rtt_ms);
+            vga.write("ms\n");
         } else {
             vga.setColor(.light_red, .black);
             vga.write("timeout\n");

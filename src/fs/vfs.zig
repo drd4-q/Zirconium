@@ -145,12 +145,104 @@ fn findMount(path: []const u8) ?*FileSystem {
     return null;
 }
 
-fn resolvePath(path: []const u8) []const u8 {
-    // Simple: if path starts with '/', it's absolute
-    if (path.len > 0 and path[0] == '/') return path;
+var path_resolve_buf: [256]u8 = undefined;
 
-    // Otherwise prepend CWD
-    return path; // TODO: proper relative path resolution
+fn resolvePath(path: []const u8) []const u8 {
+    // Build full path: absolute or CWD + relative
+    var full_len: usize = 0;
+    if (path.len > 0 and path[0] == '/') {
+        for (path) |ch| {
+            if (full_len < 255) { path_resolve_buf[full_len] = ch; full_len += 1; }
+        }
+    } else {
+        const cwd_slice = cwd[0..cwd_len];
+        for (cwd_slice) |ch| {
+            if (full_len < 255) { path_resolve_buf[full_len] = ch; full_len += 1; }
+        }
+        if (full_len > 0 and path_resolve_buf[full_len - 1] != '/') {
+            if (full_len < 255) { path_resolve_buf[full_len] = '/'; full_len += 1; }
+        }
+        for (path) |ch| {
+            if (full_len < 255) { path_resolve_buf[full_len] = ch; full_len += 1; }
+        }
+    }
+
+    // Normalize: resolve "." and ".." components
+    var out: [256]u8 = undefined;
+    var out_pos: usize = 0;
+    var i: usize = 0;
+
+    while (i < full_len) {
+        // Skip multiple slashes
+        if (path_resolve_buf[i] == '/') {
+            i += 1;
+            continue;
+        }
+
+        // Find end of this component
+        var end = i;
+        while (end < full_len and path_resolve_buf[end] != '/') : (end += 1) {}
+        const comp = path_resolve_buf[i..end];
+
+        if (comp.len == 1 and comp[0] == '.') {
+            // "." — skip
+        } else if (comp.len == 2 and comp[0] == '.' and comp[1] == '.') {
+            // ".." — go up one level
+            if (out_pos > 0) {
+                // Find last '/' and truncate
+                var j: i32 = @intCast(out_pos - 1);
+                while (j >= 0) : (j -= 1) {
+                    if (out[@intCast(j)] == '/') {
+                        out_pos = @intCast(j);
+                        break;
+                    }
+                    if (j == 0) {
+                        out_pos = 0;
+                        break;
+                    }
+                }
+            }
+        } else {
+            // Normal component — append
+            if (out_pos > 0 or (i > 0 and path_resolve_buf[i - 1] == '/')) {
+                if (out_pos < 255) { out[out_pos] = '/'; out_pos += 1; }
+            }
+            for (comp) |ch| {
+                if (out_pos < 255) { out[out_pos] = ch; out_pos += 1; }
+            }
+        }
+
+        i = end;
+    }
+
+    // Empty result = root
+    if (out_pos == 0) {
+        out[0] = '/';
+        out_pos = 1;
+    }
+
+    // Copy result back to path_resolve_buf
+    var k: usize = 0;
+    while (k < out_pos) : (k += 1) {
+        path_resolve_buf[k] = out[k];
+    }
+
+    return path_resolve_buf[0..out_pos];
+}
+
+// Build a relative path within a FS that always starts with '/'
+var rel_path_buf: [256]u8 = undefined;
+fn makeRelPath(resolved: []const u8, mount_point_len: usize) []const u8 {
+    const suffix = resolved[mount_point_len..];
+    if (suffix.len == 0 or suffix[0] == '/') {
+        return suffix;
+    }
+    rel_path_buf[0] = '/';
+    var i: usize = 0;
+    while (i < suffix.len and i < 254) : (i += 1) {
+        rel_path_buf[i + 1] = suffix[i];
+    }
+    return rel_path_buf[0 .. i + 1];
 }
 
 pub fn open(path: []const u8, flags: OpenFlags) ?*FileHandle {
@@ -162,8 +254,8 @@ pub fn open(path: []const u8, flags: OpenFlags) ?*FileHandle {
         return null;
     };
 
-    // Get relative path within mount
-    const rel_path = resolved[fs.mount_point_len..];
+    // Get relative path within mount (always starts with '/')
+    const rel_path = makeRelPath(resolved, fs.mount_point_len);
 
     const handle = fs.openFn(fs, rel_path, flags) orelse return null;
 
@@ -206,28 +298,28 @@ pub fn write(handle: *FileHandle, buf: []const u8) usize {
 pub fn readdir(path: []const u8, entries: []DirEntry) usize {
     const resolved = resolvePath(path);
     const fs = findMount(resolved) orelse return 0;
-    const rel_path = resolved[fs.mount_point_len..];
+    const rel_path = makeRelPath(resolved, fs.mount_point_len);
     return fs.readdirFn(fs, rel_path, entries);
 }
 
 pub fn mkdir(path: []const u8) bool {
     const resolved = resolvePath(path);
     const fs = findMount(resolved) orelse return false;
-    const rel_path = resolved[fs.mount_point_len..];
+    const rel_path = makeRelPath(resolved, fs.mount_point_len);
     return fs.mkdirFn(fs, rel_path);
 }
 
 pub fn unlink(path: []const u8) bool {
     const resolved = resolvePath(path);
     const fs = findMount(resolved) orelse return false;
-    const rel_path = resolved[fs.mount_point_len..];
+    const rel_path = makeRelPath(resolved, fs.mount_point_len);
     return fs.unlinkFn(fs, rel_path);
 }
 
 pub fn stat(path: []const u8) ?StatInfo {
     const resolved = resolvePath(path);
     const fs = findMount(resolved) orelse return null;
-    const rel_path = resolved[fs.mount_point_len..];
+    const rel_path = makeRelPath(resolved, fs.mount_point_len);
     return fs.statFn(fs, rel_path);
 }
 
@@ -241,6 +333,10 @@ pub fn seek(handle: *FileHandle, offset: u64) bool {
 
 pub fn getCwd() []const u8 {
     return cwd[0..cwd_len];
+}
+
+pub fn resolveAbsolute(path: []const u8) []const u8 {
+    return resolvePath(path);
 }
 
 pub fn setCwd(path: []const u8) void {

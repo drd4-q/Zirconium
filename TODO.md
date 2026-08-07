@@ -1,14 +1,14 @@
-# TODO — Zig Kernel
+# TODO — Zirconium
 
 ## Current state
 - Kernel boots via Multiboot/GRUB, identity-mapped 2MB pages
-- VGA + serial output, keyboard driver (IRQ1), timer (PIT 100Hz), PCI, e1000 NIC
+- VGA + serial output, keyboard driver (IRQ1), timer (PIT 100Hz), PCI, e1000 NIC, virtio-blk disk
 - PMM (bitmap page allocator) + VMM (page tables) + kernel heap (kmalloc/kfree/krealloc)
 - TCP/IP stack (ARP, IP, ICMP, TCP, HTTP), DNS resolver, UDP, DHCP, ARP cache
 - VFS layer + ramfs (ls, cat, touch, mkdir, rm, write, cd, mount)
-- Shell with commands: help, clear, calc, clock, ping, get, net, ps, mem, reboot, matrix, fib, lua, user, mouse, set/unset/env, dhcp, arpcache, nslookup, resolution, ls, cat, touch, mkdir, rm, write, cd, mount
+- Shell with commands: help, clear, calc, clock, ping, get, net, ps, mem, reboot, matrix, fib, lua, user, exec, save, mouse, set/unset/env, dhcp, arpcache, nslookup, resolution, ls, cat, touch, mkdir, rm, write, cd, mount
 - GDT with ring 0+3 segments, IDT (256 entries + INT 0x80 DPL3), PIC, TSS
-- Syscall interface (INT 0x80): write, read, sleep, time, exit (fork/exec stubs)
+- Syscall interface (INT 0x80): write, read, sleep, time, exit, exec, waitpid (fork stub)
 - ELF loader, ring 3 context switch via iretq, address spaces per process
 - Lua interpreter (lexer, parser, AST, VM, API) — compiled and working
 - Keyboard flush support for clean input between programs
@@ -43,25 +43,32 @@
 - [x] ELF loader — load user binaries into address space
 - [x] Test ring 3 context switch (jumpToUser with iretq)
 - [x] Test syscalls from user-space (INT 0x80) — write, sleep, exit confirmed working
+- [x] exec syscall — load and run ELF binary from ramfs path
+- [x] waitpid syscall — check finished child tasks
+- [x] Shell commands: save (write user binary to ramfs), exec (run from path)
+- [x] AddressSpace.destroy() frees user-mapped physical pages (no more leaks)
 - [ ] Run Lua as a user-space process (ring 3)
 
 ### Filesystem / storage
 - [x] Virtual filesystem (VFS) layer
 - [x] RAM filesystem (ramfs) with directories /dev, /tmp, /etc
 - [x] Shell commands: ls, cat, touch, mkdir, rm, write, cd, mount
-- [ ] Disk driver (ATA/AHCI or virtio-blk)
-- [ ] Persistent filesystem (FAT16/ext2)
-- [ ] Load programs from disk instead of compiled-in
+- [x] Block device abstraction (blockdev.zig)
+- [x] Virtio-blk driver (PCI discovery, MMIO, read/write sectors)
+- [x] FAT16 filesystem (auto-mounts virtio-blk at /mnt/disk)
+- [x] VFS path resolution (relative paths, CWD, makeRelPath)
+- [x] cd/ls fix for /etc, /dev, /tmp
 
 ### Networking
 - [x] DNS resolver (UDP to 10.0.2.3)
 - [x] UDP support (basic send/receive for DNS)
 - [x] DHCP client (discover/offer/request/ack, auto-configures IP/gateway/DNS)
 - [x] ARP cache (32-entry table with TTL, auto-eviction)
+- [x] TCP: connection multiplexing (4 concurrent connections)
+- [x] TCP: retransmission timer (500ms, exponential backoff, max 10 retries)
+- [x] ICMP RTT measurement (ping shows round-trip time in ms)
 - [ ] Socket API for user-space programs
-- [ ] TCP improvements (retransmission, window scaling, congestion control)
-- [ ] ICMP RTT measurement
-- [ ] UDP socket abstraction
+- [ ] TCP improvements (window scaling, congestion control)
 
 ### Memory management
 - [x] Physical page allocator (PMM bitmap, 4KB pages)
@@ -75,15 +82,17 @@
 - [x] Scheduler with kernel + user tasks
 - [x] ELF loader
 - [x] Address spaces per process
-- [ ] exec syscall (load and run ELF binary)
-- [ ] waitpid / exit with status
+- [x] exec syscall (load and run ELF binary from VFS path)
+- [x] waitpid syscall (check for finished children, non-blocking)
+- [x] fork syscall (clone task + address space, copy user pages + stack)
+- [ ] exit with status propagation to parent
 - [ ] Signals (SIGTERM, SIGKILL, etc.)
 - [ ] Process groups / sessions
 
 ### Driver improvements
 - [x] PS/2 mouse driver
-- [ ] AHCI/virtio-blk disk driver
-- [ ] Virtio-net driver (better than e1000 for QEMU)
+- [x] Virtio-blk disk driver (PCI discovery, MMIO, single virtqueue, read/write sectors, blockdev registration)
+- [ ] AHCI/virtio-blk improvements (multi-queue, interrupt-driven I/O)
 - [ ] PCI enumeration improvements
 
 ### Shell improvements

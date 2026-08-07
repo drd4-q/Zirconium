@@ -1,15 +1,14 @@
 const root = @import("root");
 const vga = root.vga;
-const port = root.serial;
+const port_io = root.serial;
 const net = @import("mod.zig");
 const tcp = @import("tcp.zig");
 const dns = @import("dns.zig");
+const timer = @import("../drivers/timer.zig");
 
 var http_req_buf: [512]u8 = undefined;
 
 pub fn httpGet(host: []const u8, path: []const u8) void {
-    tcp.resetState();
-
     // Try to parse host as IP first, otherwise resolve via DNS
     var host_ip: [4]u8 = undefined;
     if (parseIp(host)) |ip| {
@@ -24,10 +23,22 @@ pub fn httpGet(host: []const u8, path: []const u8) void {
         host_ip = resolved;
     }
 
-    if (!tcp.connect(host_ip, 80)) {
+    var conn = tcp.connect(host_ip, 80);
+
+    var timeout: u32 = 0;
+    while (timeout < 200 and conn.state != .established) : (timeout += 1) {
+        net.poll();
+        var j: u32 = 0;
+        while (j < 100000) : (j += 1) {
+            asm volatile ("nop");
+        }
+    }
+
+    if (conn.state != .established) {
         vga.setColor(.light_red, .black);
         vga.write("[HTTP] Connection failed\n");
         vga.setColor(.white, .black);
+        tcp.disconnect(conn);
         return;
     }
 
@@ -41,22 +52,36 @@ pub fn httpGet(host: []const u8, path: []const u8) void {
 
     var pos: usize = 0;
 
-    for ("GET ") |ch| { http_req_buf[pos] = ch; pos += 1; }
-    for (path) |ch| { http_req_buf[pos] = ch; pos += 1; }
-    for (" HTTP/1.0\r\nHost: ") |ch| { http_req_buf[pos] = ch; pos += 1; }
-    for (host) |ch| { http_req_buf[pos] = ch; pos += 1; }
-    for ("\r\nConnection: close\r\n\r\n") |ch| { http_req_buf[pos] = ch; pos += 1; }
+    for ("GET ") |ch| {
+        http_req_buf[pos] = ch;
+        pos += 1;
+    }
+    for (path) |ch| {
+        http_req_buf[pos] = ch;
+        pos += 1;
+    }
+    for (" HTTP/1.0\r\nHost: ") |ch| {
+        http_req_buf[pos] = ch;
+        pos += 1;
+    }
+    for (host) |ch| {
+        http_req_buf[pos] = ch;
+        pos += 1;
+    }
+    for ("\r\nConnection: close\r\n\r\n") |ch| {
+        http_req_buf[pos] = ch;
+        pos += 1;
+    }
 
-    tcp.send(http_req_buf[0..pos]);
+    tcp.send(conn, http_req_buf[0..pos]);
 
     vga.write("[HTTP] Request sent, waiting for response...\n");
 
     // Wait for response
-    tcp.rx_len = 0;
-    tcp.rx_ready = false;
+    tcp.resetState(conn);
 
-    var timeout: u32 = 0;
-    while (timeout < 300 and (!tcp.rx_ready or tcp.state == .established)) : (timeout += 1) {
+    timeout = 0;
+    while (timeout < 300 and (!conn.rx_ready or conn.state == .established)) : (timeout += 1) {
         net.poll();
         var j: u32 = 0;
         while (j < 100000) : (j += 1) {
@@ -65,15 +90,16 @@ pub fn httpGet(host: []const u8, path: []const u8) void {
     }
 
     // Print response
-    if (tcp.rx_len > 0) {
-        printResponse(tcp.rx_data[0..tcp.rx_len]);
+    if (conn.rx_len > 0) {
+        printResponse(conn.rx_buf[0..conn.rx_len]);
     } else {
         vga.setColor(.light_red, .black);
         vga.write("[HTTP] No response received\n");
         vga.setColor(.white, .black);
     }
 
-    tcp.close();
+    tcp.close(conn);
+    tcp.disconnect(conn);
 }
 
 fn parseIp(host: []const u8) ?[4]u8 {
@@ -94,7 +120,7 @@ fn parseIp(host: []const u8) ?[4]u8 {
             if (num > 255) return null;
             has_digit = true;
         } else {
-            return null; // non-numeric char = not an IP
+            return null;
         }
     }
 
@@ -104,7 +130,6 @@ fn parseIp(host: []const u8) ?[4]u8 {
 }
 
 fn printResponse(data: []const u8) void {
-    // Skip headers (find \r\n\r\n)
     var body_start: usize = 0;
     var i: usize = 0;
     while (i + 3 < data.len) : (i += 1) {
@@ -114,7 +139,6 @@ fn printResponse(data: []const u8) void {
         }
     }
 
-    // Print status line
     vga.setColor(.light_cyan, .black);
     var j: usize = 0;
     while (j < data.len and data[j] != '\r') : (j += 1) {
@@ -123,7 +147,6 @@ fn printResponse(data: []const u8) void {
     vga.write("\n");
     vga.setColor(.white, .black);
 
-    // Print body (strip HTML tags for display)
     if (body_start < data.len) {
         vga.write("\n");
         printText(data[body_start..]);
@@ -158,7 +181,6 @@ fn printText(data: []const u8) void {
         } else if (ch == ' ' or ch == '\t') {
             if (!skip_line) vga.putChar(' ');
         } else if (ch == '&') {
-            // Skip HTML entities
             skip_line = true;
         } else {
             skip_line = false;

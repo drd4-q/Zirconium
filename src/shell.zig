@@ -48,7 +48,7 @@ var env_store: [ENV_MAX]EnvEntry = undefined;
 const commands = [_][]const u8{
     "help",  "info",    "sysinfo", "mem",  "ps",   "clear", "cls",
     "halt",  "reboot",  "calc",    "color","clock","fib",   "matrix",
-    "lua",   "user",    "ping",    "net",  "get",  "wget",
+    "lua",   "user",    "exec",    "save", "ping", "net",  "get",  "wget",
     "set",   "unset",   "env",     "mouse","resolution",
     "dhcp",  "arpcache","nslookup",
     "ls",    "cat",     "touch",   "mkdir","rm",  "write", "cd",
@@ -66,6 +66,12 @@ pub fn run() void {
         _ = e1000.init(dev);
         net.init();
     }
+
+    // Try to init virtio-blk disk
+    @import("drivers/virtio_blk.zig").init();
+
+    // Auto-mount FAT16 if block device available
+    @import("fs/fat16.zig").init();
 
     mouse.init();
 
@@ -99,13 +105,13 @@ pub fn run() void {
 
 fn printBanner() void {
     vga.setColor(.light_cyan, .black);
-    vga.write("  ____          _\n");
-    vga.write(" / ___|___   __| | ___  _ __ ___\n");
-    vga.write("| |   / _ \\ / _` |/ _ \\| '__/ _ \\\n");
-    vga.write("| |__| (_) | (_| |  __/| | | (_) |\n");
-    vga.write(" \\____\\___/ \\__,_|\\___||_|  \\___/\n");
+    vga.write("  ____                _                   \n");
+    vga.write(" |  _ \\  ___  ___ ___| |_ _  _ _ __ ___  \n");
+    vga.write(" | | | |/ _ \\/ __/ _ \\  _| || | '_ ` _ \\ \n");
+    vga.write(" | |_| |  __/ (_|  __/ | | || | | | | | |\n");
+    vga.write(" |____/ \\___|\\___\\___|\\__|\\_,_|_| |_| |_|\n");
     vga.setColor(.white, .black);
-    vga.write("\n  Bare-metal x86_64 kernel v0.2.0 — IRQ-based\n");
+    vga.write("\n  Zirconium v0.2.0 — Bare-metal x86_64\n");
     vga.write("  Type 'help' for commands.\n\n");
 }
 
@@ -163,6 +169,10 @@ fn execute(cmd: []const u8) void {
         } else {
             vga.write("[SHELL] Error: failed to spawn user task\n");
         }
+    } else if (eql(cmd_name, "exec")) {
+        cmdExec(args);
+    } else if (eql(cmd_name, "save")) {
+        cmdSave(args);
     } else if (eql(cmd_name, "matrix")) {
 
         matrix.run();
@@ -418,6 +428,70 @@ fn cmdNslookup(args: []const u8) void {
     }
 }
 
+fn cmdExec(args: []const u8) void {
+    if (args.len == 0) {
+        vga.setColor(.light_red, .black);
+        vga.write("  Usage: exec <path>\n");
+        vga.setColor(.white, .black);
+        return;
+    }
+
+    const sched = root.scheduler;
+    vga.setColor(.light_cyan, .black);
+    vga.write("[SHELL] exec: loading ");
+    vga.write(args);
+    vga.write("\n");
+    vga.setColor(.white, .black);
+
+    // Create a user task that loads from the ramfs path
+    if (sched.addUserTaskFromPath(args)) |task_id| {
+        _ = task_id;
+        sched.runAll();
+    } else {
+        vga.write("[SHELL] Error: failed to exec ");
+        vga.write(args);
+        vga.write("\n");
+    }
+}
+
+fn cmdSave(args: []const u8) void {
+    const path = if (args.len == 0) "/bin/user_test" else args;
+
+    const user_test_bin = @import("user_test_bin");
+
+    vga.setColor(.light_cyan, .black);
+    vga.write("[SHELL] Saving user binary to ");
+    vga.write(path);
+    vga.write("...\n");
+    vga.setColor(.white, .black);
+
+    // Ensure parent directory exists
+    var dir_end: usize = path.len;
+    var i: usize = path.len;
+    while (i > 0) : (i -= 1) {
+        if (path[i - 1] == '/') {
+            dir_end = i - 1;
+            break;
+        }
+    }
+    if (dir_end > 0) {
+        _ = vfs.mkdir(path[0..dir_end]);
+    }
+
+    const handle = vfs.open(path, .{ .create = true, .truncate = true, .write = true }) orelse {
+        vga.write("[SHELL] Error: failed to create file\n");
+        return;
+    };
+    defer vfs.close(handle);
+
+    const written = vfs.write(handle, &user_test_bin.data);
+    vga.setColor(.green, .black);
+    vga.write("[SHELL] Saved ");
+    vga.writeDec(written);
+    vga.write(" bytes\n");
+    vga.setColor(.white, .black);
+}
+
 fn printHelp() void {
     vga.setColor(.cyan, .black);
     vga.write("\n  === Commands ===\n\n");
@@ -441,7 +515,10 @@ fn printHelp() void {
     vga.write("    clock         Real-time clock\n");
     vga.write("    fib           Fibonacci sequence (F0-F40)\n");
     vga.write("    matrix        Matrix rain animation\n");
-    vga.write("    lua           Lua 5.x REPL interpreter\n\n");
+    vga.write("    lua           Lua 5.x REPL interpreter\n");
+    vga.write("    user          Run compiled-in user ELF\n");
+    vga.write("    save [path]   Save user binary to ramfs\n");
+    vga.write("    exec <path>   Run ELF from ramfs path\n\n");
     vga.write("  Network:\n");
     vga.write("    net           Network interface info\n");
     vga.write("    ping [ip]     Ping (default: gateway)\n");

@@ -3,6 +3,8 @@ const pmm = @import("pmm.zig");
 const vmm = @import("vmm.zig");
 const address_space = @import("address_space.zig");
 const serial = @import("../system/serial.zig");
+const vfs = @import("../fs/vfs.zig");
+const kalloc = @import("kalloc.zig");
 
 // ELF64 Headers
 const Elf64_Ehdr = extern struct {
@@ -105,4 +107,36 @@ pub fn loadElf(addr_space: address_space.AddressSpace, elf_data: []const u8) !u6
     serial.serialWrite("\n");
 
     return ehdr.e_entry;
+}
+
+pub fn loadElfFromPath(addr_space: address_space.AddressSpace, path: []const u8) !u64 {
+    // Get file size
+    const info = vfs.stat(path) orelse {
+        serial.serialWrite("[ELF] File not found: ");
+        serial.serialWrite(path);
+        serial.serialWrite("\n");
+        return error.FileNotFound;
+    };
+    if (info.size == 0) return error.InvalidElfHeader;
+
+    // Allocate kernel buffer for the file
+    const buf = @as([*]u8, @ptrFromInt(@intFromPtr(kalloc.kmalloc(@as(usize, @intCast(info.size))) orelse return error.OutOfMemory)));
+    defer kalloc.kfree(@ptrFromInt(@intFromPtr(buf)));
+
+    // Open and read file
+    const handle = vfs.open(path, .{ .read = true }) orelse {
+        serial.serialWrite("[ELF] Failed to open: ");
+        serial.serialWrite(path);
+        serial.serialWrite("\n");
+        return error.FileNotFound;
+    };
+    defer vfs.close(handle);
+
+    const bytes_read = vfs.read(handle, buf[0..@as(usize, @intCast(info.size))]);
+    if (bytes_read < @as(usize, @intCast(info.size))) {
+        serial.serialWrite("[ELF] Short read\n");
+        return error.InvalidElfHeader;
+    }
+
+    return loadElf(addr_space, buf[0..bytes_read]);
 }

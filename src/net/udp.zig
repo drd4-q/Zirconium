@@ -41,10 +41,18 @@ pub fn handlePacket(frame: []const u8, ihl: usize) void {
 pub fn sendPacket(dst_ip: [4]u8, dst_port_val: u16, src_port_val: u16, payload: []const u8) void {
     // Resolve destination MAC via ARP cache
     const dst_mac = net.resolveMac(dst_ip) orelse {
-        // ARP request + poll
-        _ = net.ensureArp(dst_ip);
+        // ARP request + poll — if resolved, continue to send
+        if (!net.ensureArp(dst_ip)) return;
+        // Retry lookup after ARP resolved
+        const mac = net.resolveMac(dst_ip) orelse return;
+        sendPacketInner(mac, dst_ip, dst_port_val, src_port_val, payload);
         return;
     };
+
+    sendPacketInner(dst_mac, dst_ip, dst_port_val, src_port_val, payload);
+}
+
+fn sendPacketInner(dst_mac: [6]u8, dst_ip: [4]u8, dst_port_val: u16, src_port_val: u16, payload: []const u8) void {
 
     @memset(&udp_tx_buf, 0);
 

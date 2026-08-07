@@ -1,6 +1,6 @@
 const root = @import("root");
 const vga = root.vga;
-const port = root.serial;
+const port_io = root.serial;
 const pci = @import("../drivers/pci.zig");
 const e1000 = @import("../drivers/e1000.zig");
 const net = @import("../net/mod.zig");
@@ -46,16 +46,48 @@ pub fn run() void {
     vga.setColor(.white, .black);
     vga.write("\n\n");
 
+    // Show TCP connections
     vga.setColor(.yellow, .black);
-    vga.write("  TCP State: ");
+    vga.write("  TCP Connections:\n");
     vga.setColor(.white, .black);
-    switch (tcp.state) {
-        .closed => vga.write("CLOSED"),
-        .syn_sent => vga.write("SYN_SENT"),
-        .established => vga.write("ESTABLISHED"),
-        .fin_wait => vga.write("FIN_WAIT"),
+
+    var any_active = false;
+    for (tcp.connections_list()) |*c| {
+        if (c.state != .closed) {
+            any_active = true;
+            vga.write("    [");
+            vga.writeDec(@intCast(c.id));
+            vga.write("] ");
+            net.printIp(c.remote_ip);
+            vga.putChar(':');
+            vga.writeDec(c.remote_port);
+            vga.write(" -> ");
+            vga.writeDec(c.local_port);
+            vga.write("  ");
+            switch (c.state) {
+                .closed => vga.write("CLOSED"),
+                .syn_sent => vga.write("SYN_SENT"),
+                .syn_received => vga.write("SYN_RECEIVED"),
+                .established => vga.write("ESTABLISHED"),
+                .fin_wait_1 => vga.write("FIN_WAIT_1"),
+                .fin_wait_2 => vga.write("FIN_WAIT_2"),
+                .close_wait => vga.write("CLOSE_WAIT"),
+                .last_ack => vga.write("LAST_ACK"),
+                .time_wait => vga.write("TIME_WAIT"),
+            }
+            if (c.retx_active) {
+                vga.setColor(.yellow, .black);
+                vga.write(" [retx]");
+                vga.setColor(.white, .black);
+            }
+            vga.write("\n");
+        }
     }
-    vga.write("\n\n");
+
+    if (!any_active) {
+        vga.write("    (none)\n");
+    }
+    vga.write("\n");
 
     // Show ARP cache
     arp_cache.printCache();

@@ -40,6 +40,7 @@ pub fn init() void {
 
 pub fn tick() void {
     arp_cache.tick();
+    @import("tcp.zig").retxTick();
 }
 
 pub fn poll() void {
