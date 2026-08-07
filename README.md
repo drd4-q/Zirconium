@@ -1,4 +1,4 @@
-# zigcore
+# Zirconium
 A minimalist operating system kernel written in Zig.
 
 [![Project Status](https://img.shields.io/badge/status-active-brightgreen)](#)
