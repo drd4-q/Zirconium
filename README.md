@@ -17,4 +17,4 @@ A minimalist operating system kernel written in Zig.
 ---
 
 ## Development & Roadmap
-The project is under active development. You can track current progress, immediate tasks, and future plans in our [TODO.md](TODO.md) file.
+The project is under active development. You can track current progress, immediate tasks, and future plans in [TODO.md](TODO.md) file.
