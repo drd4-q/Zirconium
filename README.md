@@ -1,3 +1,25 @@
 # Zirconium
+<<<<<<< HEAD
 Bare-metal x86_64 OS kernel in Zig
 [TODOS](TODO.md)
+=======
+A minimalist operating system kernel written in Zig.
+
+[![Project Status](https://img.shields.io/badge/status-active-brightgreen)](#)
+[![Roadmap](https://img.shields.io/badge/tasks-TODOs-blue)](TODO.md)
+
+---
+
+## Philosophy / Философия / Philosophia
+
+> **EN:** Keep it simple, yet clear.
+> 
+> **RU:** Делай просто, но понятно.
+> 
+> **LA:** Fac simpliciter, sed manifeste.
+
+---
+
+## Development & Roadmap
+The project is under active development. You can track current progress, immediate tasks, and future plans in [TODO.md](TODO.md) file.
+>>>>>>> d8327a1e7a028691d3729542d966d4152fec78c0
