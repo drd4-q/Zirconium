@@ -6,9 +6,10 @@ pub const PAGE_PRESENT: u64 = 1 << 0;
 pub const PAGE_WRITE: u64 = 1 << 1;
 pub const PAGE_USER: u64 = 1 << 2;
 pub const PAGE_SIZE: u64 = 1 << 7;
+pub const PAGE_COW: u64 = 1 << 9; // Bit 9: Copy-on-write
 pub const PAGE_NX: u64 = 1 << 63;
 
-const PAGE_ADDR_MASK: u64 = 0x000FFFFFFFFFF000;
+pub const PAGE_ADDR_MASK: u64 = 0x000FFFFFFFFFF000;
 
 pub fn getCurrentCr3() u64 {
     return asm volatile ("movq %%cr3, %[ret]" : [ret] "=r" (-> u64));
@@ -24,6 +25,61 @@ fn getTableEntry(table: [*]u64, index: u16) u64 {
 
 fn setTableEntry(table: [*]u64, index: u16, phys_addr: u64, flags: u64) void {
     table[index] = (phys_addr & PAGE_ADDR_MASK) | flags;
+}
+
+pub fn handlePageFault(fault_addr: u64, error_code: u64) bool {
+    // Check if error code indicates write fault (W bit 1)
+    if (error_code & 0x02 == 0) return false;
+
+    const pml4_idx: u16 = @intCast((fault_addr >> 39) & 0x1FF);
+    const pdpt_idx: u16 = @intCast((fault_addr >> 30) & 0x1FF);
+    const pd_idx: u16 = @intCast((fault_addr >> 21) & 0x1FF);
+    const pt_idx: u16 = @intCast((fault_addr >> 12) & 0x1FF);
+
+    const cr3 = getCurrentCr3();
+    const pml4: [*]u64 = @ptrFromInt(cr3);
+
+    const pml4_entry = getTableEntry(pml4, pml4_idx);
+    if (pml4_entry & PAGE_PRESENT == 0) return false;
+    const pdpt: [*]u64 = @ptrFromInt(pml4_entry & PAGE_ADDR_MASK);
+
+    const pdpt_entry = getTableEntry(pdpt, pdpt_idx);
+    if (pdpt_entry & PAGE_PRESENT == 0) return false;
+    const pd: [*]u64 = @ptrFromInt(pdpt_entry & PAGE_ADDR_MASK);
+
+    const pd_entry = getTableEntry(pd, pd_idx);
+    if (pd_entry & PAGE_PRESENT == 0) return false;
+    const pt: [*]u64 = @ptrFromInt(pd_entry & PAGE_ADDR_MASK);
+
+    const pt_entry = getTableEntry(pt, pt_idx);
+    if (pt_entry & PAGE_PRESENT == 0) return false;
+
+    // Check if page is marked COW
+    if (pt_entry & PAGE_COW == 0) return false;
+
+    const page_phys = pt_entry & PAGE_ADDR_MASK;
+    const ref_cnt = pmm.getRef(page_phys);
+
+    if (ref_cnt > 1) {
+        // Allocate a new physical page for writer
+        const new_page = pmm.allocPage() orelse return false;
+        @memcpy(@as([*]u8, @ptrFromInt(new_page))[0..4096], @as([*]const u8, @ptrFromInt(page_phys))[0..4096]);
+        _ = pmm.decRef(page_phys);
+
+        const new_flags = (pt_entry & 0xFFF & ~PAGE_COW) | PAGE_WRITE | PAGE_PRESENT;
+        setTableEntry(pt, pt_idx, new_page, new_flags);
+    } else {
+        // Only one owner left: convert to writable, clear COW
+        const new_flags = (pt_entry & 0xFFF & ~PAGE_COW) | PAGE_WRITE | PAGE_PRESENT;
+        setTableEntry(pt, pt_idx, page_phys, new_flags);
+    }
+
+    invalidatePage(fault_addr);
+    serial.serialWrite("[COW] Resolved write fault at 0x");
+    serial.serialWriteHex(fault_addr);
+    serial.serialWrite("\n");
+
+    return true;
 }
 
 fn nextPageTable(table: [*]u64, index: u16, flags: u64) [*]u64 {

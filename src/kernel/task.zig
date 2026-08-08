@@ -49,4 +49,5 @@ pub const Task = struct {
     address_space: ?@import("address_space.zig").AddressSpace = null,
     parent_id: i32 = -1,
     exit_code: i32 = 0,
+    sockets: [8]?*@import("../net/tcp.zig").Connection = [_]?*@import("../net/tcp.zig").Connection{null} ** 8,
 };

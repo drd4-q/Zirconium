@@ -112,6 +112,9 @@ export fn isr_handler(frame: *InterruptFrame) callconv(.c) void {
         if (int_num == 14) {
             var fault_addr: u64 = 0;
             asm volatile ("movq %%cr2, %[addr]" : [addr] "=r" (fault_addr));
+            if (@import("../kernel/vmm.zig").handlePageFault(fault_addr, frame.error_code)) {
+                return;
+            }
             serial.serialWrite("  CR2 (fault addr): 0x");
             serial.serialWriteHex(fault_addr);
             serial.serialWrite("\n");
@@ -127,6 +130,8 @@ export fn isr_handler(frame: *InterruptFrame) callconv(.c) void {
         }
         vga.putChar('\n');
 
+        @import("../system/panic.zig").printBacktrace(frame.rbp);
+
         while (true) {
             asm volatile ("cli; hlt");
         }
@@ -139,5 +144,6 @@ export fn isr_handler(frame: *InterruptFrame) callconv(.c) void {
         }
 
         pic.sendEoi(irq);
+        @import("../drivers/apic.zig").sendEoi();
     }
 }

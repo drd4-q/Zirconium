@@ -6,10 +6,19 @@ cd "$SCRIPT_DIR"
 # Флаг --vnc: если передан, используем VNC вместо обычного дисплея
 DISPLAY_MODE="-display gtk"
 VNC_MSG=""
+GDB_OPTS=""
+
 for arg in "$@"; do
     if [ "$arg" == "--vnc" ]; then
         DISPLAY_MODE="-vnc 0.0.0.0:1"
         VNC_MSG=" Access: VNC at <host-ip>:5901"
+    elif [ "$arg" == "--test" ]; then
+        echo "=== Running Integration Test Suite ==="
+        python3 tools/test_runner.py
+        exit 0
+    elif [ "$arg" == "--gdb" ]; then
+        GDB_OPTS="-s -S"
+        echo "=== GDB Remote Debugging Enabled (target remote localhost:1234) ==="
     fi
 done
 
@@ -49,4 +58,5 @@ qemu-system-x86_64 \
     -serial stdio \
     -d int,cpu_reset \
     -D qemu.log \
+    $GDB_OPTS \
     -no-reboot

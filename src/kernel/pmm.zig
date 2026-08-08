@@ -6,11 +6,13 @@ const TOTAL_PAGES: usize = TOTAL_MEMORY / PAGE_SIZE;
 const BITMAP_SIZE: usize = TOTAL_PAGES / 8;
 
 var bitmap: [BITMAP_SIZE]u8 = [_]u8{0} ** BITMAP_SIZE;
+var ref_counts: [TOTAL_PAGES]u16 = [_]u16{0} ** TOTAL_PAGES;
 pub var total_pages: usize = TOTAL_PAGES;
 pub var free_pages: usize = 0;
 
 pub fn init(kernel_start: usize, kernel_end: usize) void {
     @memset(&bitmap, 0xFF);
+    @memset(&ref_counts, 0);
 
     const usable_start: usize = 0x100000;
     const usable_end: usize = TOTAL_MEMORY;
@@ -42,7 +44,9 @@ pub fn allocPage() ?usize {
                 if (bitmap[byte_idx] & (@as(u8, 1) << @intCast(bit)) == 0) {
                     bitmap[byte_idx] |= @as(u8, 1) << @intCast(bit);
                     free_pages -= 1;
-                    return (byte_idx * 8 + bit) * PAGE_SIZE;
+                    const p_idx = byte_idx * 8 + bit;
+                    ref_counts[p_idx] = 1;
+                    return p_idx * PAGE_SIZE;
                 }
             }
         }
@@ -79,6 +83,7 @@ pub fn allocPages(count: usize) ?usize {
                 while (i < count) : (i += 1) {
                     const p = start_page + i;
                     bitmap[p / 8] |= @as(u8, 1) << @intCast(p % 8);
+                    ref_counts[p] = 1;
                 }
                 free_pages -= count;
                 return start_page * PAGE_SIZE;
@@ -88,11 +93,36 @@ pub fn allocPages(count: usize) ?usize {
     return null;
 }
 
-pub fn freePage(addr: usize) void {
+pub fn incRef(addr: usize) void {
     const page = addr / PAGE_SIZE;
-    if (page >= TOTAL_PAGES) return;
-    bitmap[page / 8] &= ~(@as(u8, 1) << @intCast(page % 8));
-    free_pages += 1;
+    if (page < TOTAL_PAGES) {
+        ref_counts[page] += 1;
+    }
+}
+
+pub fn decRef(addr: usize) u16 {
+    const page = addr / PAGE_SIZE;
+    if (page < TOTAL_PAGES and ref_counts[page] > 0) {
+        ref_counts[page] -= 1;
+        if (ref_counts[page] == 0) {
+            bitmap[page / 8] &= ~(@as(u8, 1) << @intCast(page % 8));
+            free_pages += 1;
+        }
+        return ref_counts[page];
+    }
+    return 0;
+}
+
+pub fn getRef(addr: usize) u16 {
+    const page = addr / PAGE_SIZE;
+    if (page < TOTAL_PAGES) {
+        return ref_counts[page];
+    }
+    return 0;
+}
+
+pub fn freePage(addr: usize) void {
+    _ = decRef(addr);
 }
 
 pub fn freePages(addr: usize, count: usize) void {

@@ -87,44 +87,14 @@ _start:
     movl %eax, pdpt_table + 24
 
     movl $(PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE), %eax
-    movl $512, %ecx
+    movl $2048, %ecx
     leal pd_table_0, %edi
-.fill_pd0:
+.fill_pds:
     movl %eax, (%edi)
     addl $8, %edi
     addl $0x200000, %eax
     decl %ecx
-    jnz .fill_pd0
-
-    movl $(PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE), %eax
-    movl $512, %ecx
-    leal pd_table_1, %edi
-.fill_pd1:
-    movl %eax, (%edi)
-    addl $8, %edi
-    addl $0x200000, %eax
-    decl %ecx
-    jnz .fill_pd1
-
-    movl $(PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE), %eax
-    movl $512, %ecx
-    leal pd_table_2, %edi
-.fill_pd2:
-    movl %eax, (%edi)
-    addl $8, %edi
-    addl $0x200000, %eax
-    decl %ecx
-    jnz .fill_pd2
-
-    movl $(PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE), %eax
-    movl $512, %ecx
-    leal pd_table_3, %edi
-.fill_pd3:
-    movl %eax, (%edi)
-    addl $8, %edi
-    addl $0x200000, %eax
-    decl %ecx
-    jnz .fill_pd3
+    jnz .fill_pds
 
     leal pml4_table, %eax
     movl %eax, %cr3

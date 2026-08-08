@@ -3,11 +3,21 @@ setlocal enabledelayedexpansion
 
 set DISPLAY_MODE=-display gtk
 set VNC_MSG=
+set GDB_OPTS=
 
 for %%a in (%*) do (
     if "%%a"=="--vnc" (
         set DISPLAY_MODE=-vnc 0.0.0.0:1
         set VNC_MSG= Access: VNC at ^<host-ip^>:5901
+    )
+    if "%%a"=="--test" (
+        echo === Running Integration Test Suite ===
+        python tools\test_runner.py
+        exit /b %ERRORLEVEL%
+    )
+    if "%%a"=="--gdb" (
+        set GDB_OPTS=-s -S
+        echo === GDB Remote Debugging Enabled (target remote localhost:1234) ===
     )
 )
 
@@ -46,4 +56,5 @@ qemu-system-x86_64 ^
     -serial stdio ^
     -d int,cpu_reset ^
     -D qemu.log ^
+    !GDB_OPTS! ^
     -no-reboot

@@ -185,13 +185,21 @@ pub const AddressSpace = struct {
                         const pt_entry = parent_pt[pt_idx];
                         if (pt_entry & vmm.PAGE_PRESENT == 0) continue;
 
-                        const page_phys = pt_entry & 0x000FFFFFFFFFF000;
-                        const new_page = pmm.allocPage() orelse {
-                            child.destroy();
-                            return null;
-                        };
-                        @memcpy(@as([*]u8, @ptrFromInt(new_page))[0..4096], @as([*]const u8, @ptrFromInt(page_phys))[0..4096]);
-                        child_pt[pt_idx] = (new_page & 0x000FFFFFFFFFF000) | (pt_entry & 0xFFF) | vmm.PAGE_PRESENT;
+                        const page_phys = pt_entry & vmm.PAGE_ADDR_MASK;
+                        const parent_vaddr = (@as(u64, pml4_idx) << 39) | (@as(u64, pdpt_idx) << 30) | (@as(u64, pd_idx) << 21) | (@as(u64, pt_idx) << 12);
+
+                        if (pt_entry & vmm.PAGE_WRITE != 0) {
+                            const parent_pt_mut: [*]u64 = @ptrFromInt(parent_pt_phys);
+                            const cow_flags = (pt_entry & ~@as(u64, vmm.PAGE_WRITE)) | vmm.PAGE_COW;
+                            parent_pt_mut[pt_idx] = cow_flags;
+                            vmm.invalidatePage(parent_vaddr);
+
+                            child_pt[pt_idx] = cow_flags;
+                            pmm.incRef(page_phys);
+                        } else {
+                            child_pt[pt_idx] = pt_entry;
+                            pmm.incRef(page_phys);
+                        }
                     }
                 }
             }

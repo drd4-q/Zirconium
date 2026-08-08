@@ -19,6 +19,8 @@ pub fn init() void {
     port_io.outb(0x40, hi);
 
     isr_mod.registerIrq(0, irqHandler);
+
+    _ = @import("apic.zig").init();
 }
 
 fn irqHandler(_: *isr_mod.InterruptFrame) void {

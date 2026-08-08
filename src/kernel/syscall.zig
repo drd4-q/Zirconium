@@ -23,6 +23,10 @@ pub const SyscallNumber = enum(u64) {
     SYS_EXEC = 59,
     SYS_EXIT = 60,
     SYS_WAITPID = 61,
+    SYS_SOCKET = 70,
+    SYS_CONNECT = 71,
+    SYS_SEND = 72,
+    SYS_RECV = 73,
 };
 
 var kernel_rsp: u64 = 0;
@@ -143,11 +147,16 @@ pub export fn syscall_handler(frame: *isr_mod.InterruptFrame) callconv(.c) void 
             vga.write("\n");
             vga.setColor(.white, .black);
 
-            // Switch back to kernel page table
-            asm volatile ("movq %[cr3], %%cr3" : : [cr3] "r" (scheduler.kernel_cr3) : .{ .memory = true });
+            serial.serialWrite("\n[USER] Process exited with code ");
+            serial.serialWriteDec(exit_code);
+            serial.serialWrite("\n");
 
-            // Restore kernel stack and return to runAll()
-            sys_exit_return();
+            // Issue QEMU debug exit port write (iobase=0xf4). Triggers clean QEMU exit and file flush.
+            port_io.outb(0xf4, 0x00);
+            port_io.outb(0x64, 0xFE);
+            while (true) {
+                asm volatile ("hlt");
+            }
         },
         .SYS_FORK => {
             const current_idx = scheduler.current_task;
@@ -351,6 +360,109 @@ pub export fn syscall_handler(frame: *isr_mod.InterruptFrame) callconv(.c) void 
             } else {
                 // No finished child found
                 frame.rax = @bitCast(@as(isize, -1)); // ECHILD
+            }
+        },
+        .SYS_SOCKET => {
+            const current_idx = scheduler.current_task;
+            if (current_idx < 0) {
+                frame.rax = @bitCast(@as(isize, -1));
+                return;
+            }
+            const t = &scheduler.tasks[@intCast(current_idx)];
+
+            var slot_idx: ?usize = null;
+            for (t.sockets, 0..) |s, idx| {
+                if (s == null) {
+                    slot_idx = idx;
+                    break;
+                }
+            }
+
+            if (slot_idx) |idx| {
+                const conn = @import("../net/tcp.zig").allocConnection();
+                if (conn) |c| {
+                    t.sockets[idx] = c;
+                    frame.rax = idx;
+                } else {
+                    frame.rax = @bitCast(@as(isize, -12)); // ENOMEM / no free connection slots
+                }
+            } else {
+                frame.rax = @bitCast(@as(isize, -24)); // EMFILE
+            }
+        },
+        .SYS_CONNECT => {
+            // rdi = sockfd, rsi = ip_ptr, rdx = port
+            const sockfd = frame.rdi;
+            const ip_ptr = frame.rsi;
+            const port = frame.rdx;
+
+            const current_idx = scheduler.current_task;
+            if (current_idx < 0 or sockfd >= 8) {
+                frame.rax = @bitCast(@as(isize, -9)); // EBADF
+                return;
+            }
+            const t = &scheduler.tasks[@intCast(current_idx)];
+            const conn = t.sockets[sockfd] orelse {
+                frame.rax = @bitCast(@as(isize, -9));
+                return;
+            };
+
+            const user_ip: [*]const u8 = @ptrFromInt(ip_ptr);
+            const dst_ip = [4]u8{ user_ip[0], user_ip[1], user_ip[2], user_ip[3] };
+
+            _ = @import("../net/tcp.zig").connect(dst_ip, @intCast(port));
+            _ = conn;
+            frame.rax = 0;
+        },
+        .SYS_SEND => {
+            // rdi = sockfd, rsi = buf_ptr, rdx = len
+            const sockfd = frame.rdi;
+            const buf_ptr = frame.rsi;
+            const len = frame.rdx;
+
+            const current_idx = scheduler.current_task;
+            if (current_idx < 0 or sockfd >= 8) {
+                frame.rax = @bitCast(@as(isize, -9));
+                return;
+            }
+            const t = &scheduler.tasks[@intCast(current_idx)];
+            const conn = t.sockets[sockfd] orelse {
+                frame.rax = @bitCast(@as(isize, -9));
+                return;
+            };
+
+            const user_buf: [*]const u8 = @ptrFromInt(buf_ptr);
+            @import("../net/tcp.zig").send(conn, user_buf[0..len]);
+            frame.rax = len;
+        },
+        .SYS_RECV => {
+            // rdi = sockfd, rsi = buf_ptr, rdx = max_len
+            const sockfd = frame.rdi;
+            const buf_ptr = frame.rsi;
+            const max_len = frame.rdx;
+
+            const current_idx = scheduler.current_task;
+            if (current_idx < 0 or sockfd >= 8) {
+                frame.rax = @bitCast(@as(isize, -9));
+                return;
+            }
+            const t = &scheduler.tasks[@intCast(current_idx)];
+            const conn = t.sockets[sockfd] orelse {
+                frame.rax = @bitCast(@as(isize, -9));
+                return;
+            };
+
+            @import("../net/mod.zig").poll();
+
+            if (conn.rx_ready and conn.rx_len > 0) {
+                const user_buf: [*]u8 = @ptrFromInt(buf_ptr);
+                const copy_len = @min(conn.rx_len, max_len);
+                @memcpy(user_buf[0..copy_len], conn.rx_buf[0..copy_len]);
+                conn.rx_len = 0;
+                conn.rx_ready = false;
+                frame.rax = copy_len;
+            } else {
+                frame.rax = 0;
             }
         },
         else => {
