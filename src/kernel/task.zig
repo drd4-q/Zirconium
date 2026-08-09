@@ -14,6 +14,9 @@ pub const MAX_TASKS: usize = 16;
 pub const KERNEL_STACK_SIZE: usize = 4096;
 pub const USER_STACK_SIZE: usize = 0x10000; // 64KB
 
+pub const USER_HEAP_BASE: u64 = 0x04000000; // 64MB, above USER_BASE, below stack
+pub const USER_HEAP_LIMIT: u64 = 0x7FFF0000; // don't grow into the user stack
+
 pub const SavedState = extern struct {
     rax: u64 = 0,
     rbx: u64 = 0,
@@ -49,5 +52,7 @@ pub const Task = struct {
     address_space: ?@import("address_space.zig").AddressSpace = null,
     parent_id: i32 = -1,
     exit_code: i32 = 0,
+    heap_brk: u64 = 0, // current user heap break (0 = not yet initialized)
+    heap_mapped: u64 = 0, // top of user heap pages actually mapped
     sockets: [8]?*@import("../net/tcp.zig").Connection = [_]?*@import("../net/tcp.zig").Connection{null} ** 8,
 };

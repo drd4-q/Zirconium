@@ -17,9 +17,11 @@ run.bat      # Windows equivalent (same flow as run.sh)
 
 **Toolchain deps:** GNU `as` (builds `src/entry.S` + `src/arch/isr.S`), `grub-mkrescue`, `qemu-system-x86_64`. The kernel requires the LLVM backend (`use_llvm = true`).
 
-**No test suite, no CI.** `zig build` is the only automated check. On crash/triple-fault, read `qemu.log` (QEMU runs with `-d int,cpu_reset -D qemu.log`). Serial output goes to both stdio and `serial.log`.
+**Tests:** `./run.sh --test` = `python3 tools/test_runner.py` — the only automated check (no CI). It tears `zig build`, boots QEMU headless (`-nographic`, serial into `serial_test.log`), sleeps 5s, then greps the serial log for markers like `[BOOT] Kernel loaded` and `[USER-NET]`… Use it after any change that could break the boot path; the other markers assert PMM init, APIC timer init, and ring-3 Hello. It also patches the freshly built kernel into an existing `kernel.iso` (grub-mkrescue not re-run) unless no ISO exists, in which case it boots `zig-out/bin/kernel` via `-kernel`.
 
-**Embedded user binary (codegen):** `build.zig` compiles `src/user/test.zig` (freestanding ELF, image base 0x2000000), runs host tool `tools/bin2zig.zig` to emit it as a Zig byte array, and injects it as the anonymous module `user_test_bin`. The shell `user` command loads it via `scheduler.addElfUserTask` (`src/kernel/elf.zig:loadElf`). Editing `src/user/test.zig` re-embeds it on the next `zig build`.
+**Crash triage:** QEMU runs with `-d int,cpu_reset -D qemu.log` — on crash/triple-fault read `qemu.log`. Serial (the kernel debug log) goes to the terminal (`-serial stdio`); only the test harness writes `serial_test.log`. The `serial.log` files in the repo root are stale artifacts — no script produces them.
+
+**Embedded user binary (codegen):** `build.zig` compiles `src/user/test.zig` (freestanding ELF, image base 0x2000000), runs host tool `tools/bin2zig.zig` to emit it as a Zig byte array, and injects it as the anonymous module `user_test_bin`. `kernel_init.init()` (`src/kernel/init.zig`) registers it via `scheduler.addElfUserTask` (`src/kernel/elf.zig:loadElf`), so it runs **before the shell** on every boot and exercises syscalls socket/connect/send/recv (70–73) against 10.0.2.2:80. The shell `user` command does the same on demand. Editing `src/user/test.zig` re-embeds on next `zig build`.
 
 **Network gotcha:** the guest is an HTTP *client* — `get`/`wget` fetches from the gateway 10.0.2.2 (= the host), and nothing listens on guest:80 despite the "open localhost:8080" comment in `run.sh`.
 
@@ -27,7 +29,7 @@ run.bat      # Windows equivalent (same flow as run.sh)
 
 **Boot sequence** (`src/entry.S` → `src/main.zig`):
 1. `entry.S`: 32-bit Multiboot entry → zeroes 6 page tables → identity maps 4 GB (4 PDs × 512 × 2MB pages) → enables long mode → calls `kernel_entry`.
-2. `main.zig:36 kernel_entry`: serial → GDT (ring 3 segments + TSS) → framebuffer init → system init (PIC, IDT) → PMM → VMM → `kernel_init.init()` (registers kernel tasks) → `scheduler.runAll()` → `shell.run()`.
+2. `main.zig:36 kernel_entry`: serial → GDT (ring 3 segments + TSS) → framebuffer init → system init (PIC, IDT) → PMM → VMM → kalloc heap → VFS + ramfs mount → `kernel_init.init()` (scheduler + registers idle/hello kernel tasks and the embedded user ELF task) → `scheduler.runAll()` (runs every task; the user task jumps to ring 3) → `shell.run()`.
 
 **Key source layout:**
 - `src/arch/` — GDT, IDT (256 entries + INT 0x80 DPL3 gate), PIC, port I/O, ISR/IRQ handlers (`isr.S` + `isr.zig`)
@@ -47,7 +49,7 @@ run.bat      # Windows equivalent (same flow as run.sh)
 
 **GDT selectors** (`src/arch/gdt.zig`): 0x08 kernel code, 0x10 kernel data, 0x18|3 user code, 0x20|3 user data, 0x40 TSS (plus duplicate 0x28/0x30 kernel segments).
 
-**Syscalls:** INT 0x80; numbers in `src/kernel/syscall.zig` (rax=num, rdi/rsi/rdx=args). write=1, read=2, open=3, close=4, sleep=10, time=11, fork=57, exec=59, exit=60, waitpid=61. write/read/sleep/time/exit/exec/waitpid are implemented; fork/open/close return errors.
+**Syscalls:** INT 0x80; numbers in `src/kernel/syscall.zig:15` (rax=num, rdi/rsi/rdx=args). Implemented: write=1 (fd 1–2 → VGA, 3 → serial), read=2 (fd 0 → keyboard), sleep=10, time=11, brk=12 (user heap: maps USER_HEAP_BASE pages per task), fork=57 (clones address space + user stack, COW), exec=59 (load ELF from ramfs path), exit=60, waitpid=61, socket/connect/send/recv=70–73 (8 per-task TCP socket slots). open=3 and close=4 still fall through to ENOSYS. `src/user/heap.zig` is a user-space malloc/free built on the brk syscall.
 
 **Address spaces** (`src/kernel/address_space.zig`): per-task PML4, create/destroy/switch, user pages mapped with PAGE_USER. `user` shell command loads the compiled-in ELF into a fresh address space and jumps to ring 3.
 
@@ -65,6 +67,8 @@ run.bat      # Windows equivalent (same flow as run.sh)
 - VGA is the user-facing UI; serial (`/dev/ttyS0`) is debug logging. Don't use std output facilities in kernel code.
 - Hardcoded network config: IP 10.0.2.15, gateway 10.0.2.2, DNS 10.0.2.3, HTTP always targets 10.0.2.2:80.
 - New shell commands: create `src/programs/<name>.zig`, then import + dispatch it in `shell.zig:execute` and list it in `printHelp`.
+- `README.md` contains unresolved merge-conflict markers (`<<<<<<< HEAD … >>>>>>>`) — don't trust it for prose; `AGENTS.md` + `TODO.md` are the real docs.
+- `tools/patch_iso.py` overwrites the kernel inside an existing `kernel.iso` (ISO patching, no grub-mkrescue) — the test runner does the same inline.
 - Build target: x86_64-freestanding, ReleaseFast default; SSE3–AVX2 stripped via `cpu_features_sub` in `build.zig`.
 - No `.gitignore`: `.zig-cache/`, `zig-out/`, `isodir/`, `kernel.iso`, `qemu.log`, `serial.log`, `*.o` are build noise — don't commit them.
 - `kernel_entry` is exported `callconv(.c)` and called from asm; `syscall_handler` and `main.zig:panic` are similarly exported for asm/ABI use. `main.zig` defines its own `pub fn panic` (prints to VGA+serial, halts) — the std one is unused.

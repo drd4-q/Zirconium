@@ -104,9 +104,15 @@ def main():
     run_command(["zig", "build"], cwd=repo_root)
     patch_kernel_iso(repo_root)
 
-    iso_path = os.path.join(repo_root, "kernel.iso").replace("\\", "/")
-    if not os.path.exists(iso_path):
-        print(f"[TEST RUNNER ERROR] ISO missing at {iso_path}. Run run.bat or run.sh first.")
+    iso_path = os.path.join(repo_root, "kernel.iso")
+    bin_path = os.path.join(repo_root, "zig-out", "bin", "kernel")
+
+    if os.path.exists(iso_path):
+        boot_args = ["-cdrom", "kernel.iso", "-boot", "d"]
+    elif os.path.exists(bin_path):
+        boot_args = ["-kernel", os.path.join("zig-out", "bin", "kernel")]
+    else:
+        print(f"[TEST RUNNER ERROR] Neither kernel.iso nor {bin_path} found. Run zig build first.")
         sys.exit(1)
 
     qemu_bin = find_qemu()
@@ -134,8 +140,7 @@ def main():
 
     qemu_cmd = [
         qemu_bin,
-        "-cdrom", "kernel.iso",
-        "-boot", "d",
+        *boot_args,
         "-m", "512M",
         "-nographic",
         "-monitor", "none",

@@ -15,6 +15,14 @@ pub fn getCurrentCr3() u64 {
     return asm volatile ("movq %%cr3, %[ret]" : [ret] "=r" (-> u64));
 }
 
+pub fn loadCr3(cr3: u64) void {
+    asm volatile ("movq %[cr3], %%cr3"
+        :
+        : [cr3] "r" (cr3)
+        : .{ .memory = true }
+    );
+}
+
 pub fn invalidatePage(vaddr: u64) void {
     asm volatile ("invlpg (%[addr])" : : [addr] "r" (vaddr) : .{ .memory = true });
 }

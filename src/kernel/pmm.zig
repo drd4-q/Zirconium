@@ -23,7 +23,9 @@ pub fn init(kernel_start: usize, kernel_end: usize) void {
     while (page < end_page) : (page += 1) {
         const addr = page * PAGE_SIZE;
         if (addr >= kernel_end or (addr + PAGE_SIZE) <= kernel_start) {
-            freePage(page * PAGE_SIZE);
+            // Directly clear bitmap bit — ref_counts are 0 at init so decRef won't work
+            bitmap[page / 8] &= ~(@as(u8, 1) << @intCast(page % 8));
+            free_pages += 1;
         }
     }
 

@@ -18,14 +18,60 @@ pub const AddressSpace = struct {
         const pml4_page = pmm.allocPage() orelse return null;
         @memset(@as([*]u8, @ptrFromInt(pml4_page))[0..4096], 0);
 
-        // Copy kernel mappings (upper half) from current page tables
         const current_pml4: [*]u64 = @ptrFromInt(vmm.getCurrentCr3());
         const new_pml4: [*]u64 = @ptrFromInt(pml4_page);
 
-        // PML4 entries 256-511 are kernel space (shared across all processes)
+        // Copy upper half PML4 entries (256-511): kernel virtual address space.
         var i: u16 = 256;
         while (i < 512) : (i += 1) {
             new_pml4[i] = current_pml4[i];
+        }
+
+        // For the lower 4GB (PML4[0]): we need an *independent* PDPT so that the
+        // ELF loader can map user pages without corrupting the kernel's shared PDs.
+        // We still inherit the kernel identity map (including LAPIC at 0xFEE00000)
+        // by copying PDPT entries, but use separate PD for the 0-1GB range where
+        // user ELF lives (0x2000000), so kernel PDs are never modified.
+        const kernel_pml4_0 = current_pml4[0];
+        if (kernel_pml4_0 & vmm.PAGE_PRESENT != 0) {
+            const kernel_pdpt_phys = kernel_pml4_0 & vmm.PAGE_ADDR_MASK;
+            const kernel_pdpt: [*]u64 = @ptrFromInt(kernel_pdpt_phys);
+
+            // Allocate new PDPT for user space
+            const new_pdpt_phys = pmm.allocPage() orelse {
+                pmm.freePage(pml4_page);
+                return null;
+            };
+            @memset(@as([*]u8, @ptrFromInt(new_pdpt_phys))[0..4096], 0);
+            new_pml4[0] = (new_pdpt_phys & vmm.PAGE_ADDR_MASK) | vmm.PAGE_PRESENT | vmm.PAGE_WRITE | vmm.PAGE_USER;
+            const new_pdpt: [*]u64 = @ptrFromInt(new_pdpt_phys);
+
+            // Copy PDPT entries 1-3 from kernel: covers 1-4GB.
+            // PDPT[3] has LAPIC at 0xFEE00000 — accessible kernel-mode during IRQ.
+            var j: u16 = 1;
+            while (j < 4) : (j += 1) {
+                new_pdpt[j] = kernel_pdpt[j] | vmm.PAGE_USER;
+            }
+
+            // PDPT[0] covers 0-1GB (user ELF lives at 0x2000000 here).
+            // Create a new PD (copy of kernel PD0) so ELF mapper can modify it
+            // without affecting the kernel's own page directory.
+            const kernel_pdpt0 = kernel_pdpt[0];
+            if (kernel_pdpt0 & vmm.PAGE_PRESENT != 0) {
+                const kernel_pd0_phys = kernel_pdpt0 & vmm.PAGE_ADDR_MASK;
+                const kernel_pd0: [*]u64 = @ptrFromInt(kernel_pd0_phys);
+
+                const new_pd0_phys = pmm.allocPage() orelse {
+                    pmm.freePage(new_pdpt_phys);
+                    pmm.freePage(pml4_page);
+                    return null;
+                };
+                // Copy all PD0 entries from kernel (2MB identity-mapped pages)
+                @memcpy(@as([*]u8, @ptrFromInt(new_pd0_phys))[0..4096],
+                        @as([*]u8, @ptrFromInt(kernel_pd0_phys))[0..4096]);
+                new_pdpt[0] = (new_pd0_phys & vmm.PAGE_ADDR_MASK) | vmm.PAGE_PRESENT | vmm.PAGE_WRITE | vmm.PAGE_USER;
+                _ = kernel_pd0; // suppress unused warning
+            }
         }
 
         serial.serialWrite("[ADDRSPACE] Created address space, PML4=0x");
@@ -35,15 +81,12 @@ pub const AddressSpace = struct {
         const addr_space = AddressSpace{ .pml4_phys = pml4_page };
         const kernel_start = @intFromPtr(&__kernel_start);
         const kernel_end = @intFromPtr(&__kernel_end);
-        
+
         serial.serialWrite("[ADDRSPACE] kernel_start = 0x");
         serial.serialWriteHex(kernel_start);
         serial.serialWrite(", kernel_end = 0x");
         serial.serialWriteHex(kernel_end);
         serial.serialWrite("\n");
-        
-        // Map kernel identity region in user PML4 (no PAGE_USER)
-        addr_space.mapKernelRange(0, 0, kernel_end, vmm.PAGE_WRITE);
 
         return addr_space;
     }
@@ -267,7 +310,15 @@ pub const AddressSpace = struct {
 fn nextPageTable(table: [*]u64, index: u16, flags: u64) [*]u64 {
     const entry = table[index];
     if (entry & vmm.PAGE_PRESENT != 0) {
-        return @ptrFromInt(entry & 0x000FFFFFFFFFF000);
+        // If this is a 2MB huge page, we must NOT use its address as a page table.
+        // Replace it with a fresh 4KB PT so the caller can map individual pages.
+        if (entry & vmm.PAGE_SIZE != 0) {
+            const new_page = pmm.allocPage() orelse panic.kernelPanic("ADDRSPACE: OOM splitting huge page");
+            @memset(@as([*]u8, @ptrFromInt(new_page))[0..4096], 0);
+            setTableEntry(table, index, new_page, flags | vmm.PAGE_PRESENT);
+            return @ptrFromInt(new_page);
+        }
+        return @ptrFromInt(entry & vmm.PAGE_ADDR_MASK);
     }
 
     const new_page = pmm.allocPage() orelse panic.kernelPanic("ADDRSPACE: out of memory allocating page table");
@@ -277,5 +328,5 @@ fn nextPageTable(table: [*]u64, index: u16, flags: u64) [*]u64 {
 }
 
 fn setTableEntry(table: [*]u64, index: u16, phys_addr: u64, flags: u64) void {
-    table[index] = (phys_addr & 0x000FFFFFFFFFF000) | flags;
+    table[index] = (phys_addr & vmm.PAGE_ADDR_MASK) | flags;
 }

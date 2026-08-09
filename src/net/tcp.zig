@@ -44,7 +44,7 @@ pub const Connection = struct {
     retx_active: bool = false,
 };
 
-var connections: [MAX_CONNECTIONS]Connection = undefined;
+var connections: [MAX_CONNECTIONS]Connection = [_]Connection{.{}} ** MAX_CONNECTIONS;
 var next_port: u16 = 12345;
 var next_id: i32 = 0;
 

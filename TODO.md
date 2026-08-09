@@ -8,7 +8,7 @@
 - VFS layer + ramfs (ls, cat, touch, mkdir, rm, write, cd, mount)
 - Shell with commands: help, clear, calc, clock, ping, get, net, ps, mem, reboot, matrix, fib, lua, user, exec, save, mouse, set/unset/env, dhcp, arpcache, nslookup, resolution, ls, cat, touch, mkdir, rm, write, cd, mount
 - GDT with ring 0+3 segments, IDT (256 entries + INT 0x80 DPL3), PIC, TSS
-- Syscall interface (INT 0x80): write, read, sleep, time, exit, exec, waitpid (fork stub)
+- Syscall interface (INT 0x80): write, read, sleep, time, exit, exec, waitpid, fork (COW), socket/connect/send/recv (70–73)
 - ELF loader, ring 3 context switch via iretq, address spaces per process
 - Lua interpreter (lexer, parser, AST, VM, API) — compiled and working
 - Keyboard flush support for clean input between programs
@@ -16,6 +16,12 @@
 - Framebuffer support (Multiboot FBFLAG, CP437 bitmap font)
 - Scrollback buffer (512 lines, VGA text mode + framebuffer)
 - Environment variables (set/unset/env)
+- Copy-on-write fork (ref-counted pages, page-fault write handler in VMM)
+- Socket API for user-space (8 per-task TCP slots; exercised by the embedded ring-3 test binary)
+- APIC timer initialized at boot (PIT still drives the 100 Hz tick + sleep)
+- QEMU integration test suite (`tools/test_runner.py`, run via `./run.sh --test`)
+- GDB remote debugging stub (`./run.sh --gdb` → `-s -S`, localhost:1234)
+- User-space heap allocator (malloc/free in ring 3 via `SYS_BRK`, free-list allocator in `src/user/heap.zig`)
 
 ## What needs to be done
 
@@ -67,16 +73,16 @@
 - [x] TCP: connection multiplexing (4 concurrent connections)
 - [x] TCP: retransmission timer (500ms, exponential backoff, max 10 retries)
 - [x] ICMP RTT measurement (ping shows round-trip time in ms)
-- [ ] Socket API for user-space programs
+- [x] Socket API for user-space programs (syscalls 70–73, 8 per-task TCP slots)
 - [ ] TCP improvements (window scaling, congestion control)
 
 ### Memory management
 - [x] Physical page allocator (PMM bitmap, 4KB pages)
 - [x] Virtual memory manager (VMM, page tables, mapPage/unmapPage)
 - [x] Kernel heap allocator (kmalloc/kfree/krealloc, free-list with coalescing)
-- [ ] User-space heap allocator (malloc/free via syscall)
+- [x] User-space heap allocator (malloc/free via SYS_BRK=12; user-side free-list allocator in `src/user/heap.zig`)
 - [ ] Shared memory between processes
-- [ ] Copy-on-write fork
+- [x] Copy-on-write fork (ref-counted pages, COW write-fault handler in `vmm.handlePageFault`)
 
 ### Process management
 - [x] Scheduler with kernel + user tasks
@@ -84,8 +90,8 @@
 - [x] Address spaces per process
 - [x] exec syscall (load and run ELF binary from VFS path)
 - [x] waitpid syscall (check for finished children, non-blocking)
-- [x] fork syscall (clone task + address space, copy user pages + stack)
-- [ ] exit with status propagation to parent
+- [x] fork syscall (clone task + address space; COW page sharing via `cloneUserSpace`)
+- [x] exit with status propagation to parent (SYS_EXIT stores task.exit_code + wakes blocked parent; waitpid returns child PID)
 - [ ] Signals (SIGTERM, SIGKILL, etc.)
 - [ ] Process groups / sessions
 
@@ -105,14 +111,14 @@
 - [ ] I/O redirection (cmd > file, cmd < file)
 
 ### Build / tooling
-- [ ] Automated test suite
+- [x] Automated test suite (`tools/test_runner.py`, `./run.sh --test`)
 - [ ] CI pipeline
 - [ ] Debug symbols / stack traces on panic
-- [ ] GDB stub for QEMU debugging
+- [x] GDB stub for QEMU debugging (`./run.sh --gdb` → `-s -S` on localhost:1234)
 
 ### Nice to have
 - [ ] SMP (multi-core) support
-- [ ] APIC timer (replace PIT)
+- [x] APIC timer (initialized at boot; PIT still drives the 100 Hz tick + sleep)
 - [ ] ACPI support
 - [ ] USB driver
 - [ ] GUI / window manager (framebuffer console with mouse cursor)

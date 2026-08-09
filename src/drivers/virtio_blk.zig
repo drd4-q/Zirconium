@@ -4,7 +4,6 @@ const vga = root.vga;
 const serial = @import("../system/serial.zig");
 const pci = @import("pci.zig");
 const blockdev = @import("../fs/blockdev.zig");
-const kalloc = @import("../kernel/kalloc.zig");
 
 const STATUS_ACK: u32 = 1;
 const STATUS_DRIVER: u32 = 2;
@@ -60,6 +59,9 @@ var queue_size: u16 = 0;
 var desc_table: [*]VirtqDesc = undefined;
 var avail_ring_base: [*]u16 = undefined;
 var used_ring_base: [*]u8 = undefined;
+
+// Static BlockDevice — avoids kmalloc at early init when heap may be tight
+var static_block_device: blockdev.BlockDevice = undefined;
 
 fn portIn16(addr: u16) u16 {
     return asm volatile ("inw %%dx, %%ax"
@@ -339,12 +341,8 @@ pub fn init() void {
     serial.serialWriteDec(num_sectors / 2);
     serial.serialWrite(" KB)\n");
 
-    // Register block device
-    const bd_ptr = kalloc.kmalloc(@sizeOf(blockdev.BlockDevice)) orelse {
-        serial.serialWrite("[VIRTIO-BLK] Failed to alloc BlockDevice\n");
-        return;
-    };
-    const bd: *blockdev.BlockDevice = @ptrFromInt(@intFromPtr(bd_ptr));
+    // Register block device (static — no heap allocation needed)
+    const bd = &static_block_device;
     bd.readFn = readSectors;
     bd.writeFn = writeSectors;
     bd.totalSectorsFn = totalSectorsFn;

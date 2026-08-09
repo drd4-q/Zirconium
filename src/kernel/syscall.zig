@@ -19,6 +19,7 @@ pub const SyscallNumber = enum(u64) {
     SYS_CLOSE = 4,
     SYS_SLEEP = 10,
     SYS_TIME = 11,
+    SYS_BRK = 12,
     SYS_FORK = 57,
     SYS_EXEC = 59,
     SYS_EXIT = 60,
@@ -124,6 +125,57 @@ pub export fn syscall_handler(frame: *isr_mod.InterruptFrame) callconv(.c) void 
             const total_seconds = @as(u64, timer.hours) * 3600 + @as(u64, timer.minutes) * 60 + @as(u64, timer.seconds);
             frame.rax = total_seconds;
         },
+        .SYS_BRK => {
+            // rdi = new break (0 = query current). Maps user heap pages on demand.
+            const current_idx = scheduler.current_task;
+            if (current_idx < 0) {
+                frame.rax = @bitCast(@as(isize, -1));
+                return;
+            }
+            const t = &scheduler.tasks[@intCast(current_idx)];
+            const as = t.address_space orelse {
+                frame.rax = @bitCast(@as(isize, -1));
+                return;
+            };
+
+            // First use initializes the task's heap region
+            if (t.heap_brk == 0) {
+                t.heap_brk = task.USER_HEAP_BASE;
+                t.heap_mapped = task.USER_HEAP_BASE;
+            }
+
+            const old_brk = t.heap_brk;
+            const new_brk = frame.rdi;
+            if (new_brk == 0) {
+                frame.rax = old_brk;
+                return;
+            }
+            if (new_brk >= task.USER_HEAP_LIMIT) {
+                frame.rax = old_brk;
+                return;
+            }
+
+            if (new_brk <= old_brk) {
+                t.heap_brk = new_brk;
+                frame.rax = new_brk;
+                return;
+            }
+
+            const aligned_end = (new_brk + 0xFFF) & ~@as(u64, 0xFFF);
+            var addr = t.heap_mapped;
+            while (addr < aligned_end) : (addr += 0x1000) {
+                const phys = pmm.allocPage() orelse {
+                    t.heap_brk = old_brk;
+                    frame.rax = 0;
+                    return;
+                };
+                as.mapUserRange(addr, phys, 0x1000, vmm.PAGE_WRITE);
+            }
+
+            t.heap_mapped = aligned_end;
+            t.heap_brk = new_brk;
+            frame.rax = new_brk;
+        },
         .SYS_EXIT => {
             const exit_code = frame.rdi;
             // Mark current task as finished and store exit code
@@ -151,12 +203,9 @@ pub export fn syscall_handler(frame: *isr_mod.InterruptFrame) callconv(.c) void 
             serial.serialWriteDec(exit_code);
             serial.serialWrite("\n");
 
-            // Issue QEMU debug exit port write (iobase=0xf4). Triggers clean QEMU exit and file flush.
-            port_io.outb(0xf4, 0x00);
-            port_io.outb(0x64, 0xFE);
-            while (true) {
-                asm volatile ("hlt");
-            }
+            // Switch back to kernel address space and return to scheduler
+            vmm.loadCr3(scheduler.kernel_cr3);
+            sys_exit_return();
         },
         .SYS_FORK => {
             const current_idx = scheduler.current_task;
