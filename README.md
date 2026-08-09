@@ -1,5 +1,5 @@
 # Zirconium
-<<<<<<< HEAD
+
 Bare-metal x86_64 OS kernel in Zig
 [TODOS](TODO.md)
 =======
@@ -22,4 +22,4 @@ A minimalist operating system kernel written in Zig.
 
 ## Development & Roadmap
 The project is under active development. You can track current progress, immediate tasks, and future plans in [TODO.md](TODO.md) file.
->>>>>>> d8327a1e7a028691d3729542d966d4152fec78c0
+
