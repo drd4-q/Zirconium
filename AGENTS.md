@@ -7,17 +7,20 @@ Bare-metal x86_64 OS kernel in Zig. Multiboot (GRUB) boot, identity-mapped 2MB p
 ## Build & run
 
 ```bash
-zig build    # build only → zig-out/bin/kernel
-./run.sh     # build → grub-mkrescue ISO → launch QEMU (Linux/macOS)
+zig build            # build only → zig-out/bin/kernel (Debug, safety on)
+zig build -Drelease  # ReleaseFast (what run.sh/tests use)
+./run.sh     # build (ReleaseFast) → grub-mkrescue ISO → launch QEMU (Linux/macOS)
 ./run.sh --vnc   # same but VNC display (port 5901) instead of GTK
 run.bat      # Windows equivalent (same flow as run.sh)
 ```
+
+**Build modes:** the build uses `standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast })`, which in Zig 0.16 returns ReleaseFast **only when `-Drelease` is passed** — plain `zig build` produces a Debug kernel with safety checks on. `run.sh`, `run.bat` and the test runner all pass `-Drelease`, so the shipped kernel is always ReleaseFast. **Gotcha:** Release builds enable `--gc-sections`, so the multiboot header in `src/entry.S` must be kept via `KEEP(*(.multiboot))` in `linker.ld` (easy to break; a fully-silent DRAM: debug boots, release says "no multiboot header found" in GRUB).
 
 **Zig version: 0.16.0.** `build.zig.zon` says 0.14.0 but that is stale — `tools/bin2zig.zig` uses Zig 0.16 std APIs (`std.process.Init`, `std.Io.Dir`, `std.Options.debug_io`). `zig build` only compiles on 0.16.
 
 **Toolchain deps:** GNU `as` (builds `src/entry.S` + `src/arch/isr.S`), `grub-mkrescue`, `qemu-system-x86_64`. The kernel requires the LLVM backend (`use_llvm = true`).
 
-**Tests:** `./run.sh --test` = `python3 tools/test_runner.py` — the only automated check (no CI). It tears `zig build`, boots QEMU headless (`-nographic`, serial into `serial_test.log`), sleeps 5s, then greps the serial log for markers like `[BOOT] Kernel loaded` and `[USER-NET]`… Use it after any change that could break the boot path; the other markers assert PMM init, APIC timer init, and ring-3 Hello. It also patches the freshly built kernel into an existing `kernel.iso` (grub-mkrescue not re-run) unless no ISO exists, in which case it boots `zig-out/bin/kernel` via `-kernel`.
+**Tests:** `./run.sh --test` = `python3 tools/test_runner.py` — the only automated check (no CI). It builds `zig build -Drelease` (ReleaseFast, same binary `run.sh` ships), boots QEMU headless (`-nographic`, serial into `serial_test.log`), sleeps 5s, then greps the serial log for markers like `[BOOT] Kernel loaded`, `[USER-NET]` and `[USER-HEAP]`… Use it after any change that could break the boot path; the other markers assert PMM init, APIC timer init, ring-3 Hello and the heap/brk path. It patches the freshly built kernel into an existing `kernel.iso` (grub-mkrescue not re-run) **only if it fits the ISO slot** — otherwise it rebuilds the ISO from scratch (a grown kernel won't fit an existing ISO and silently breaks without this fallback). Boots `zig-out/bin/kernel` via `-kernel` only when no ISO exists.
 
 **Crash triage:** QEMU runs with `-d int,cpu_reset -D qemu.log` — on crash/triple-fault read `qemu.log`. Serial (the kernel debug log) goes to the terminal (`-serial stdio`); only the test harness writes `serial_test.log`. The `serial.log` files in the repo root are stale artifacts — no script produces them.
 
@@ -67,8 +70,8 @@ run.bat      # Windows equivalent (same flow as run.sh)
 - VGA is the user-facing UI; serial (`/dev/ttyS0`) is debug logging. Don't use std output facilities in kernel code.
 - Hardcoded network config: IP 10.0.2.15, gateway 10.0.2.2, DNS 10.0.2.3, HTTP always targets 10.0.2.2:80.
 - New shell commands: create `src/programs/<name>.zig`, then import + dispatch it in `shell.zig:execute` and list it in `printHelp`.
-- `README.md` contains unresolved merge-conflict markers (`<<<<<<< HEAD … >>>>>>>`) — don't trust it for prose; `AGENTS.md` + `TODO.md` are the real docs.
+- `README.md` is cosmetic prose; `AGENTS.md` + `TODO.md` are the real docs.
 - `tools/patch_iso.py` overwrites the kernel inside an existing `kernel.iso` (ISO patching, no grub-mkrescue) — the test runner does the same inline.
-- Build target: x86_64-freestanding, ReleaseFast default; SSE3–AVX2 stripped via `cpu_features_sub` in `build.zig`.
-- No `.gitignore`: `.zig-cache/`, `zig-out/`, `isodir/`, `kernel.iso`, `qemu.log`, `serial.log`, `*.o` are build noise — don't commit them.
+- Build target: x86_64-freestanding (Debug on plain `zig build`, ReleaseFast with `-Drelease`); SSE3–AVX2 stripped via `cpu_features_sub` in `build.zig`.
+- `.gitignore` covers `.zig-cache/`, `zig-out/`, `isodir/`, `build/`, `kernel.iso`, `qemu.log`, `*.log`, `disk.img`, `*.o` — all build noise; don't commit them.
 - `kernel_entry` is exported `callconv(.c)` and called from asm; `syscall_handler` and `main.zig:panic` are similarly exported for asm/ABI use. `main.zig` defines its own `pub fn panic` (prints to VGA+serial, halts) — the std one is unused.

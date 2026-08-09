@@ -1,0 +1,13 @@
+# Zig build artifacts
+.zig-cache/
+zig-out/
+build/
+isodir/
+kernel.iso
+*.o
+
+# QEMU / test / disk artifacts
+qemu.log
+serial*.log
+test_out.log
+disk.img

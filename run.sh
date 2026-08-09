@@ -22,8 +22,8 @@ for arg in "$@"; do
     fi
 done
 
-echo "=== Building Zirconium ==="
-zig build
+echo "=== Building Zirconium (ReleaseFast) ==="
+zig build -Drelease
 
 echo "=== Creating ISO ==="
 rm -rf isodir

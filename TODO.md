@@ -113,7 +113,7 @@
 ### Build / tooling
 - [x] Automated test suite (`tools/test_runner.py`, `./run.sh --test`)
 - [ ] CI pipeline
-- [ ] Debug symbols / stack traces on panic
+- [x] Stack traces on panic (RBP frame walk in `system/panic.zig`, also wired into `std.panic` in main.zig; numeric addresses, no symbol names yet)
 - [x] GDB stub for QEMU debugging (`./run.sh --gdb` → `-s -S` on localhost:1234)
 
 ### Nice to have

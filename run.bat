@@ -21,8 +21,8 @@ for %%a in (%*) do (
     )
 )
 
-echo === Building Zirconium ===
-zig build
+echo === Building Zirconium (ReleaseFast) ===
+zig build -Drelease
 if errorlevel 1 (
     echo [ERROR] Build failed!
     exit /b %ERRORLEVEL%

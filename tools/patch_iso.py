@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
+"""Overwrite kernel.bin inside an existing kernel.iso without grub-mkrescue.
+
+Usage: python3 tools/patch_iso.py [repo_root]
+
+Only works while the new kernel fits the slot the old kernel occupied in the
+ISO. If it doesn't fit, prints a warning — rebuild the ISO via run.sh instead.
+"""
 import os
 import sys
 
+
 def find_iso_kernel_offset(iso_data):
+    """Return (sector_offset, slot_bytes) of KERNEL.BIN inside the ISO, or (None, 0)."""
     try:
         pvd = iso_data[0x8000:0x8800]
         root_dir_rec = pvd[156:190]
         root_extent = int.from_bytes(root_dir_rec[2:6], 'little')
         root_size = int.from_bytes(root_dir_rec[10:14], 'little')
-        
+
         root_data = iso_data[root_extent*2048 : root_extent*2048 + root_size]
         offset = 0
         boot_extent = None
@@ -40,11 +49,14 @@ def find_iso_kernel_offset(iso_data):
                 name = rec[33:33+name_len].decode('ascii', 'ignore')
                 if name.startswith('KERNEL.BIN'):
                     extent = int.from_bytes(rec[2:6], 'little')
-                    return extent * 2048
+                    data_len = int.from_bytes(rec[10:14], 'big')
+                    slot_bytes = ((data_len + 2047) & ~2047)
+                    return extent * 2048, slot_bytes
                 offset += length
     except Exception:
         pass
-    return None
+    return None, 0
+
 
 def patch_kernel_iso(repo_root):
     bin_path = os.path.join(repo_root, "zig-out", "bin", "kernel")
@@ -57,16 +69,21 @@ def patch_kernel_iso(repo_root):
         k_data = f.read()
 
     with open(iso_path, "rb") as f:
-        iso_data = bytearray(f.read())
+        iso_data = f.read()
 
-    sec_offset = find_iso_kernel_offset(iso_data)
-    if sec_offset is not None and sec_offset + len(k_data) <= len(iso_data):
+    sec_offset, slot_bytes = find_iso_kernel_offset(iso_data)
+    if sec_offset is not None and slot_bytes >= len(k_data):
+        iso_data = bytearray(iso_data)
         iso_data[sec_offset:sec_offset+len(k_data)] = k_data
         with open(iso_path, "wb") as f:
             f.write(iso_data)
         print(f"[ISO PATCHER] Updated kernel.bin ({len(k_data)} bytes) in kernel.iso")
         return True
+
+    print(f"[ISO PATCHER] kernel.bin ({len(k_data)} bytes) does not fit ISO slot "
+          f"({slot_bytes} bytes) — rebuild the ISO with run.sh")
     return False
+
 
 if __name__ == "__main__":
     repo_root = sys.argv[1] if len(sys.argv) > 1 else "."

@@ -33,12 +33,13 @@ def find_qemu():
     return "qemu-system-x86_64"
 
 def find_iso_kernel_offset(iso_data):
+    """Return (sector_offset, slot_bytes) of KERNEL.BIN inside the ISO, or (None, 0)."""
     try:
         pvd = iso_data[0x8000:0x8800]
         root_dir_rec = pvd[156:190]
         root_extent = int.from_bytes(root_dir_rec[2:6], 'little')
         root_size = int.from_bytes(root_dir_rec[10:14], 'little')
-        
+
         root_data = iso_data[root_extent*2048 : root_extent*2048 + root_size]
         offset = 0
         boot_extent = None
@@ -70,38 +71,68 @@ def find_iso_kernel_offset(iso_data):
                 name = rec[33:33+name_len].decode('ascii', 'ignore')
                 if name.startswith('KERNEL.BIN'):
                     extent = int.from_bytes(rec[2:6], 'little')
-                    return extent * 2048
+                    data_len = int.from_bytes(rec[10:14], 'big')
+                    slot_bytes = ((data_len + 2047) & ~2047)
+                    return extent * 2048, slot_bytes
                 offset += length
     except Exception:
         pass
-    return None
+    return None, 0
+
+def build_fresh_iso(repo_root):
+    """Create a kernel.iso from scratch (grub-mkrescue) when in-place patching won't fit."""
+    import shutil
+    isodir = os.path.join(repo_root, "isodir")
+    boot_dir = os.path.join(isodir, "boot", "grub")
+    shutil.rmtree(isodir, ignore_errors=True)
+    os.makedirs(boot_dir, exist_ok=True)
+    shutil.copy2(os.path.join(repo_root, "zig-out", "bin", "kernel"), os.path.join(isodir, "boot", "kernel.bin"))
+    shutil.copy2(os.path.join(repo_root, "grub.cfg"), os.path.join(boot_dir, "grub.cfg"))
+    iso_path = os.path.join(repo_root, "kernel.iso")
+    res = subprocess.run(
+        ["grub-mkrescue", "-o", iso_path, isodir],
+        cwd=repo_root,
+    )
+    if res.returncode != 0:
+        print("[TEST RUNNER ERROR] grub-mkrescue failed")
+        sys.exit(1)
+    print(f"[TEST RUNNER] Built fresh kernel.iso with grub-mkrescue")
 
 def patch_kernel_iso(repo_root):
+    """Overwrite kernel.bin in kernel.iso if it fits; else rebuild the ISO fresh."""
     bin_path = os.path.join(repo_root, "zig-out", "bin", "kernel")
     iso_path = os.path.join(repo_root, "kernel.iso")
 
-    if not os.path.exists(bin_path) or not os.path.exists(iso_path):
-        return
+    if not os.path.exists(bin_path):
+        return False
+    if not os.path.exists(iso_path):
+        build_fresh_iso(repo_root)
+        return True
 
     with open(bin_path, "rb") as f:
         k_data = f.read()
-
     with open(iso_path, "rb") as f:
-        iso_data = bytearray(f.read())
+        iso_data = f.read()
 
-    sec_offset = find_iso_kernel_offset(iso_data)
-    if sec_offset is not None and sec_offset + len(k_data) <= len(iso_data):
+    sec_offset, slot_bytes = find_iso_kernel_offset(iso_data)
+    if sec_offset is not None and slot_bytes >= len(k_data):
+        iso_data = bytearray(iso_data)
         iso_data[sec_offset:sec_offset+len(k_data)] = k_data
         with open(iso_path, "wb") as f:
             f.write(iso_data)
         print(f"[TEST RUNNER] Dynamic ISO Patcher: Updated kernel.bin ({len(k_data)} bytes) at ISO offset {hex(sec_offset)}")
+        return True
+
+    print(f"[TEST RUNNER] kernel.bin ({len(k_data)} bytes) does not fit ISO slot ({slot_bytes} bytes); rebuilding ISO")
+    build_fresh_iso(repo_root)
+    return True
 
 def main():
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     print(f"[TEST RUNNER] Project Root: {repo_root}")
 
-    # 1. Build kernel
-    run_command(["zig", "build"], cwd=repo_root)
+    # 1. Build kernel (ReleaseFast, same as run.sh)
+    run_command(["zig", "build", "-Drelease"], cwd=repo_root)
     patch_kernel_iso(repo_root)
 
     iso_path = os.path.join(repo_root, "kernel.iso")
@@ -127,6 +158,8 @@ def main():
         "[USER] Hello from Ring 3 (user space)!",
         "[USER-NET] Created socket via sys_socket",
         "[USER-NET] Connected to 10.0.2.2:80 via sys_connect",
+        "[USER-HEAP] malloc(64)+malloc(128) via SYS_BRK OK",
+        "[USER-HEAP] free + reuse OK",
     ]
     matched_flags = {m: False for m in expected_matches}
 

@@ -28,6 +28,9 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     vga.write("\n=== PANIC ===\n");
     vga.write(msg);
     vga.write("\n");
+    var current_rbp: u64 = 0;
+    asm volatile ("movq %%rbp, %[rbp]" : [rbp] "=r" (current_rbp));
+    @import("system/panic.zig").printBacktrace(current_rbp);
     while (true) {
         asm volatile ("hlt");
     }

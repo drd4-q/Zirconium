@@ -32,48 +32,43 @@ pub fn printBacktrace(start_rbp: u64) void {
     }
 }
 
-pub fn kernelPanic(msg: []const u8) noreturn {
-    asm volatile ("cli");
+fn announce(msg: []const u8, code: ?u64) void {
     serial.serialWrite("\n!!! KERNEL PANIC !!!\nMessage: ");
     serial.serialWrite(msg);
+    if (code) |c| {
+        serial.serialWrite(" Code: 0x");
+        serial.serialWriteHex(c);
+    }
     serial.serialWrite("\n");
 
     vga.setColor(.light_red, .black);
     vga.write("\n!!! KERNEL PANIC !!!\n");
     vga.write("Message: ");
     vga.write(msg);
+    if (code) |c| {
+        vga.write("\nError code: 0x");
+        vga.writeHex(c);
+    }
     vga.write("\n");
+}
 
+fn dumpBacktraceAndHalt() noreturn {
     var current_rbp: u64 = 0;
     asm volatile ("movq %%rbp, %[rbp]" : [rbp] "=r" (current_rbp));
     printBacktrace(current_rbp);
-
     while (true) {
         asm volatile ("hlt");
     }
 }
 
+pub fn kernelPanic(msg: []const u8) noreturn {
+    asm volatile ("cli");
+    announce(msg, null);
+    dumpBacktraceAndHalt();
+}
+
 pub fn panicWithCode(msg: []const u8, code: u64) noreturn {
     asm volatile ("cli");
-    serial.serialWrite("\n!!! KERNEL PANIC !!!\nMessage: ");
-    serial.serialWrite(msg);
-    serial.serialWrite(" Code: 0x");
-    serial.serialWriteHex(code);
-    serial.serialWrite("\n");
-
-    vga.setColor(.light_red, .black);
-    vga.write("\n!!! KERNEL PANIC !!!\n");
-    vga.write("Message: ");
-    vga.write(msg);
-    vga.write("\nError code: 0x");
-    vga.writeHex(code);
-    vga.write("\n");
-
-    var current_rbp: u64 = 0;
-    asm volatile ("movq %%rbp, %[rbp]" : [rbp] "=r" (current_rbp));
-    printBacktrace(current_rbp);
-
-    while (true) {
-        asm volatile ("hlt");
-    }
+    announce(msg, code);
+    dumpBacktraceAndHalt();
 }
