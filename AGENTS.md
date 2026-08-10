@@ -2,7 +2,7 @@
 
 ## What this is
 
-Bare-metal x86_64 OS kernel in Zig. Multiboot (GRUB) boot, identity-mapped 2MB pages, a shell with programs, a custom TCP/IP stack over an e1000 NIC, ring 3 user-space with INT 0x80 syscalls, VFS with ramfs, and a minimal Lua interpreter. Runs in QEMU.
+Bare-metal x86_64 OS kernel in Zig. Multiboot (GRUB) boot, identity-mapped 2MB pages, SMP (secondary CPUs via ACPI + AP trampoline), a shell with programs, a custom TCP/IP stack over an e1000 NIC, ring 3 user-space with INT 0x80 syscalls, VFS with ramfs + FAT16 over virtio-blk, and a minimal Lua interpreter. Runs in QEMU.
 
 ## Build & run
 
@@ -20,11 +20,15 @@ run.bat      # Windows equivalent (same flow as run.sh)
 
 **Toolchain deps:** GNU `as` (builds `src/entry.S` + `src/arch/isr.S`), `grub-mkrescue`, `qemu-system-x86_64`. The kernel requires the LLVM backend (`use_llvm = true`).
 
-**Tests:** `./run.sh --test` = `python3 tools/test_runner.py` — the only automated check (no CI). It builds `zig build -Drelease` (ReleaseFast, same binary `run.sh` ships), boots QEMU headless (`-nographic`, serial into `serial_test.log`), sleeps 5s, then greps the serial log for markers like `[BOOT] Kernel loaded`, `[USER-NET]` and `[USER-HEAP]`… Use it after any change that could break the boot path; the other markers assert PMM init, APIC timer init, ring-3 Hello and the heap/brk path. It patches the freshly built kernel into an existing `kernel.iso` (grub-mkrescue not re-run) **only if it fits the ISO slot** — otherwise it rebuilds the ISO from scratch (a grown kernel won't fit an existing ISO and silently breaks without this fallback). Boots `zig-out/bin/kernel` via `-kernel` only when no ISO exists.
+**Tests:** `./run.sh --test` = `python3 tools/test_runner.py` — the only automated check (no CI). It builds `zig build -Drelease` (ReleaseFast, same binary `run.sh` ships), boots QEMU headless (`-nographic`, `-smp 4`, serial into `serial_test.log`), sleeps 5s, then greps the log for exact markers (`tools/test_runner.py:153`): `[BOOT] Kernel loaded`, `[BOOT] System init done`, `[MEM] Physical memory manager initialized`, `[APIC] Local APIC timer initialized`, `[SMP] AP CPU 1 online`, `[USER] Hello from Ring 3 (user space)!`, `[USER-NET] Created socket/Connected to 10.0.2.2:80`, `[USER-HEAP] malloc/brk + free reuse`. Run it after any change that risks the boot path, SMP bring-up, or ring-3 (syscalls/heap). It patches the freshly built kernel into an existing `kernel.iso` (grub-mkrescue not re-run) **only if it fits the ISO slot** — otherwise it rebuilds the ISO from scratch (a grown kernel won't fit and silently breaks without this fallback). Boots `zig-out/bin/kernel` via `-kernel` only when no ISO exists.
 
 **Crash triage:** QEMU runs with `-d int,cpu_reset -D qemu.log` — on crash/triple-fault read `qemu.log`. Serial (the kernel debug log) goes to the terminal (`-serial stdio`); only the test harness writes `serial_test.log`. The `serial.log` files in the repo root are stale artifacts — no script produces them.
 
-**Embedded user binary (codegen):** `build.zig` compiles `src/user/test.zig` (freestanding ELF, image base 0x2000000), runs host tool `tools/bin2zig.zig` to emit it as a Zig byte array, and injects it as the anonymous module `user_test_bin`. `kernel_init.init()` (`src/kernel/init.zig`) registers it via `scheduler.addElfUserTask` (`src/kernel/elf.zig:loadElf`), so it runs **before the shell** on every boot and exercises syscalls socket/connect/send/recv (70–73) against 10.0.2.2:80. The shell `user` command does the same on demand. Editing `src/user/test.zig` re-embeds on next `zig build`.
+**Embedded user binary (codegen):** `build.zig` compiles `src/user/test.zig` (freestanding ELF, image base 0x2000000), runs host tool `tools/bin2zig.zig` to emit it as a Zig byte array, and injects it as the anonymous module `user_test_bin`. `kernel_init.init()` (`src/kernel/init.zig`) registers it via `scheduler.addElfUserTask` (`src/kernel/elf.zig:loadElf`), so it runs **before the shell** on every boot and exercises syscalls socket/connect/send/recv (70–73) against 10.0.2.2:80. The shell `user` command does the same on demand. Editing `src/user/test.zig` re-embeds on next `zig build`. The same bin2zig pipeline emits a **second** anonymous module `ap_tramp_bin` (the SMP trampoline, below) — editing either source re-runs codegen on next build.
+
+**SMP (multicore):** QEMU boots with `-smp 4`. `main.zig` calls `smp.init()` (`src/arch/smp.zig`) before the scheduler: parses ACPI/MADT for LAPIC IDs (`src/arch/acpi.zig`), then sends INIT-SIPI-SIPI (ICR mode bits in 10:8, not the `0x6000` variant) to wake APs into the embedded trampoline blob (`src/arch/trampoline.S`; built by `as` + `ld -Ttext=0x8000 --oformat=binary` in `build.zig`, loaded at 0x8000 with fixed control cells at 0x600–0x718). Each AP runs its own 16 KB stack from `CELL_STACK` and idle-loops in `ap_entry`. The test asserts `[SMP] AP CPU 1 online` — a broken trampoline layout or ICR encoding makes APs silently never come online. Shell: `smp` / `cpuinfo`.
+
+**Disk / FAT16 gotcha:** `run.sh` creates a 64 MB `disk.img` (virtio-blk) if missing. At shell start `virtio_blk.init()` + `fat16.init()` auto-mount it at `/mnt/disk` — the `ls/cat/cd/touch/mkdir/rm/write/save` commands are FAT16-based and fail/empty if no `disk.img`/block device exists (`[FAT16]` messages). `disk.img` is gitignored build noise.
 
 **Network gotcha:** the guest is an HTTP *client* — `get`/`wget` fetches from the gateway 10.0.2.2 (= the host), and nothing listens on guest:80 despite the "open localhost:8080" comment in `run.sh`.
 
@@ -32,15 +36,15 @@ run.bat      # Windows equivalent (same flow as run.sh)
 
 **Boot sequence** (`src/entry.S` → `src/main.zig`):
 1. `entry.S`: 32-bit Multiboot entry → zeroes 6 page tables → identity maps 4 GB (4 PDs × 512 × 2MB pages) → enables long mode → calls `kernel_entry`.
-2. `main.zig:36 kernel_entry`: serial → GDT (ring 3 segments + TSS) → framebuffer init → system init (PIC, IDT) → PMM → VMM → kalloc heap → VFS + ramfs mount → `kernel_init.init()` (scheduler + registers idle/hello kernel tasks and the embedded user ELF task) → `scheduler.runAll()` (runs every task; the user task jumps to ring 3) → `shell.run()`.
+2. `main.zig:39 kernel_entry`: serial → GDT (ring 3 segments + TSS) → framebuffer init → system init (PIC, IDT) → PMM → VMM → kalloc heap → VFS + ramfs mount → `kernel_init.init()` (timer + scheduler; registers idle/hello kernel tasks and the embedded user ELF task) → `smp.init()` (ACPI/MADT, wake APs) → `scheduler.runAll()` (runs every task; the user task jumps to ring 3) → `shell.run()`. FAT16 auto-mount happens later, in `shell.zig:run` startup, not during boot.
 
 **Key source layout:**
-- `src/arch/` — GDT, IDT (256 entries + INT 0x80 DPL3 gate), PIC, port I/O, ISR/IRQ handlers (`isr.S` + `isr.zig`)
-- `src/kernel/` — pmm, vmm, kalloc (heap), scheduler, task, address_space, elf, syscall
+- `src/arch/` — GDT, IDT (256 entries + INT 0x80 DPL3 gate), PIC, port I/O, ISR/IRQ handlers (`isr.S` + `isr.zig`), ACPI/MADT scan (`acpi.zig`), SMP AP bootstrap (`smp.zig` + `trampoline.S`)
+- `src/kernel/` — pmm, vmm (incl. COW resolution), kalloc (heap), scheduler, task, address_space, elf, syscall, init
 - `src/system/` — serial, vga, framebuffer, init, panic
-- `src/drivers/` — keyboard, timer (PIT 100 Hz), pci, e1000, mouse, virtio_blk
+- `src/drivers/` — keyboard, timer (PIT 100 Hz IRQ0 + LAPIC timer via `apic.zig`), apic, pci, e1000, mouse, virtio_blk
 - `src/net/` — arp, arp_cache, ip, icmp, tcp, udp, dns, dhcp, http; `mod.zig` is the public interface
-- `src/fs/` — vfs, ramfs, blockdev
+- `src/fs/` — vfs, ramfs, blockdev, fat16 (auto-mounted at `/mnt/disk`)
 - `src/programs/` — shell commands; `src/shell.zig:execute` dispatches them
 - `src/lua/` — interpreter; `mod.zig` re-exports lexer/parser/vm/value/api
 

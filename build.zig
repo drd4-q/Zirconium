@@ -46,6 +46,26 @@ pub fn build(b: *std.Build) void {
     run_bin2zig.addArg("-o");
     const out_file = run_bin2zig.addOutputFileArg("user_test_bin.zig");
 
+    // 3b. Build the AP trampoline blob (assemble + link at 0x8000, raw binary),
+    //     then embed it as a Zig byte array via bin2zig.
+    var as_cmd = b.addSystemCommand(&.{"as"});
+    as_cmd.addArg("--64");
+    as_cmd.addFileArg(b.path("src/arch/trampoline.S"));
+    const tramp_obj = as_cmd.addPrefixedOutputFileArg("-o", "trampoline.o");
+
+    var ld_cmd = b.addSystemCommand(&.{"ld"});
+    ld_cmd.addArg("-Ttext=0x8000");
+    ld_cmd.addArg("--oformat=binary");
+    ld_cmd.addArg("-o");
+    const tramp_bin = ld_cmd.addOutputFileArg("trampoline.bin");
+    ld_cmd.addFileArg(tramp_obj);
+
+    const run_bin2zig_t = b.addRunArtifact(bin2zig);
+    run_bin2zig_t.addArg("-i");
+    run_bin2zig_t.addFileArg(tramp_bin);
+    run_bin2zig_t.addArg("-o");
+    const tramp_out = run_bin2zig_t.addOutputFileArg("ap_tramp_bin.zig");
+
     // 4. Build kernel
     const exe = b.addExecutable(.{
         .name = "kernel",
@@ -66,6 +86,9 @@ pub fn build(b: *std.Build) void {
     // Add generated binary array as a module import
     exe.root_module.addAnonymousImport("user_test_bin", .{
         .root_source_file = out_file,
+    });
+    exe.root_module.addAnonymousImport("ap_tramp_bin", .{
+        .root_source_file = tramp_out,
     });
 
     b.installArtifact(exe);

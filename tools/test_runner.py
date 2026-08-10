@@ -71,7 +71,9 @@ def find_iso_kernel_offset(iso_data):
                 name = rec[33:33+name_len].decode('ascii', 'ignore')
                 if name.startswith('KERNEL.BIN'):
                     extent = int.from_bytes(rec[2:6], 'little')
-                    data_len = int.from_bytes(rec[10:14], 'big')
+                    # ISO-9660 directory record: size is stored twice,
+                    # little-endian at [10:14] and big-endian at [14:18].
+                    data_len = int.from_bytes(rec[14:18], 'big')
                     slot_bytes = ((data_len + 2047) & ~2047)
                     return extent * 2048, slot_bytes
                 offset += length
@@ -155,6 +157,7 @@ def main():
         "[BOOT] System init done",
         "[MEM] Physical memory manager initialized",
         "[APIC] Local APIC timer initialized",
+        "[SMP] AP CPU 1 online",
         "[USER] Hello from Ring 3 (user space)!",
         "[USER-NET] Created socket via sys_socket",
         "[USER-NET] Connected to 10.0.2.2:80 via sys_connect",
@@ -175,13 +178,30 @@ def main():
         qemu_bin,
         *boot_args,
         "-m", "512M",
+        "-smp", "4",
         "-nographic",
         "-monitor", "none",
         "-serial", "file:serial_test.log",
         "-no-reboot"
     ]
     process = subprocess.Popen(qemu_cmd, cwd=repo_root)
-    time.sleep(5.0)
+
+    # Poll the serial log for the last boot marker instead of a fixed sleep:
+    # a fixed 5s made slow boots flaky (the harness killed QEMU mid-boot and
+    # the fresh log was missing every late marker even though the boot was fine).
+    terminal_marker = "[USER-HEAP] free + reuse OK"
+    content = ""
+    deadline = time.time() + 90.0
+    while time.time() < deadline:
+        try:
+            with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+        except FileNotFoundError:
+            content = ""
+        if terminal_marker in content:
+            break
+        time.sleep(0.25)
+
     try:
         process.terminate()
         process.wait(timeout=2.0)

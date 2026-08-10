@@ -121,3 +121,11 @@ pub fn init(stack_top: u64) void {
 pub fn setRsp0(rsp: u64) void {
     tss.rsp0 = rsp;
 }
+
+pub fn gdtAddr() *align(16) [128]u8 {
+    return &gdt;
+}
+
+pub fn gdtLimit() u16 {
+    return @intCast(@sizeOf(GdtEntry) * 8 + @sizeOf(TssEntry) - 1);
+}

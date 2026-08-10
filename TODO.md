@@ -18,7 +18,8 @@
 - Environment variables (set/unset/env)
 - Copy-on-write fork (ref-counted pages, page-fault write handler in VMM)
 - Socket API for user-space (8 per-task TCP slots; exercised by the embedded ring-3 test binary)
-- APIC timer initialized at boot (PIT still drives the 100 Hz tick + sleep)
+- SMP bring-up (ACPI/MADT + AP trampoline at 0x8000, INIT-SIPI-SIPI; `[SMP] AP CPU 1 online`)
+- APIC initialized at boot (IPIs/EOI for SMP; LAPIC timer masked — the PIT alone drives the 100 Hz tick; an unmasked periodic LAPIC timer on the PIT's vector 32 doubled every tick)
 - QEMU integration test suite (`tools/test_runner.py`, run via `./run.sh --test`)
 - GDB remote debugging stub (`./run.sh --gdb` → `-s -S`, localhost:1234)
 - User-space heap allocator (malloc/free in ring 3 via `SYS_BRK`, free-list allocator in `src/user/heap.zig`)
@@ -117,8 +118,8 @@
 - [x] GDB stub for QEMU debugging (`./run.sh --gdb` → `-s -S` on localhost:1234)
 
 ### Nice to have
-- [ ] SMP (multi-core) support
-- [x] APIC timer (initialized at boot; PIT still drives the 100 Hz tick + sleep)
-- [ ] ACPI support
+- [x] SMP (multi-core) support
+- [x] APIC timer (initialized for IPIs/EOI; LAPIC timer masked, PIT drives the 100 Hz tick + sleep)
+- [x] ACPI support
 - [ ] USB driver
-- [ ] GUI / window manager (framebuffer console with mouse cursor)
+- [x] GUI / window manager (framebuffer desktop, XOR mouse cursor, draggable/focusable windows, `gui` command)

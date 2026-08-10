@@ -73,15 +73,16 @@ pub fn init() bool {
     // Configure Timer divide register (0x3 = divide by 16)
     writeReg(REG_TIMER_DIV, 0x3);
 
-    // Configure LVT Timer Register: Vector 32 (IRQ0), Periodic mode (bit 17)
-    // Vector 32 = IRQ0 (PIT vector in current IDT)
+    // LVT Timer Register: MASKED (bit 16). The LAPIC exists to deliver IPIs
+    // (SMP) and EOI handling, while the PIT remains the single 100 Hz tick
+    // source. Programming the periodic LAPIC timer to vector 32 (the same IDT
+    // vector as the PIT IRQ handler, which is what the old code did) makes
+    // BOTH sources fire into timer.irqHandler, doubling every tick and making
+    // sleep()/time()/TCP timers run 2x fast.
     const timer_vector: u32 = 32;
-    const periodic_mode: u32 = 1 << 17;
-    writeReg(REG_LVT_TIMER, periodic_mode | timer_vector);
-
-    // Initial count for ~100 Hz on 1 GHz CPU clock / 16 divider
-    // ~625000 ticks per 10ms tick
-    writeReg(REG_TIMER_INIT, 625000);
+    const masked: u32 = 1 << 16;
+    writeReg(REG_LVT_TIMER, masked | timer_vector);
+    writeReg(REG_TIMER_INIT, 0);
 
     apic_enabled = true;
     serial.serialWrite("[APIC] Local APIC timer initialized at 0x");

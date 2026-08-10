@@ -92,7 +92,15 @@ pub const AddressSpace = struct {
     }
 
     pub fn destroy(self: AddressSpace) void {
-        // Free user-space page tables and their backing physical pages (entries 0-255)
+        // Free only what this address space itself allocated for user space:
+        // 4KB leaf pages mapped through page tables plus the page-table pages
+        // it created. NEVER free huge pages (2MB/1GB) — those entries were
+        // copied from the kernel's identity map (PD0) or are shared kernel
+        // PDPT entries (PDPT[1..3] point at the kernel's own PDs); freeing
+        // them would hand the kernel's own text/data/heap back to the PMM.
+        // The user stack lives through the shared kernel PD under PDPT[2],
+        // so those leaf pages are freed on the task's exit path (see the
+        // exec/caller that owns t.user_stack_phys), not here.
         const pml4: [*]u64 = @ptrFromInt(self.pml4_phys);
         var i: u16 = 0;
         while (i < 256) : (i += 1) {
@@ -106,36 +114,33 @@ pub const AddressSpace = struct {
             while (j < 512) : (j += 1) {
                 const pdpt_entry = pdpt[j];
                 if (pdpt_entry & vmm.PAGE_PRESENT == 0) continue;
-                if (pdpt_entry & vmm.PAGE_SIZE != 0) {
-                    // 1GB page — free the 2MB-aligned physical region
-                    const phys = pdpt_entry & 0x000FFFFFC0000000;
-                    pmm.freePages(phys, 512); // 512 × 2MB pages
-                    continue;
-                }
+                // Huge (1GB) PD pages are shared kernel identity entries — skip.
+                if (pdpt_entry & vmm.PAGE_SIZE != 0) continue;
 
                 const pd_phys = pdpt_entry & 0x000FFFFFFFFFF000;
                 const pd: [*]u64 = @ptrFromInt(pd_phys);
+
+                // Skip shared kernel PDs (entries of the upper PDPT slots or any
+                // PD whose huge slots point into the kernel identity region).
+                if (isSharedKernelTable(pd_phys, j)) continue;
 
                 var k: u16 = 0;
                 while (k < 512) : (k += 1) {
                     const pd_entry = pd[k];
                     if (pd_entry & vmm.PAGE_PRESENT == 0) continue;
-
-                    if (pd_entry & vmm.PAGE_SIZE != 0) {
-                        // 2MB page — free the physical region
-                        const phys = pd_entry & 0x000FFFFFE0000000;
-                        pmm.freePages(phys, 512); // 512 × 4KB pages
-                        continue;
-                    }
+                    // 2MB huge pages back the kernel identity map — never free.
+                    if (pd_entry & vmm.PAGE_SIZE != 0) continue;
 
                     const pt_phys = pd_entry & 0x000FFFFFFFFFF000;
                     const pt: [*]u64 = @ptrFromInt(pt_phys);
 
-                    // Free each 4KB page mapped in this PT
                     var l: u16 = 0;
                     while (l < 512) : (l += 1) {
                         const pt_entry = pt[l];
                         if (pt_entry & vmm.PAGE_PRESENT == 0) continue;
+                        // User mappings are 4KB pages flagged PAGE_USER; guards
+                        // against freeing anything inherited from the kernel.
+                        if (pt_entry & vmm.PAGE_USER == 0) continue;
                         const page_phys = pt_entry & 0x000FFFFFFFFFF000;
                         pmm.freePage(page_phys);
                     }
@@ -306,6 +311,27 @@ pub const AddressSpace = struct {
         }
     }
 };
+
+/// True if this PD page is one of the kernel's own identity-map PDs that this
+/// address space merely references (copied PDPT entries), not a table we own.
+fn isSharedKernelTable(pd_phys: u64, pdpt_idx: u16) bool {
+    if (pdpt_idx == 0) return false; // PML4[0]/PDPT[0] PD is our private copy
+    const current = vmm.getCurrentCr3();
+    const pml4: [*]const u64 = @ptrFromInt(current);
+    var i: u16 = 0;
+    while (i < 256) : (i += 1) {
+        const pml4_entry = pml4[i];
+        if (pml4_entry & vmm.PAGE_PRESENT == 0) continue;
+        const pdpt_phys = pml4_entry & vmm.PAGE_ADDR_MASK;
+        if (pml4_entry & vmm.PAGE_SIZE != 0) continue;
+        const pdpt: [*]const u64 = @ptrFromInt(pdpt_phys);
+        const pdpt_entry = pdpt[pdpt_idx];
+        if (pdpt_entry & vmm.PAGE_PRESENT == 0) continue;
+        const kpd_phys = pdpt_entry & vmm.PAGE_ADDR_MASK;
+        if (kpd_phys == pd_phys) return true;
+    }
+    return false;
+}
 
 fn nextPageTable(table: [*]u64, index: u16, flags: u64) [*]u64 {
     const entry = table[index];

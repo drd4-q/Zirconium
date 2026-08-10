@@ -82,8 +82,22 @@ fn prepareUserStack(t: *task.Task, entry_vaddr: u64) bool {
     return true;
 }
 
-// Allocate a task slot and initialize its common user-task fields.
+// Allocate a task slot and initialize its common user-task fields. Finished
+// slots are reused so repeated `user`/`exec` runs don't exhaust MAX_TASKS
+// (their resources are already reclaimed in SYS_EXIT teardown).
 fn newUserTaskSlot() ?*task.Task {
+    var slot: usize = 0;
+    while (slot < task_count) : (slot += 1) {
+        if (tasks[slot].state == .finished) {
+            const t = &tasks[slot];
+            t.* = .{};
+            t.id = @intCast(slot);
+            t.state = .ready;
+            t.task_type = .user;
+            t.time_slice = TIME_SLICE;
+            return t;
+        }
+    }
     if (task_count >= task.MAX_TASKS) return null;
     const t = &tasks[task_count];
     t.* = .{};

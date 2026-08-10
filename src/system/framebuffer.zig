@@ -153,7 +153,7 @@ pub fn setColorFromVga(fg_vga: u8, bg_vga: u8) void {
     setColorRGB(table[fg_vga & 0x0F], table[bg_vga & 0x0F]);
 }
 
-fn putPixel(x: u32, y: u32, r: u8, g: u8, b: u8) void {
+pub fn putPixel(x: u32, y: u32, r: u8, g: u8, b: u8) void {
     if (x >= fb_width or y >= fb_height) return;
     const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 4;
     const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
@@ -161,6 +161,50 @@ fn putPixel(x: u32, y: u32, r: u8, g: u8, b: u8) void {
     ptr[1] = g;
     ptr[2] = r;
     ptr[3] = 0;
+}
+
+pub fn fillRect(px: u32, py: u32, pw: u32, ph: u32, r: u8, g: u8, b: u8) void {
+    var y: u32 = py;
+    while (y < py + ph and y < fb_height) : (y += 1) {
+        var x: u32 = px;
+        while (x < px + pw and x < fb_width) : (x += 1) {
+            putPixel(x, y, r, g, b);
+        }
+    }
+}
+
+pub fn drawRectBorder(px: u32, py: u32, pw: u32, ph: u32, thickness: u32, r: u8, g: u8, b: u8) void {
+    fillRect(px, py, pw, thickness, r, g, b);
+    fillRect(px, py + ph - thickness, pw, thickness, r, g, b);
+    fillRect(px, py, thickness, ph, r, g, b);
+    fillRect(px + pw - thickness, py, thickness, ph, r, g, b);
+}
+
+pub fn drawGlyph(px: u32, py: u32, ch: u8, fr: u8, fg: u8, fb: u8, br: u8, bg: u8, bb: u8) void {
+    const glyph = getGlyph(ch);
+    var gy: usize = 0;
+    while (gy < char_h) : (gy += 1) {
+        const bits = glyph[gy];
+        var gx: usize = 0;
+        while (gx < char_w) : (gx += 1) {
+            const x = px + @as(u32, @intCast(gx));
+            const y = py + @as(u32, @intCast(gy));
+            if (@as(u8, 0x80) >> @intCast(gx) & bits != 0) {
+                putPixel(x, y, fr, fg, fb);
+            } else {
+                putPixel(x, y, br, bg, bb);
+            }
+        }
+    }
+}
+
+pub fn drawString(px: u32, py: u32, s: []const u8, fr: u8, fg: u8, fb: u8, br: u8, bg: u8, bb: u8) void {
+    var x = px;
+    for (s) |ch| {
+        if (x + char_w >= fb_width) break;
+        drawGlyph(x, py, ch, fr, fg, fb, br, bg, bb);
+        x += char_w;
+    }
 }
 
 fn makeEntry(ch: u8) u16 {

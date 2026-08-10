@@ -98,6 +98,7 @@ if errorlevel 1 (
 !QEMU_CMD! ^
     !BOOT_OPT! ^
     -m 512M ^
+    -smp 4 ^
     -device e1000,netdev=net0 ^
     -netdev user,id=net0,hostfwd=tcp::8080-:80 ^
     -drive if=none,id=hd0,file=disk.img,format=raw ^

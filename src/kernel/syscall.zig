@@ -205,6 +205,24 @@ pub export fn syscall_handler(frame: *isr_mod.InterruptFrame) callconv(.c) void 
 
             // Switch back to kernel address space and return to scheduler
             vmm.loadCr3(scheduler.kernel_cr3);
+
+            // Reclaim the process's user-space resources now that we are back
+            // on the kernel page tables. Without this, every `user`/`exec` run
+            // leaked the address space, stack and PMM pages forever and filled
+            // MAX_TASKS after ~13 invocations.
+            if (scheduler.current_task >= 0) {
+                const idx: usize = @intCast(scheduler.current_task);
+                const t = &scheduler.tasks[idx];
+                if (t.user_stack_phys != 0) {
+                    pmm.freePages(t.user_stack_phys, task.USER_STACK_SIZE / 4096);
+                    t.user_stack_phys = 0;
+                }
+                if (t.address_space) |as| {
+                    as.destroy();
+                    t.address_space = null;
+                }
+            }
+
             sys_exit_return();
         },
         .SYS_FORK => {

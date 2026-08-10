@@ -7,6 +7,7 @@ const pci = @import("drivers/pci.zig");
 const e1000 = @import("drivers/e1000.zig");
 const net = @import("net/mod.zig");
 const vga_fb = @import("system/framebuffer.zig");
+const gui = @import("system/gui.zig");
 
 const info = @import("programs/info.zig");
 const calc = @import("programs/calc.zig");
@@ -25,6 +26,8 @@ const dhcp_mod = @import("net/dhcp.zig");
 const dns_mod = @import("net/dns.zig");
 const files = @import("programs/files.zig");
 const vfs = @import("fs/vfs.zig");
+const smp = @import("arch/smp.zig");
+const acpi = @import("arch/acpi.zig");
 
 const HISTORY_SIZE: usize = 16;
 const CMD_MAX: usize = 128;
@@ -49,8 +52,9 @@ const commands = [_][]const u8{
     "help",  "info",    "sysinfo", "mem",  "ps",   "clear", "cls",
     "halt",  "reboot",  "calc",    "color","clock","fib",   "matrix",
     "lua",   "user",    "exec",    "save", "ping", "net",  "get",  "wget",
-    "set",   "unset",   "env",     "mouse","resolution",
+    "set",   "unset",   "env",     "mouse","resolution", "gui",
     "dhcp",  "arpcache","nslookup",
+    "smp",   "cpuinfo",
     "ls",    "cat",     "touch",   "mkdir","rm",  "write", "cd",
     "mount",
 };
@@ -204,8 +208,16 @@ fn execute(cmd: []const u8) void {
         showMouse();
     } else if (eql(cmd_name, "resolution")) {
         cmdResolution(args);
+    } else if (eql(cmd_name, "gui")) {
+        gui.run();
+        vga.clear();
+        printBanner();
     } else if (eql(cmd_name, "dhcp")) {
         dhcp_mod.run();
+    } else if (eql(cmd_name, "smp") or eql(cmd_name, "cpuinfo")) {
+        showSmp();
+    } else if (eql(cmd_name, "acpi")) {
+        showAcpi();
     } else if (eql(cmd_name, "arpcache")) {
         arp_cache.printCache();
     } else if (eql(cmd_name, "nslookup")) {
@@ -277,11 +289,60 @@ fn showPs() void {
     vga.write("\n\n");
 }
 
+fn showSmp() void {
+    vga.setColor(.cyan, .black);
+    vga.write("\n=== SMP / CPU ===\n\n");
+    vga.setColor(.white, .black);
+    vga.write("  CPUs (ACPI):   ");
+    vga.writeDec(smp.cpuCount());
+    vga.write("\n  BSP LAPIC ID:  ");
+    vga.writeDec(smp.getLapicId());
+    vga.write("\n  APs online:    ");
+    vga.writeDec(smp.cpuOnline());
+    vga.write("\n");
+
+    var i: usize = 0;
+    while (i < acpi.MAX_CPU) : (i += 1) {
+        if (smp.online_flags[i]) {
+            vga.write("  CPU #");
+            vga.writeDec(i);
+            vga.write(": ONLINE, idle ticks = ");
+            vga.writeDec(smp.ap_ticks[i]);
+            vga.write("\n");
+        }
+    }
+    vga.write("\n");
+}
+
 fn pad(n: usize) void {
     var i: usize = 0;
     while (i < n) : (i += 1) {
         vga.putChar(' ');
     }
+}
+
+fn showAcpi() void {
+    vga.setColor(.cyan, .black);
+    vga.write("\n=== ACPI ===\n\n");
+    vga.setColor(.white, .black);
+    if (acpi.rsdp_address == 0) {
+        vga.write("  RSDP: not found\n");
+    } else {
+        vga.write("  RSDP: 0x");
+        vga.writeHexShort(acpi.rsdp_address);
+        vga.write("\n  LAPIC base: 0x");
+        vga.writeHexShort(@intCast(acpi.lapic_base));
+        vga.write("\n");
+    }
+    var i: usize = 0;
+    while (i < acpi.cpu_count) : (i += 1) {
+        vga.write("  CPU ");
+        vga.writeDec(i);
+        vga.write(" LAPIC ID: ");
+        vga.writeDec(acpi.lapic_ids[i]);
+        vga.write("\n");
+    }
+    vga.write("\n");
 }
 
 fn showMouse() void {
@@ -526,6 +587,9 @@ fn printHelp() void {
     vga.write("    dhcp          Auto-configure IP via DHCP\n");
     vga.write("    arpcache      Show ARP cache table\n");
     vga.write("    nslookup <h>  DNS lookup\n\n");
+    vga.write("  CPU / ACPI:\n");
+    vga.write("    smp/cpuinfo   SMP & per-CPU status\n");
+    vga.write("    acpi          ACPI tables (RSDP, MADT)\n\n");
     vga.write("  Filesystem:\n");
     vga.write("    ls [path]     List directory\n");
     vga.write("    cat <file>    Print file contents\n");
@@ -537,6 +601,7 @@ fn printHelp() void {
     vga.write("    mount         List mounted filesystems\n\n");
     vga.write("  Input:\n");
     vga.write("    mouse         Show mouse info\n");
+    vga.write("    gui           Window manager demo (framebuffer)\n");
     vga.write("    resolution    Change screen resolution (framebuffer)\n\n");
     vga.write("  Keys: Tab=complete, Up/Down=history, PgUp/PgDn=scroll\n\n");
 }

@@ -2,10 +2,13 @@ const root = @import("root");
 const vga = root.vga;
 const port_io = @import("../arch/port.zig");
 const isr_mod = @import("../arch/isr.zig");
+const fb = @import("../system/framebuffer.zig");
 
 const KB_DATA: u16 = 0x60;
 const KB_STATUS: u16 = 0x64;
 
+// Pixel position (used by GUI). Falls back to character-cell coords for the
+// text console if the framebuffer is inactive.
 pub var mx: i32 = 40;
 pub var my: i32 = 12;
 pub var left_button: bool = false;
@@ -13,6 +16,22 @@ pub var right_button: bool = false;
 pub var middle_button: bool = false;
 pub var dx: i32 = 0;
 pub var dy: i32 = 0;
+
+// Cursor bound following any pixel movement: clamped to both char-cell grid
+// and pixel framebuffer.
+fn clampCoords() void {
+    if (fb.active) {
+        if (mx < 0) mx = 0;
+        if (my < 0) my = 0;
+        if (mx >= @as(i32, @intCast(fb.fb_width))) mx = @as(i32, @intCast(fb.fb_width)) - 1;
+        if (my >= @as(i32, @intCast(fb.fb_height))) my = @as(i32, @intCast(fb.fb_height)) - 1;
+    } else {
+        if (mx < 0) mx = 0;
+        if (mx >= 80) mx = 79;
+        if (my < 0) my = 0;
+        if (my >= 25) my = 24;
+    }
+}
 
 var packet_buf: [3]u8 = undefined;
 var packet_pos: u8 = 0;
@@ -128,11 +147,7 @@ fn irqHandler(_: *isr_mod.InterruptFrame) void {
             mx += dx;
             my -= dy; // PS/2 Y is inverted
 
-            // Clamp to screen
-            if (mx < 0) mx = 0;
-            if (mx >= 80) mx = 79;
-            if (my < 0) my = 0;
-            if (my >= 25) my = 24;
+            clampCoords();
         }
     }
 }

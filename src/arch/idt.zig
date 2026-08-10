@@ -93,7 +93,10 @@ fn setEntryDpl3(n: usize, handler_addr: u64) void {
         .offset_low = @intCast(handler_addr & 0xFFFF),
         .selector = 0x08,
         .ist = 0,
-        .type_attr = 0xEE, // P=1, DPL=3, interrupt gate
+        .type_attr = 0xEF, // P=1, DPL=3, TRAP gate (keeps IF=1 in the handler;
+        //                            an interrupt gate clears IF and a blocking
+        //                            syscall such as read() on empty input would
+        //                            hlt forever with the keyboard IRQ masked)
         .offset_mid = @intCast((handler_addr >> 16) & 0xFFFF),
         .offset_high = @intCast((handler_addr >> 32) & 0xFFFFFFFF),
         .reserved = 0,
@@ -185,4 +188,12 @@ pub fn init() void {
     load_idt(@intFromPtr(&idt_ptr));
     vga.write("  [IDT] load_idt completed\n");
     serial.serialWrite("[IDT] IDT loaded OK\n");
+}
+
+pub fn idtAddr() *align(16) [256]IdtEntry {
+    return &idt_entries;
+}
+
+pub fn idtLimit() u16 {
+    return @intCast(@sizeOf(IdtEntry) * 256 - 1);
 }

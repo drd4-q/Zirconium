@@ -78,6 +78,10 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     vga.write("[BOOT] Kernel modules initialized\n");
     serial.serialWrite("[BOOT] Kernel init done\n");
 
+    vga.write("[BOOT] Bringing secondary CPUs online...\n");
+    @import("arch/smp.zig").init();
+    vga.write("[BOOT] SMP init done\n");
+
     vga.write("[BOOT] Starting scheduler...\n");
     scheduler.runAll();
     vga.write("[BOOT] Scheduler completed\n");
