@@ -73,6 +73,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .red_zone = false,
             .strip = true,
         }),
         .use_llvm = true,

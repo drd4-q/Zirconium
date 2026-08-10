@@ -84,15 +84,9 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
         (@as(u32, @intCast(mbi[106])) << 16) |
         (@as(u32, @intCast(mbi[107])) << 24);
 
-    fb_bpp = @as(u32, @intCast(mbi[108])) |
-        (@as(u32, @intCast(mbi[109])) << 8) |
-        (@as(u32, @intCast(mbi[110])) << 16) |
-        (@as(u32, @intCast(mbi[111])) << 24);
+    fb_bpp = @as(u32, @intCast(mbi[108]));
 
-    fb_type = @as(u32, @intCast(mbi[112])) |
-        (@as(u32, @intCast(mbi[113])) << 8) |
-        (@as(u32, @intCast(mbi[114])) << 16) |
-        (@as(u32, @intCast(mbi[115])) << 24);
+    fb_type = @as(u32, @intCast(mbi[109]));
 
     if (fb_addr == 0 or fb_width == 0 or fb_height == 0) return;
     if (fb_bpp != 32) return;

@@ -47,9 +47,12 @@ const VirtqUsedElem = extern struct {
 
 var io_base: u16 = 0;
 
-// Descriptor table + available ring must be contiguous and page-aligned for legacy virtio
-// Layout: [desc_table (16*QUEUE_SIZE)] [avail_ring (2+2+2*QUEUE_SIZE)] [padding to 4096] [used_ring]
-var virtqueue_mem: [8192]u8 align(4096) = undefined;
+// Legacy virtio queue layout (must be physically contiguous, used ring page-aligned):
+//   [desc_table: 16*N] [avail_ring: 4+2*N] [padding to 4096] [used_ring: 4+8*N]
+// QEMU reports queue_size 256 => desc=4096, avail=516, used at page 8192, used=2052.
+// Total 10244 bytes, so the buffer must be 16384. (8192 was too small and the old
+// layout placed avail and used on the same offset, corrupting descriptors.)
+var virtqueue_mem: [16384]u8 align(4096) = undefined;
 
 var free_head: u16 = 0;
 var num_sectors: u64 = 0;
@@ -300,15 +303,16 @@ pub fn init() void {
     // Setup virtqueue memory layout:
     // [desc_table: 16*queue_size] [avail: 2+2+2*queue_size] [pad to 4KB] [used: 2+2+8*queue_size]
     const desc_bytes = @as(usize, queue_size) * @sizeOf(VirtqDesc);
-    const avail_aligned = (desc_bytes + 4095) & ~@as(usize, 4095);
-    const used_off = avail_aligned;
+    const avail_size = 4 + 2 * @as(usize, queue_size);
+    const used_off = (desc_bytes + avail_size + 4095) & ~@as(usize, 4095);
+    const used_size = 4 + 8 * @as(usize, queue_size);
 
     desc_table = @as([*]VirtqDesc, @ptrFromInt(@intFromPtr(&virtqueue_mem)))[0..queue_size].ptr;
     avail_ring_base = @as([*]u16, @ptrFromInt(@intFromPtr(&virtqueue_mem[desc_bytes])));
     used_ring_base = @as([*]u8, @ptrFromInt(@intFromPtr(&virtqueue_mem[used_off])));
 
     // Zero the memory
-    @memset(virtqueue_mem[0 .. used_off + 4 + @as(usize, queue_size) * @sizeOf(VirtqUsedElem)], 0);
+    @memset(virtqueue_mem[0 .. used_off + used_size], 0);
 
     // Initialize free descriptor list
     var i: u16 = 0;

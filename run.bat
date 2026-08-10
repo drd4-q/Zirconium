@@ -67,6 +67,12 @@ if not exist disk.img (
     )
     if exist disk.img (
         echo disk.img created (64MB raw)
+        REM Format as FAT16 so the kernel's FAT16 driver can mount it
+        where mkfs.fat >nul 2>nul
+        if !ERRORLEVEL!==0 (
+            mkfs.fat -F 16 disk.img >nul 2>nul
+            echo disk.img formatted as FAT16
+        )
     )
 )
 

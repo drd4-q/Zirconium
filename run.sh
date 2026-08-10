@@ -36,7 +36,13 @@ grub-mkrescue -o kernel.iso isodir
 if [ ! -f disk.img ]; then
     echo "=== Creating 64MB disk image ==="
     dd if=/dev/zero of=disk.img bs=1M count=64 2>/dev/null
-    echo "disk.img created (64MB raw)"
+    if command -v mkfs.fat >/dev/null 2>&1; then
+        echo "=== Formatting disk.img as FAT16 ==="
+        mkfs.fat -F 16 disk.img >/dev/null
+    else
+        echo "mkfs.fat not found — leaving raw (FAT16 mount will fail)"
+    fi
+    echo "disk.img created (64MB FAT16)"
 fi
 
 echo "=== Launching QEMU ==="
