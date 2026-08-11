@@ -132,18 +132,11 @@ fn inBounds(x: i32, y: i32) bool {
 }
 
 fn getPixel(x: i32, y: i32) u32 {
-    const off = @as(u64, @intCast(y)) * fb.fb_pitch + @as(u64, @intCast(x)) * 4;
-    const ptr: [*]volatile u8 = @ptrFromInt(fb.fb_addr + off);
-    return (@as(u32, ptr[2]) << 16) | (@as(u32, ptr[1]) << 8) | @as(u32, ptr[0]);
+    return fb.getPixel(@intCast(x), @intCast(y));
 }
 
 fn putPixel(x: i32, y: i32, color: u32) void {
-    const off = @as(u64, @intCast(y)) * fb.fb_pitch + @as(u64, @intCast(x)) * 4;
-    const ptr: [*]volatile u8 = @ptrFromInt(fb.fb_addr + off);
-    ptr[0] = @intCast(color & 0xFF);
-    ptr[1] = @intCast((color >> 8) & 0xFF);
-    ptr[2] = @intCast((color >> 16) & 0xFF);
-    ptr[3] = 0;
+    fb.putPixel(@intCast(x), @intCast(y), @intCast((color >> 16) & 0xFF), @intCast((color >> 8) & 0xFF), @intCast(color & 0xFF));
 }
 
 fn saveCursorBg(x: i32, y: i32) void {
@@ -325,6 +318,7 @@ fn redrawAll() void {
     }
     drawTaskbar();
     drawCursor();
+    fb.flush();
 }
 
 pub fn run() void {
@@ -375,6 +369,7 @@ pub fn run() void {
                 saveCursorBg(cursor_x, cursor_y);
                 drawCursorShape();
                 cursor_drawn = true;
+                fb.flush();
             }
         }
 

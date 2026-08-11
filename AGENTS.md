@@ -11,6 +11,7 @@ zig build            # build only → zig-out/bin/kernel (Debug, safety on)
 zig build -Drelease  # ReleaseFast (what run.sh/tests use)
 ./run.sh     # build (ReleaseFast) → grub-mkrescue ISO → launch QEMU (Linux/macOS)
 ./run.sh --vnc   # same but VNC display (port 5901) instead of GTK
+./run.sh --gdb  # QEMU with -s -S — gdb remote localhost:1234
 run.bat      # Windows equivalent (same flow as run.sh)
 ```
 
@@ -18,9 +19,9 @@ run.bat      # Windows equivalent (same flow as run.sh)
 
 **Zig version: 0.16.0.** `build.zig.zon` says 0.14.0 but that is stale — `tools/bin2zig.zig` uses Zig 0.16 std APIs (`std.process.Init`, `std.Io.Dir`, `std.Options.debug_io`). `zig build` only compiles on 0.16.
 
-**Toolchain deps:** GNU `as` (builds `src/entry.S` + `src/arch/isr.S`), `grub-mkrescue`, `qemu-system-x86_64`. The kernel requires the LLVM backend (`use_llvm = true`).
+**Toolchain deps:** GNU `as` + `ld` are used **only** for `src/arch/trampoline.S` (assemble → `ld -Ttext=0x8000 --oformat=binary`, via system commands in `build.zig`). `src/entry.S` + `src/arch/isr.S` are compiled through `root_module.addAssemblyFile` (Zig's own assembler), not GNU `as`. Also need `grub-mkrescue` and `qemu-system-x86_64`. The kernel requires the LLVM backend (`use_llvm = true`).
 
-**Tests:** `./run.sh --test` = `python3 tools/test_runner.py` — the only automated check (no CI). It builds `zig build -Drelease` (ReleaseFast, same binary `run.sh` ships), boots QEMU headless (`-nographic`, `-smp 4`, serial into `serial_test.log`), sleeps 5s, then greps the log for exact markers (`tools/test_runner.py:153`): `[BOOT] Kernel loaded`, `[BOOT] System init done`, `[MEM] Physical memory manager initialized`, `[APIC] Local APIC timer initialized`, `[SMP] AP CPU 1 online`, `[USER] Hello from Ring 3 (user space)!`, `[USER-NET] Created socket/Connected to 10.0.2.2:80`, `[USER-HEAP] malloc/brk + free reuse`. Run it after any change that risks the boot path, SMP bring-up, or ring-3 (syscalls/heap). It patches the freshly built kernel into an existing `kernel.iso` (grub-mkrescue not re-run) **only if it fits the ISO slot** — otherwise it rebuilds the ISO from scratch (a grown kernel won't fit and silently breaks without this fallback). Boots `zig-out/bin/kernel` via `-kernel` only when no ISO exists.
+**Tests:** `./run.sh --test` = `python3 tools/test_runner.py` — the only automated check (no CI). It builds `zig build -Drelease` (ReleaseFast, same binary `run.sh` ships), boots QEMU headless (`-nographic -monitor none`, `-smp 4`, serial into `serial_test.log`), **polls the log for the terminal marker `[USER-HEAP] free + reuse OK`** (90s deadline) rather than sleeping a fixed time, then kills QEMU and greps the log for the exact markers in `tools/test_runner.py:155`. Required markers: `[BOOT] Kernel loaded`, `[BOOT] System init done`, `[MEM] Physical memory manager initialized`, `[APIC] Local APIC timer initialized`, `[SMP] AP CPU 1 online`, `[USER] Hello from Ring 3 (user space)!`, `[USER-NET] Created socket via sys_socket`, `[USER-NET] Connected to 10.0.2.2:80 via sys_connect`, `[USER-HEAP] malloc(64)+malloc(128) via SYS_BRK OK`, `[USER-HEAP] free + reuse OK`. Run it after any change that risks the boot path, SMP bring-up, or ring-3 (syscalls/heap). It patches the freshly built kernel into an existing `kernel.iso` (`tools/patch_iso.py`-style in-place overwrite) **only if it fits the ISO slot** — otherwise it rebuilds the ISO with grub-mkrescue (a grown kernel won't fit and silently breaks without this fallback). Boots `zig-out/bin/kernel` via `-kernel` only when neither ISO patch nor ISO build is possible (i.e. no `kernel.iso` and no `zig-out/bin/kernel`).
 
 **Crash triage:** QEMU runs with `-d int,cpu_reset -D qemu.log` — on crash/triple-fault read `qemu.log`. Serial (the kernel debug log) goes to the terminal (`-serial stdio`); only the test harness writes `serial_test.log`. The `serial.log` files in the repo root are stale artifacts — no script produces them.
 
@@ -31,6 +32,8 @@ run.bat      # Windows equivalent (same flow as run.sh)
 **Disk / FAT16 gotcha:** `run.sh` creates a 64 MB `disk.img` (virtio-blk) if missing. At shell start `virtio_blk.init()` + `fat16.init()` auto-mount it at `/mnt/disk` — the `ls/cat/cd/touch/mkdir/rm/write/save` commands are FAT16-based and fail/empty if no `disk.img`/block device exists (`[FAT16]` messages). `disk.img` is gitignored build noise.
 
 **Network gotcha:** the guest is an HTTP *client* — `get`/`wget` fetches from the gateway 10.0.2.2 (= the host), and nothing listens on guest:80 despite the "open localhost:8080" comment in `run.sh`.
+
+**Framebuffer + GUI (recent work):** if GRUB provides a linear framebuffer, `vga.initFb(mbi_ptr)` makes it active and `gui`/`resolution`/`mouse` shell commands work (`resolution` cycles 640x480…1280x720). `src/system/framebuffer.zig` is a shadow-buffer driver (draw 32-bit pixels in RAM, then `flush()` the dirty region to the LFB to avoid flicker); `src/system/gui.zig` is a small windowing shell (draggable windows: clock/system/about; keyboard + PS/2 mouse; Esc quits). The console shell remains VGA-text; the GUI overlays the framebuffer. Live WIP: `framebuffer.zig` + `gui.zig` have uncommitted changes in the repo — verify against them, and check QEMU boots with a VM that passes a framebuffer (Bochs VBE / std VGA; the test harness runs `-nographic`, where there is no framebuffer).
 
 ## Architecture
 
@@ -64,18 +67,18 @@ run.bat      # Windows equivalent (same flow as run.sh)
 
 `src/lua/` — lexer, recursive-descent parser → AST, tree-walking VM. Runs via the `lua` shell command (`src/programs/lua.zig`; 128 KB `FixedBufferAllocator` heap).
 
-- Native bindings live in `src/lua/api.zig` and are registered in `vm.zig:VM.init` (globals: `print`, `vga_write`, `serial_write`, `sleep`, `read_key`, `time`, plus `math.*` and `string.*` tables). Add new bindings there.
+- Native bindings live in `src/lua/api.zig` and are registered in `vm.zig:VM.init` (globals: `print`, `type`, `tostring`, `tonumber`, `assert`, `error`, `ipairs`, `pairs`, `vga_write`, `serial_write`, `sleep`, `read_key`, `time`, plus `math.*` and `string.*` tables). Add new bindings there.
 - User-defined `function` definitions are parsed and callable (`vm.callFunction`).
 - No Lua modules/standard libraries beyond the above.
 
 ## Conventions
 
-- Assembler files are built with GNU `as`. Inline asm uses Zig 0.16+ clobber syntax: `: .{ .rax = true, .memory = true }`.
+- `trampoline.S` (SMP AP entry) is the only file built with GNU `as` + `ld --oformat=binary`; `entry.S`/`isr.S` use Zig's `addAssemblyFile`. Inline asm uses Zig 0.16+ clobber syntax: `: .{ .rax = true, .memory = true }`.
 - VGA is the user-facing UI; serial (`/dev/ttyS0`) is debug logging. Don't use std output facilities in kernel code.
 - Hardcoded network config: IP 10.0.2.15, gateway 10.0.2.2, DNS 10.0.2.3, HTTP always targets 10.0.2.2:80.
 - New shell commands: create `src/programs/<name>.zig`, then import + dispatch it in `shell.zig:execute` and list it in `printHelp`.
 - `README.md` is cosmetic prose; `AGENTS.md` + `TODO.md` are the real docs.
 - `tools/patch_iso.py` overwrites the kernel inside an existing `kernel.iso` (ISO patching, no grub-mkrescue) — the test runner does the same inline.
 - Build target: x86_64-freestanding (Debug on plain `zig build`, ReleaseFast with `-Drelease`); SSE3–AVX2 stripped via `cpu_features_sub` in `build.zig`.
-- `.gitignore` covers `.zig-cache/`, `zig-out/`, `isodir/`, `build/`, `kernel.iso`, `qemu.log`, `*.log`, `disk.img`, `*.o` — all build noise; don't commit them.
+- `.gitignore` covers `.zig-cache/`, `zig-out/`, `isodir/`, `build/`, `kernel.iso`, `qemu.log`, `serial*.log`, `test_out.log`, `disk.img`, `*.o` — all build noise; don't commit them.
 - `kernel_entry` is exported `callconv(.c)` and called from asm; `syscall_handler` and `main.zig:panic` are similarly exported for asm/ABI use. `main.zig` defines its own `pub fn panic` (prints to VGA+serial, halts) — the std one is unused.

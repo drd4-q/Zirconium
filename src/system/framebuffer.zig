@@ -1,6 +1,35 @@
 const std = @import("std");
 const root = @import("root");
 
+// Shadow buffer: all drawing happens here (fast RAM, packed 32-bit pixels),
+// then flush() copies only the dirty region to the real framebuffer in one
+// bulk pass. This avoids per-pixel volatile LFB writes and row-by-row
+// redraws visible as flicker.
+var shadow: [*]u32 = undefined;
+var shadow_pixels: usize = 0;
+var dirty_x0: u32 = 0;
+var dirty_y0: u32 = 0;
+var dirty_x1: u32 = 0;
+var dirty_y1: u32 = 0;
+var has_dirty: bool = false;
+
+// Covers every resolution the shell's `resolution` command supports.
+const MAX_SHADOW_PIXELS: usize = 1280 * 720;
+
+fn ensureShadow() bool {
+    if (shadow_pixels != 0) return true;
+    // PMM isn't ready until after system_init; retry lazily on first draw.
+    const pixels = @as(u64, fb_width) * fb_height;
+    if (pixels > MAX_SHADOW_PIXELS) return false;
+    const bytes = (pixels * 4 + 4095) & ~@as(u64, 4095);
+    const pages = @as(usize, @intCast(bytes / 4096));
+    const phys = root.pmm.allocPages(pages) orelse return false;
+    shadow = @ptrFromInt(phys);
+    shadow_pixels = @intCast(pixels);
+    @memset(shadow[0..shadow_pixels], 0);
+    return true;
+}
+
 pub var fb_addr: u64 = 0;
 pub var fb_pitch: u32 = 0;
 pub var fb_width: u32 = 0;
@@ -126,6 +155,7 @@ pub fn clear() void {
     cursor_row = 0;
     cursor_col = 0;
     scroll_view = false;
+    flush();
 }
 
 pub fn setColorRGB(fg: u32, bg: u32) void {
@@ -149,12 +179,66 @@ pub fn setColorFromVga(fg_vga: u8, bg_vga: u8) void {
 
 pub fn putPixel(x: u32, y: u32, r: u8, g: u8, b: u8) void {
     if (x >= fb_width or y >= fb_height) return;
+    if (ensureShadow() and x < 1280 and y < 720) {
+        shadow[@as(u64, y) * fb_width + x] = (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b);
+        markDirty(x, y);
+        return;
+    }
     const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 4;
     const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
     ptr[0] = b;
     ptr[1] = g;
     ptr[2] = r;
     ptr[3] = 0;
+}
+
+pub fn getPixel(x: u32, y: u32) u32 {
+    if (x >= fb_width or y >= fb_height) return 0;
+    if (shadow_pixels != 0 and x < 1280 and y < 720) {
+        return shadow[@as(u64, y) * fb_width + x];
+    }
+    const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 4;
+    const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
+    return (@as(u32, ptr[2]) << 16) | (@as(u32, ptr[1]) << 8) | @as(u32, ptr[0]);
+}
+
+fn markDirty(x: u32, y: u32) void {
+    if (!has_dirty) {
+        dirty_x0 = x;
+        dirty_y0 = y;
+        dirty_x1 = x + 1;
+        dirty_y1 = y + 1;
+        has_dirty = true;
+    } else {
+        if (x < dirty_x0) dirty_x0 = x;
+        if (y < dirty_y0) dirty_y0 = y;
+        if (x + 1 > dirty_x1) dirty_x1 = x + 1;
+        if (y + 1 > dirty_y1) dirty_y1 = y + 1;
+    }
+}
+
+/// Copy the dirty shadow region to the real framebuffer in bulk.
+pub fn flush() void {
+    if (!has_dirty or shadow_pixels == 0) return;
+    const x0 = dirty_x0;
+    const y0 = dirty_y0;
+    const x1 = @min(dirty_x1, fb_width);
+    const y1 = @min(dirty_y1, fb_height);
+    has_dirty = false;
+    if (x0 >= x1 or y0 >= y1) return;
+
+    var y: u32 = y0;
+    while (y < y1) : (y += 1) {
+        const row_off = @as(u64, y) * fb_width + x0;
+        const src: [*]const u32 = shadow + row_off;
+        const dst_off: u64 = @as(u64, y) * fb_pitch + @as(u64, x0) * 4;
+        const dst: [*]volatile u32 = @ptrFromInt(fb_addr + dst_off);
+        const w = x1 - x0;
+        var x: u32 = 0;
+        while (x < w) : (x += 1) {
+            dst[x] = src[x];
+        }
+    }
 }
 
 pub fn fillRect(px: u32, py: u32, pw: u32, ph: u32, r: u8, g: u8, b: u8) void {
@@ -288,6 +372,7 @@ pub fn scrollUp() void {
     for (0..rows) |ry| {
         redrawRow(ry);
     }
+    flush();
 }
 
 pub fn putChar(ch: u8) void {
@@ -340,6 +425,7 @@ pub fn putChar(ch: u8) void {
             cursor_row = rows - 1;
         }
     }
+    flush();
 }
 
 pub fn write(str: []const u8) void {
@@ -457,6 +543,7 @@ fn renderScrollView() void {
             drawCharAt(cols - 1 - (ind_len - 1 - ix), r, indicator_buf[ix]);
         }
     }
+    flush();
 }
 
 pub fn exitScrollView() void {
@@ -469,6 +556,7 @@ pub fn exitScrollView() void {
     for (0..rows) |ry| {
         redrawRow(ry);
     }
+    flush();
 }
 
 // VGA 8x16 bitmap font (CP437 glyphs for printable ASCII 0x20-0x7E)
