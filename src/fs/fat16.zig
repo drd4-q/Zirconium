@@ -46,6 +46,7 @@ const FileInfo = struct {
     is_dir: bool,
     first_cluster: u16,
     file_size: u32,
+    parent_cluster: u16 = 0, // cluster of the directory holding this file (0 = root)
     used: bool = false,
 };
 
@@ -64,9 +65,122 @@ fn readSector(sector: u64, buf: *[SECTOR_SIZE]u8) bool {
     return blockdev.readSectors(dev, sector, 1, buf);
 }
 
+fn writeSector(sector: u64, buf: *const [SECTOR_SIZE]u8) bool {
+    const dev = fat_dev orelse return false;
+    return blockdev.writeSectors(dev, sector, 1, buf);
+}
+
+// Read the 16-bit FAT entry for a cluster.
+fn rawFATEntry(cluster: u16) ?u16 {
+    var buf: [SECTOR_SIZE]u8 = undefined;
+    const fat_offset = @as(u64, cluster) * 2;
+    const fat_sector = fat_start_sector + (fat_offset / SECTOR_SIZE);
+    const entry_offset = fat_offset % SECTOR_SIZE;
+    if (!readSector(fat_sector, &buf)) return null;
+    return @as(u16, buf[entry_offset]) | (@as(u16, buf[entry_offset + 1]) << 8);
+}
+
+// Write a 16-bit FAT entry to all FAT copies (so the FS survives a boot that
+// only reads FAT#0).
+fn writeFATEntry(cluster: u16, value: u16) bool {
+    var buf: [SECTOR_SIZE]u8 = undefined;
+    const fat_offset = @as(u64, cluster) * 2;
+    const fat_sector = fat_start_sector + (fat_offset / SECTOR_SIZE);
+    const entry_offset = fat_offset % SECTOR_SIZE;
+
+    var copy: u8 = 0;
+    while (copy < boot_sector.num_fats) : (copy += 1) {
+        if (!readSector(fat_sector + @as(u64, copy) * boot_sector.fat_size_sectors, &buf)) return false;
+        buf[entry_offset] = @intCast(value & 0xFF);
+        buf[entry_offset + 1] = @intCast((value >> 8) & 0xFF);
+        if (!writeSector(fat_sector + @as(u64, copy) * boot_sector.fat_size_sectors, &buf)) return false;
+    }
+    return true;
+}
+
+// Total number of usable clusters on the volume.
+fn totalClusters() usize {
+    const total = if (boot_sector.total_sectors_16 != 0)
+        boot_sector.total_sectors_16
+    else
+        boot_sector.total_sectors_32;
+    const cluster_count = (@as(u64, total) - data_start) / boot_sector.sectors_per_cluster;
+    return @intCast(@min(cluster_count, 0xFF00));
+}
+
+// Find a free cluster (FAT entry == 0). Starts the scan at `start` to allow
+// sequential allocation.
+fn findFreeCluster(start: u16) ?u16 {
+    const max_cluster = totalClusters();
+    var c: u16 = start;
+    while (c < max_cluster + 2) : (c += 1) {
+        const e = rawFATEntry(c) orelse return null;
+        if (e == 0x0000) return c;
+    }
+    if (start > 2) return findFreeCluster(2); // wrap around (first 2 entry scanned)
+    return null;
+}
+
+// Allocate a single cluster and mark it end-of-chain.
+fn allocateCluster() ?u16 {
+    const c = findFreeCluster(2) orelse return null;
+    if (!writeFATEntry(c, 0xFFFF)) return null;
+    return c;
+}
+
+// Allocate `count` clusters and chain them: returns the first cluster.
+fn allocateClusterChain(count: usize) ?u16 {
+    var first: ?u16 = null;
+    var prev: ?u16 = null;
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const c = allocateCluster() orelse {
+            if (prev) |p| {
+                _ = writeFATEntry(p, 0xFFFF); // keep partial chain valid
+            }
+            return null;
+        };
+        if (first == null) first = c;
+        if (prev) |p| {
+            if (!writeFATEntry(p, c)) return null;
+        }
+        prev = c;
+    }
+    return first;
+}
+
+// Mark cluster N free (FAT entry = 0) in every FAT.
+fn freeClusterEntry(cluster: u16) bool {
+    return writeFATEntry(cluster, 0x0000);
+}
+
 fn clusterToSector(cluster: u16) u64 {
     if (cluster == 0) return root_dir_start; // root directory
     return data_start + @as(u64, cluster - 2) * boot_sector.sectors_per_cluster;
+}
+
+// Read a whole cluster into `out` (out.len must be >= spc*512).
+fn readClusterBytes(cluster: u16, out: []u8) bool {
+    const base = clusterToSector(cluster);
+    var s: u8 = 0;
+    while (s < boot_sector.sectors_per_cluster) : (s += 1) {
+        const off = s * SECTOR_SIZE;
+        if (off + SECTOR_SIZE > out.len) return false;
+        if (!readSector(base + @as(u64, s), out[off..][0..SECTOR_SIZE])) return false;
+    }
+    return true;
+}
+
+// Write a whole cluster back from `data`.
+fn writeClusterBytes(cluster: u16, data: []const u8) bool {
+    const base = clusterToSector(cluster);
+    var s: u8 = 0;
+    while (s < boot_sector.sectors_per_cluster) : (s += 1) {
+        const off = s * SECTOR_SIZE;
+        if (off + SECTOR_SIZE > data.len) return false;
+        if (!writeSector(base + @as(u64, s), data[off..][0..SECTOR_SIZE])) return false;
+    }
+    return true;
 }
 
 fn nextCluster(cluster: u16) ?u16 {
@@ -182,9 +296,14 @@ fn matchName(name: []const u8, entry: *const Fat16DirEntry) bool {
     const len = buildFullName(entry, &full);
     if (len != name.len) return false;
     for (name, full[0..len]) |a, b| {
-        if (a != b) return false;
+        if (a != b and lower(a) != lower(b)) return false;
     }
     return true;
+}
+
+fn lower(c: u8) u8 {
+    if (c >= 'A' and c <= 'Z') return c + 32;
+    return c;
 }
 
 fn findInDir(cluster: u16, name: []const u8) ?Fat16DirEntry {
@@ -260,6 +379,204 @@ fn resolvePathComponents(path: []const u8, out_name: []u8) ?struct { dir_cluster
     return null;
 }
 
+// ---- write-support helpers -------------------------------------------------
+
+// Convert "hello.txt" -> "HELLO     TXT" style short name + extension (uppercase).
+fn toShortName(name: []const u8, short_name: *[8]u8, short_ext: *[3]u8) void {
+    @memset(short_name, ' ');
+    @memset(short_ext, ' ');
+    var dot: usize = name.len;
+    for (name, 0..) |c, i| {
+        if (c == '.') dot = i;
+    }
+    const base = name[0..dot];
+    const ext = if (dot + 1 <= name.len and dot != name.len) name[dot + 1 ..] else "";
+    var j: usize = 0;
+    while (j < base.len and j < 8) : (j += 1) {
+        var c = base[j];
+        if (c >= 'a' and c <= 'z') c -= 32;
+        short_name[j] = c;
+    }
+    j = 0;
+    while (j < ext.len and j < 3) : (j += 1) {
+        var c = ext[j];
+        if (c >= 'a' and c <= 'z') c -= 32;
+        short_ext[j] = c;
+    }
+}
+
+const DirSlot = struct { sector: u64, offset: usize };
+
+// Find a free 32-byte slot (0x00 or 0xE5) in a directory, growing subdirectories
+// with an extra cluster if the chain is full.
+fn findFreeDirSlot(dir_cluster: u16) ?DirSlot {
+    var buf: [SECTOR_SIZE]u8 = undefined;
+    var sec: u64 = 0;
+    var spc: u8 = 0;
+
+    if (dir_cluster == 0) {
+        const root_sectors = (@as(u64, boot_sector.root_entry_count) * 32 + SECTOR_SIZE - 1) / SECTOR_SIZE;
+        while (sec < root_sectors) : (sec += 1) {
+            if (!readSector(root_dir_start + sec, &buf)) return null;
+            var e: usize = 0;
+            while (e < SECTOR_SIZE / 32) : (e += 1) {
+                const first = buf[e * 32];
+                if (first == 0x00 or first == 0xE5) return .{ .sector = root_dir_start + sec, .offset = e * 32 };
+            }
+        }
+        return null; // root directory is full
+    }
+
+    // subdirectory: follow cluster chain
+    var current = dir_cluster;
+    while (current >= 2) {
+        const base = clusterToSector(current);
+        spc = 0;
+        while (spc < boot_sector.sectors_per_cluster) : (spc += 1) {
+            if (!readSector(base + @as(u64, spc), &buf)) return null;
+            var e: usize = 0;
+            while (e < SECTOR_SIZE / 32) : (e += 1) {
+                const first = buf[e * 32];
+                if (first == 0x00 or first == 0xE5) return .{ .sector = base + @as(u64, spc), .offset = e * 32 };
+            }
+        }
+        const nxt = nextCluster(current) orelse {
+            // directory full: allocate a fresh cluster, link and zero it
+            const c = allocateCluster() orelse return null;
+            if (!writeFATEntry(current, c)) return null;
+            var zbuf: [SECTOR_SIZE]u8 = .{0} ** SECTOR_SIZE;
+            var zs: u8 = 0;
+            while (zs < boot_sector.sectors_per_cluster) : (zs += 1) {
+                if (!writeSector(clusterToSector(c) + @as(u64, zs), &zbuf)) return null;
+            }
+            return .{ .sector = clusterToSector(c), .offset = 0 };
+        };
+        current = nxt;
+    }
+    return null;
+}
+
+// Read a directory raw (returns true when a slot matching `name` was located).
+fn findEntryLocation(dir_cluster: u16, name: []const u8) ?DirSlot {
+    var buf: [SECTOR_SIZE]u8 = undefined;
+    var sec: u64 = 0;
+    var spc: u8 = 0;
+    var current = dir_cluster;
+    while (true) {
+        if (current == 0) {
+            const root_sectors = (@as(u64, boot_sector.root_entry_count) * 32 + SECTOR_SIZE - 1) / SECTOR_SIZE;
+            while (sec < root_sectors) : (sec += 1) {
+                if (!readSector(root_dir_start + sec, &buf)) return null;
+                var e: usize = 0;
+                while (e < SECTOR_SIZE / 32) : (e += 1) {
+                    const entry: *const Fat16DirEntry = @ptrFromInt(@intFromPtr(&buf[e * 32]));
+                    if (entry.name[0] == 0x00) return null;
+                    if (entry.name[0] == 0xE5) continue;
+                    if (matchName(name, entry)) return .{ .sector = root_dir_start + sec, .offset = e * 32 };
+                }
+            }
+            return null;
+        }
+        const base = clusterToSector(current);
+        spc = 0;
+        while (spc < boot_sector.sectors_per_cluster) : (spc += 1) {
+            if (!readSector(base + @as(u64, spc), &buf)) return null;
+            var e: usize = 0;
+            while (e < SECTOR_SIZE / 32) : (e += 1) {
+                const entry: *const Fat16DirEntry = @ptrFromInt(@intFromPtr(&buf[e * 32]));
+                if (entry.name[0] == 0x00) return null;
+                if (entry.name[0] == 0xE5) continue;
+                if (matchName(name, entry)) return .{ .sector = base + @as(u64, spc), .offset = e * 32 };
+            }
+        }
+        current = nextCluster(current) orelse return null;
+    }
+}
+
+fn writeDirEntry(slot: DirSlot, name: []const u8, attributes: u8, first_cluster: u16, file_size: u32) bool {
+    var buf: [SECTOR_SIZE]u8 = undefined;
+    if (!readSector(slot.sector, &buf)) return false;
+    const o = slot.offset;
+    @memset(buf[o..][0..32], 0);
+    var short_name: [8]u8 = undefined;
+    var short_ext: [3]u8 = undefined;
+    toShortName(name, &short_name, &short_ext);
+    @memcpy(buf[o..][0..8], &short_name);
+    @memcpy(buf[o + 8..][0..3], &short_ext);
+    buf[o + 11] = attributes;
+    buf[o + 20] = @intCast(first_cluster & 0xFF);
+    buf[o + 21] = @intCast((first_cluster >> 8) & 0xFF);
+    buf[o + 26] = @intCast(first_cluster & 0xFF);
+    buf[o + 27] = @intCast((first_cluster >> 8) & 0xFF);
+    buf[o + 28] = @intCast(file_size & 0xFF);
+    buf[o + 29] = @intCast((file_size >> 8) & 0xFF);
+    buf[o + 30] = @intCast((file_size >> 16) & 0xFF);
+    buf[o + 31] = @intCast((file_size >> 24) & 0xFF);
+    return writeSector(slot.sector, &buf);
+}
+
+// Initialize a brand-new directory cluster with "." and ".." entries (parent_cluster
+// 0 for the parent means the new dir's parent is the root).
+fn initDirCluster(cluster: u16, parent_cluster: u16) bool {
+    var zbuf: [SECTOR_SIZE]u8 = .{0} ** SECTOR_SIZE;
+    var s: u8 = 0;
+    while (s < boot_sector.sectors_per_cluster) : (s += 1) {
+        if (!writeSector(clusterToSector(cluster) + @as(u64, s), &zbuf)) return false;
+    }
+    var buf: [SECTOR_SIZE]u8 = undefined;
+    if (!readSector(clusterToSector(cluster), &buf)) return false;
+    // "." entry (32 bytes at offset 0): name "." followed by spaces
+    @memset(buf[0..32], 0);
+    buf[0] = '.';
+    @memset(buf[1..8], ' ');
+    @memset(buf[8..11], ' ');
+    buf[11] = 0x10;
+    buf[26] = @intCast(cluster & 0xFF);
+    buf[27] = @intCast((cluster >> 8) & 0xFF);
+    // ".." entry (offset 32)
+    buf[32] = '.';
+    buf[33] = '.';
+    @memset(buf[34..40], ' ');
+    @memset(buf[40..43], ' ');
+    buf[43] = 0x10;
+    buf[58] = @intCast(parent_cluster & 0xFF);
+    buf[59] = @intCast((parent_cluster >> 8) & 0xFF);
+    return writeSector(clusterToSector(cluster), &buf);
+}
+
+// Return the cluster at chain position `want`, extending the chain (allocating)
+// when needed. Returns null on allocation failure or when `first` is 0.
+fn clusterAtIndex(first: u16, want: u32) ?u16 {
+    if (first == 0) return null;
+    var cur = first;
+    var i: u32 = 0;
+    while (i < want) : (i += 1) {
+        if (nextCluster(cur)) |nxt| {
+            cur = nxt;
+        } else {
+            const c = allocateCluster() orelse return null;
+            if (!writeFATEntry(cur, c)) return null;
+            cur = c;
+        }
+    }
+    return cur;
+}
+
+// Sync file_size + first_cluster from the file cache back to its directory entry.
+fn updateFileEntry(fi: *const FileInfo) bool {
+    const loc = findEntryLocation(fi.parent_cluster, fi.name[0..fi.name_len]) orelse return false;
+    var buf: [SECTOR_SIZE]u8 = undefined;
+    if (!readSector(loc.sector, &buf)) return false;
+    const o = loc.offset;
+    buf[o + 26] = @intCast(fi.first_cluster & 0xFF);
+    buf[o + 27] = @intCast((fi.first_cluster >> 8) & 0xFF);
+    buf[o + 28] = @intCast(fi.file_size & 0xFF);
+    buf[o + 29] = @intCast((fi.file_size >> 8) & 0xFF);
+    buf[o + 30] = @intCast((fi.file_size >> 16) & 0xFF);
+    buf[o + 31] = @intCast((fi.file_size >> 24) & 0xFF);
+    return writeSector(loc.sector, &buf);
+}
+
 // VFS interface
 
 var root_handle: vfs.FileHandle = undefined;
@@ -277,22 +594,24 @@ fn fat16Open(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.
     var name_buf: [13]u8 = undefined;
     const resolved = resolvePathComponents(path, &name_buf) orelse return null;
 
-    const entry = findInDir(resolved.dir_cluster, name_buf[0..resolved.name_len]) orelse {
-        if (flags.create) {
-            return null; // TODO: create file
-        }
-        return null;
-    };
+    var entry = findInDir(resolved.dir_cluster, name_buf[0..resolved.name_len]);
+    if (entry == null) {
+        if (!flags.create) return null;
+        const slot = findFreeDirSlot(resolved.dir_cluster) orelse return null;
+        if (!writeDirEntry(slot, name_buf[0..resolved.name_len], 0x20, 0, 0)) return null;
+        entry = findInDir(resolved.dir_cluster, name_buf[0..resolved.name_len]) orelse return null;
+    }
 
     const idx = file_count;
     if (idx >= MAX_FAT16_FILES) return null;
 
     file_cache[idx] = .{
         .name = undefined,
-        .name_len = buildFullName(&entry, &file_cache[idx].name),
-        .is_dir = entry.attributes & 0x10 != 0,
-        .first_cluster = entry.first_cluster_low,
-        .file_size = entry.file_size,
+        .name_len = buildFullName(&entry.?, &file_cache[idx].name),
+        .is_dir = entry.?.attributes & 0x10 != 0,
+        .first_cluster = entry.?.first_cluster_low,
+        .file_size = entry.?.file_size,
+        .parent_cluster = resolved.dir_cluster,
         .used = true,
     };
     file_count += 1;
@@ -350,9 +669,44 @@ fn fat16Read(fs: *vfs.FileSystem, handle: *vfs.FileHandle, buf: []u8) usize {
 
 fn fat16Write(fs: *vfs.FileSystem, handle: *vfs.FileHandle, buf: []const u8) usize {
     _ = fs;
-    _ = handle;
-    _ = buf;
-    return 0; // read-only for now
+    if (handle.inode >= file_count) return 0;
+    const fi = &file_cache[handle.inode];
+    if (fi.is_dir or buf.len == 0) return 0;
+
+    const cluster_size: u64 = @as(u64, boot_sector.sectors_per_cluster) * SECTOR_SIZE;
+
+    if (fi.first_cluster == 0) {
+        const c = allocateCluster() orelse return 0;
+        fi.first_cluster = c;
+        if (!writeFATEntry(c, 0xFFFF)) return 0;
+    }
+
+    var pos: u64 = handle.offset;
+    var written: usize = 0;
+    while (written < buf.len) {
+        const cluster_index: u32 = @intCast(pos / cluster_size);
+        const in_off = @as(usize, @intCast(pos % cluster_size));
+        const cluster = clusterAtIndex(fi.first_cluster, cluster_index) orelse break;
+
+        const chunk: usize = @intCast(@min(cluster_size - @as(u64, in_off), @as(u64, buf.len - written)));
+        var cbuf: [4096]u8 = undefined;
+        const cs: usize = @intCast(cluster_size);
+        if (cs > cbuf.len) return written;
+        if (!readClusterBytes(cluster, cbuf[0..cs])) break;
+        @memcpy(cbuf[in_off..][0..chunk], buf[written..][0..chunk]);
+        if (!writeClusterBytes(cluster, cbuf[0..cs])) break;
+
+        pos += chunk;
+        written += chunk;
+    }
+    if (written == 0) return 0;
+
+    handle.offset = pos;
+    if (pos > fi.file_size) {
+        fi.file_size = @intCast(pos);
+    }
+    _ = updateFileEntry(fi);
+    return written;
 }
 
 fn fat16Readdir(fs: *vfs.FileSystem, path: []const u8, entries: []vfs.DirEntry) usize {
@@ -391,14 +745,47 @@ fn fat16Readdir(fs: *vfs.FileSystem, path: []const u8, entries: []vfs.DirEntry) 
 
 fn fat16Mkdir(fs: *vfs.FileSystem, path: []const u8) bool {
     _ = fs;
-    _ = path;
-    return false; // read-only
+    var parent_buf: [13]u8 = undefined;
+    const parent = resolvePathComponents(path, &parent_buf) orelse return false;
+    if (parent.name_len == 0) return false;
+    if (findInDir(parent.dir_cluster, parent_buf[0..parent.name_len]) != null) return false;
+
+    const slot = findFreeDirSlot(parent.dir_cluster) orelse return false;
+    const c = allocateCluster() orelse return false;
+    if (!initDirCluster(c, parent.dir_cluster)) {
+        _ = freeClusterEntry(c);
+        return false;
+    }
+    if (!writeDirEntry(slot, parent_buf[0..parent.name_len], 0x10, c, 0)) {
+        _ = freeClusterEntry(c);
+        return false;
+    }
+    return true;
 }
 
 fn fat16Unlink(fs: *vfs.FileSystem, path: []const u8) bool {
     _ = fs;
-    _ = path;
-    return false; // read-only
+    var name_buf: [13]u8 = undefined;
+    const resolved = resolvePathComponents(path, &name_buf) orelse return false;
+
+    const entry = findInDir(resolved.dir_cluster, name_buf[0..resolved.name_len]) orelse return false;
+    const slot = findEntryLocation(resolved.dir_cluster, name_buf[0..resolved.name_len]) orelse return false;
+
+    var buf: [SECTOR_SIZE]u8 = undefined;
+    if (!readSector(slot.sector, &buf)) return false;
+    buf[slot.offset] = 0xE5;
+    if (!writeSector(slot.sector, &buf)) return false;
+
+    // free the whole cluster chain (files and also subdirs are chains)
+    if (entry.first_cluster_low != 0) {
+        var cur = entry.first_cluster_low;
+        while (cur >= 2 and cur < 0xFFF8) {
+            const nxt = nextCluster(cur);
+            _ = freeClusterEntry(cur);
+            cur = nxt orelse 0;
+        }
+    }
+    return true;
 }
 
 fn fat16Stat(fs: *vfs.FileSystem, path: []const u8) ?vfs.StatInfo {
@@ -422,9 +809,71 @@ fn fat16Stat(fs: *vfs.FileSystem, path: []const u8) ?vfs.StatInfo {
 
 fn fat16Truncate(fs: *vfs.FileSystem, handle: *vfs.FileHandle, size: u64) bool {
     _ = fs;
-    _ = handle;
-    _ = size;
-    return false;
+    if (handle.inode >= file_count) return false;
+    const fi = &file_cache[handle.inode];
+    if (fi.is_dir) return false;
+
+    if (size == 0) {
+        freeChain(fi.first_cluster);
+        fi.first_cluster = 0;
+        fi.file_size = 0;
+        _ = updateFileEntry(fi);
+        return true;
+    }
+
+    const cluster_size: u64 = @as(u64, boot_sector.sectors_per_cluster) * SECTOR_SIZE;
+    const want: u32 = @intCast((size + cluster_size - 1) / cluster_size);
+    if (want == 0) return false;
+
+    if (fi.first_cluster == 0) {
+        const first = allocateClusterChain(want) orelse return false;
+        fi.first_cluster = first;
+    } else {
+        truncateChain(fi.first_cluster, want);
+        if (clusterAtIndex(fi.first_cluster, want - 1) == null) return false;
+    }
+    fi.file_size = @intCast(size);
+    _ = updateFileEntry(fi);
+    return true;
+}
+
+// Free every cluster in a chain.
+fn freeChain(first: u16) void {
+    var cur = first;
+    var guard: usize = 0;
+    while (cur >= 2 and cur < 0xFFF8 and guard < 0xFFFF) : (guard += 1) {
+        const nxt = nextCluster(cur);
+        _ = freeClusterEntry(cur);
+        if (nxt) |n| {
+            cur = n;
+        } else {
+            break;
+        }
+    }
+}
+
+// Truncate a chain so it holds at most `keep` clusters; frees the tail. If the
+// chain is already shorter it is left untouched.
+fn truncateChain(first: u16, keep: u32) void {
+    var cur = first;
+    var i: u32 = 0;
+    while (i < keep - 1) : (i += 1) {
+        const nxt = nextCluster(cur) orelse return;
+        cur = nxt;
+    }
+    const tail = nextCluster(cur) orelse return;
+    if (!writeFATEntry(cur, 0xFFFF)) return;
+    var t = tail;
+    var count: usize = 0;
+    while (count < 0xFFFF) : (count += 1) {
+        const after = nextCluster(t);
+        _ = freeClusterEntry(t);
+        if (after) |n| {
+            t = n;
+        } else {
+            break;
+        }
+    }
 }
 
 fn fat16Seek(fs: *vfs.FileSystem, handle: *vfs.FileHandle, offset: u64) bool {

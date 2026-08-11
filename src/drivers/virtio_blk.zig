@@ -148,18 +148,21 @@ fn doIo(sector: u64, buf_ptr: [*]u8, buf_len: usize, is_write: bool) bool {
     // Use data_idx slot for all buffers (header + data + status packed together)
     const buf_base: [*]u8 = @ptrFromInt(@intFromPtr(&req_data[data_idx]));
 
-    // Header at buf_base[0..16]
+    // Header at buf_base[0..16]: {type:u32, ioprio:u32, sector:u64}
     @memset(buf_base[0..16], 0);
     const req_type: u32 = if (is_write) VIRTIO_BLK_T_OUT else VIRTIO_BLK_T_IN;
     buf_base[0] = @intCast(req_type & 0xFF);
-    buf_base[4] = @intCast(sector & 0xFF);
-    buf_base[5] = @intCast((sector >> 8) & 0xFF);
-    buf_base[6] = @intCast((sector >> 16) & 0xFF);
-    buf_base[7] = @intCast((sector >> 24) & 0xFF);
-    buf_base[8] = @intCast((sector >> 32) & 0xFF);
-    buf_base[9] = @intCast((sector >> 40) & 0xFF);
-    buf_base[10] = @intCast((sector >> 48) & 0xFF);
-    buf_base[11] = @intCast((sector >> 56) & 0xFF);
+    buf_base[1] = @intCast((req_type >> 8) & 0xFF);
+    buf_base[2] = @intCast((req_type >> 16) & 0xFF);
+    buf_base[3] = @intCast((req_type >> 24) & 0xFF);
+    buf_base[8] = @intCast(sector & 0xFF);
+    buf_base[9] = @intCast((sector >> 8) & 0xFF);
+    buf_base[10] = @intCast((sector >> 16) & 0xFF);
+    buf_base[11] = @intCast((sector >> 24) & 0xFF);
+    buf_base[12] = @intCast((sector >> 32) & 0xFF);
+    buf_base[13] = @intCast((sector >> 40) & 0xFF);
+    buf_base[14] = @intCast((sector >> 48) & 0xFF);
+    buf_base[15] = @intCast((sector >> 56) & 0xFF);
 
     // Status at buf_base[16+SECTOR_SIZE]
     buf_base[16 + SECTOR_SIZE] = 0;
