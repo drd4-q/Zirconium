@@ -131,14 +131,6 @@ fn inBounds(x: i32, y: i32) bool {
     return x >= 0 and y >= 0 and @as(u32, @intCast(x)) < fb.fb_width and @as(u32, @intCast(y)) < fb.fb_height;
 }
 
-fn getPixel(x: i32, y: i32) u32 {
-    return fb.getPixel(@intCast(x), @intCast(y));
-}
-
-fn putPixel(x: i32, y: i32, color: u32) void {
-    fb.putPixel(@intCast(x), @intCast(y), @intCast((color >> 16) & 0xFF), @intCast((color >> 8) & 0xFF), @intCast(color & 0xFF));
-}
-
 fn saveCursorBg(x: i32, y: i32) void {
     var cy: usize = 0;
     while (cy < CURSOR_H) : (cy += 1) {
@@ -146,7 +138,7 @@ fn saveCursorBg(x: i32, y: i32) void {
         while (cx < CURSOR_W) : (cx += 1) {
             const px = x + @as(i32, @intCast(cx));
             const py = y + @as(i32, @intCast(cy));
-            cursor_bg[cy * CURSOR_W + cx] = if (inBounds(px, py)) getPixel(px, py) else 0;
+            cursor_bg[cy * CURSOR_W + cx] = if (inBounds(px, py)) getDisplayed(px, py) else 0;
         }
     }
 }
@@ -158,7 +150,7 @@ fn restoreCursorBg() void {
         while (cx < CURSOR_W) : (cx += 1) {
             const px = cursor_x + @as(i32, @intCast(cx));
             const py = cursor_y + @as(i32, @intCast(cy));
-            if (inBounds(px, py)) putPixel(px, py, cursor_bg[cy * CURSOR_W + cx]);
+            if (inBounds(px, py)) putDisplayed(px, py, cursor_bg[cy * CURSOR_W + cx]);
         }
     }
 }
@@ -173,12 +165,24 @@ fn drawCursorShape() void {
                 const px = cursor_x + @as(i32, @intCast(cx));
                 const py = cursor_y + @as(i32, @intCast(cy));
                 if (inBounds(px, py)) {
-                    const c = getPixel(px, py) ^ 0x00FFFFFF;
-                    putPixel(px, py, c);
+                    const c = getDisplayed(px, py) ^ 0x00FFFFFF;
+                    putDisplayed(px, py, c);
                 }
             }
         }
     }
+}
+
+// The cursor writes straight to the LFB (no shadow, no dirty tracking), so it
+// updates at the interval the mouse delivers packets — its own pace, "faster
+// than the screen" renderer. Any screen redraw must restore the cursor first,
+// flush, then re-draw the cursor last so it always stays on top.
+fn getDisplayed(x: i32, y: i32) u32 {
+    return fb.rawPixel(@intCast(x), @intCast(y));
+}
+
+fn putDisplayed(x: i32, y: i32, color: u32) void {
+    fb.rawPutPixel(@intCast(x), @intCast(y), @intCast((color >> 16) & 0xFF), @intCast((color >> 8) & 0xFF), @intCast(color & 0xFF));
 }
 
 fn restoreCursor() void {
@@ -285,29 +289,50 @@ fn drawTaskbar() void {
     fb.fillRect(0, @intCast(ty), fb.fb_width, 2, 90, 90, 120);
     fb.drawString(12, @intCast(ty + 6), "Zirconium GUI  -  Esc: quit", 170, 200, 220, 20, 20, 30);
 
+    drawTaskbarClock();
+}
+
+fn drawTaskbarClock() void {
+    // Localized update: only repaint the time text region in the taskbar
+    // (avoids a full-width strip flush every second = band flicker).
+    const ty = @as(i32, @intCast(fb.fb_height)) - TASKBAR_H;
     var tbuf: [32]u8 = undefined;
     timer.formatTime(tbuf[0..9]);
     const time_width = 9 * 8;
     const xpos_time: i32 = @as(i32, @intCast(fb.fb_width)) - @as(i32, @intCast(time_width)) - 12;
+    fb.fillRect(@intCast(xpos_time - 4), @intCast(ty + 4), @as(u32, @intCast(time_width + 8)), @as(u32, @intCast(TASKBAR_H - 8)), 20, 20, 30);
     fb.drawString(@intCast(xpos_time), @intCast(ty + 6), tbuf[0..8], 140, 220, 140, 20, 20, 30);
 }
 
-fn drawDesktop() void {
-    // Vertical gradient desktop
+fn drawDesktopRect(px: i32, py: i32, pw: i32, ph: i32) void {
+    // Vertical gradient desktop, clipped to (px,py,pw,ph)
+    const x0: i32 = if (px < 0) 0 else px;
+    const y0: i32 = if (py < 0) 0 else py;
+    const x1: i32 = @min(px + pw, @as(i32, @intCast(fb.fb_width)));
+    const y1: i32 = @min(py + ph, @as(i32, @intCast(fb.fb_height)));
     const h = fb.fb_height;
-    var y: u32 = 0;
-    while (y < h) : (y += 1) {
-        const t: u32 = y;
+    var y: i32 = y0;
+    while (y < y1) : (y += 1) {
+        const t: u32 = @intCast(y);
         const r: u8 = @intCast(24 + @as(u32, (t * 2) / (h + 1)));
         const g: u8 = @intCast(30 + @as(u32, (t * 3) / (h + 1)));
         const b: u8 = @intCast(46 + @as(u32, (t * 5) / (h + 1)));
-        fb.fillRect(0, y, fb.fb_width, 1, r, g, b);
+        if (x1 > x0) fb.fillRect(@intCast(x0), @intCast(y), @intCast(x1 - x0), 1, r, g, b);
     }
+}
+
+fn drawDesktop() void {
+    drawDesktopRect(0, 0, @intCast(fb.fb_width), @intCast(fb.fb_height));
+}
+
+// Restore the desktop underneath a window so it can be moved/redrawn
+// without repainting the whole screen.
+fn eraseWindow(win: *Window) void {
+    drawDesktopRect(win.x, win.y, win.w, win.h);
 }
 
 fn redrawAll() void {
     restoreCursor();
-    drawDesktop();
     var i: usize = 0;
     while (i < num_windows) : (i += 1) {
         if (!windows[i].focused) drawWindow(&windows[i]);
@@ -317,8 +342,18 @@ fn redrawAll() void {
         if (windows[i].focused) drawWindow(&windows[i]);
     }
     drawTaskbar();
-    drawCursor();
+    // Cursor goes straight to the LFB and must be drawn AFTER the screen
+    // flush, otherwise the flush would repaint over it.
     fb.flush();
+    drawCursor();
+}
+
+fn clockWindow() ?*Window {
+    var i: usize = 0;
+    while (i < num_windows) : (i += 1) {
+        if (windows[i].content == .clock) return &windows[i];
+    }
+    return null;
 }
 
 pub fn run() void {
@@ -338,6 +373,8 @@ pub fn run() void {
     const sw = @as(i32, @intCast(fb.fb_width));
     const sh = @as(i32, @intCast(fb.fb_height));
 
+    drawDesktop();
+
     createWindow(.about, @divTrunc(sw, 2) - 120, @divTrunc(sh, 3), 200, 120, "Welcome");
     createWindow(.clock, 70, 70, 160, 110, "Clock");
     createWindow(.system, sw - 200 - 50, 70, 180, 130, "System");
@@ -355,21 +392,33 @@ pub fn run() void {
         if (px != cursor_x or py != cursor_y) {
             if (drag_index >= 0 and @as(usize, @intCast(drag_index)) < num_windows) {
                 const w = &windows[@intCast(drag_index)];
+                const ox = w.x;
+                const oy = w.y;
                 w.x = px - drag_off_x;
                 w.y = py - drag_off_y;
                 if (w.x < 0) w.x = 0;
                 if (w.y < 0) w.y = 0;
                 if (w.x + w.w > sw) w.x = sw - w.w;
                 if (w.y + w.h > sh - TASKBAR_H) w.y = sh - TASKBAR_H - w.h;
-                redrawAll();
+                if (w.x != ox or w.y != oy) {
+                    // Localized redraw: restore desktop under the old spot,
+                    // paint the window at the new spot, cursor on top.
+                    restoreCursor();
+                    eraseWindow(w);
+                    drawWindow(w);
+                    fb.flush();
+                    drawCursor();
+                }
             } else {
+                // Pure cursor move: writes straight to the LFB, so it needs no
+                // flush and tracks the mouse at packet rate — faster than the
+                // screen renderer.
                 restoreCursor();
                 cursor_x = px;
                 cursor_y = py;
                 saveCursorBg(cursor_x, cursor_y);
                 drawCursorShape();
                 cursor_drawn = true;
-                fb.flush();
             }
         }
 
@@ -384,6 +433,7 @@ pub fn run() void {
                         drag_off_x = px - w.x;
                         drag_off_y = py - w.y;
                     }
+                    // Focus changed: refresh window chrome (borders/title bars).
                     redrawAll();
                 }
             }
@@ -394,11 +444,22 @@ pub fn run() void {
         prev_left = mouse.left_button;
 
         if (timer.ticks >= next_clock_tick) {
-            next_clock_tick = timer.ticks + 10; // refresh ~1s
-            redrawAll();
+            next_clock_tick = timer.ticks + 100; // 100 Hz ticks = ~1 s
+            restoreCursor();
+            if (clockWindow()) |w| {
+                eraseWindow(w);
+                drawWindow(w);
+            }
+            drawTaskbarClock();
+            fb.flush();
+            drawCursor();
         }
 
-        asm volatile ("hlt");
+        // High-frequency cursor tracking: instead of blocking in HLT until the
+        // next PIT/mouse IRQ (which paces the cursor at the interrupt rate and
+        // looks jerky), spin on PAUSE so every mouse sample is caught and the
+        // cursor is redrawn at ~GHz poll speed, the instant mx/my change.
+        asm volatile ("pause");
     }
 
     redrawAll();

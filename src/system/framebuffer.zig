@@ -13,12 +13,16 @@ var dirty_x1: u32 = 0;
 var dirty_y1: u32 = 0;
 var has_dirty: bool = false;
 
-// Covers every resolution the shell's `resolution` command supports.
-const MAX_SHADOW_PIXELS: usize = 1280 * 720;
+// Covers every resolution the shell's `resolution` command supports,
+// plus common QEMU default modes like 1280x800 (GRUB may pick these on boot).
+const MAX_SHADOW_PIXELS: usize = 1920 * 1080;
 
 fn ensureShadow() bool {
     if (shadow_pixels != 0) return true;
     // PMM isn't ready until after system_init; retry lazily on first draw.
+    // (free_pages stays 0 until pmm.init runs — allocating before then would
+    //  corrupt the uninitialized PMM bitmap.)
+    if (root.pmm.free_pages == 0) return false;
     const pixels = @as(u64, fb_width) * fb_height;
     if (pixels > MAX_SHADOW_PIXELS) return false;
     const bytes = (pixels * 4 + 4095) & ~@as(u64, 4095);
@@ -179,7 +183,7 @@ pub fn setColorFromVga(fg_vga: u8, bg_vga: u8) void {
 
 pub fn putPixel(x: u32, y: u32, r: u8, g: u8, b: u8) void {
     if (x >= fb_width or y >= fb_height) return;
-    if (ensureShadow() and x < 1280 and y < 720) {
+    if (ensureShadow() and x < fb_width and y < fb_height) {
         shadow[@as(u64, y) * fb_width + x] = (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b);
         markDirty(x, y);
         return;
@@ -194,9 +198,30 @@ pub fn putPixel(x: u32, y: u32, r: u8, g: u8, b: u8) void {
 
 pub fn getPixel(x: u32, y: u32) u32 {
     if (x >= fb_width or y >= fb_height) return 0;
-    if (shadow_pixels != 0 and x < 1280 and y < 720) {
+    if (shadow_pixels != 0 and x < fb_width and y < fb_height) {
         return shadow[@as(u64, y) * fb_width + x];
     }
+    const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 4;
+    const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
+    return (@as(u32, ptr[2]) << 16) | (@as(u32, ptr[1]) << 8) | @as(u32, ptr[0]);
+}
+
+// LFB-only accessors: bypass the shadow buffer and dirty tracking entirely.
+// Used for the mouse cursor so it updates at its own rate (directly on the
+// real framebuffer) instead of being batched into the screen renderer's
+// shadow -> flush pipeline.
+pub fn rawPutPixel(x: u32, y: u32, r: u8, g: u8, b: u8) void {
+    if (x >= fb_width or y >= fb_height) return;
+    const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 4;
+    const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
+    ptr[0] = b;
+    ptr[1] = g;
+    ptr[2] = r;
+    ptr[3] = 0;
+}
+
+pub fn rawPixel(x: u32, y: u32) u32 {
+    if (x >= fb_width or y >= fb_height) return 0;
     const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 4;
     const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
     return (@as(u32, ptr[2]) << 16) | (@as(u32, ptr[1]) << 8) | @as(u32, ptr[0]);
@@ -368,11 +393,40 @@ pub fn scrollUp() void {
         }
     }
 
-    // Redraw all rows from mirror
-    for (0..rows) |ry| {
-        redrawRow(ry);
+    // Physically shift the LFB + shadow text region up by one 16px row
+    // instead of repainting every row: the bulk of the screen never gets
+    // rewritten, so scrolling only flushes the newly exposed bottom row
+    // (avoids a full-screen rewrite per newline = constant flicker).
+    // When there is no shadow buffer (oversized fb), fall back to repainting
+    // every row straight from the mirror.
+    const text_w = cols * char_w;
+    const row_px = char_h;
+    if (rows > 1 and shadow_pixels != 0) {
+        var py: usize = row_px;
+        while (py < rows * row_px) : (py += 1) {
+            const dst_sh: [*]u32 = shadow + @as(u64, py - row_px) * fb_width;
+            const src_sh: [*]const u32 = shadow + @as(u64, py) * fb_width;
+            @memcpy(dst_sh[0..text_w], src_sh[0..text_w]);
+
+            const dst_lfb: [*]volatile u32 = @ptrFromInt(fb_addr + @as(u64, py - row_px) * fb_pitch);
+            const src_lfb: [*]volatile u32 = @ptrFromInt(fb_addr + @as(u64, py) * fb_pitch);
+            var x: usize = 0;
+            while (x < text_w) : (x += 1) {
+                dst_lfb[x] = src_lfb[x];
+            }
+        }
+
+        // Repaint the newly exposed bottom text row (goes through putPixel →
+        // shadow, so only this row becomes dirty and gets flushed).
+        const bottom_y0: u32 = @intCast((rows - 1) * char_h);
+        fillRect(0, bottom_y0, @intCast(text_w), @intCast(char_h), bg_r, bg_g, bg_b);
+        flush();
+    } else {
+        // No shadow buffer: redraw every row directly to the LFB.
+        for (0..rows) |ry| {
+            redrawRow(ry);
+        }
     }
-    flush();
 }
 
 pub fn putChar(ch: u8) void {

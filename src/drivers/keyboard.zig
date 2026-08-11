@@ -123,6 +123,7 @@ fn scancodeToAscii(sc: u8) u8 {
 
     var base: u8 = 0;
     switch (sc) {
+        0x01 => base = 0x1B, // Escape
         0x02 => base = '1',
         0x03 => base = '2',
         0x04 => base = '3',
