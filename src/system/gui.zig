@@ -36,6 +36,8 @@ var drag_index: i32 = -1;
 var drag_off_x: i32 = 0;
 var drag_off_y: i32 = 0;
 var prev_left: bool = false;
+var prev_right: bool = false;
+var drag_button: enum { none, left, right } = .none;
 var cursor_drawn: bool = false;
 var cursor_x: i32 = 0;
 var cursor_y: i32 = 0;
@@ -367,6 +369,8 @@ pub fn run() void {
     num_windows = 0;
     drag_index = -1;
     prev_left = false;
+    prev_right = false;
+    drag_button = .none;
     cursor_drawn = false;
     next_clock_tick = timer.ticks;
 
@@ -380,6 +384,7 @@ pub fn run() void {
     createWindow(.system, sw - 200 - 50, 70, 180, 130, "System");
 
     redrawAll();
+    mouse.debug_log = true;
 
     while (true) {
         if (kb.pollKey()) |k| {
@@ -422,7 +427,10 @@ pub fn run() void {
             }
         }
 
-        if (mouse.left_button and !prev_left) {
+        // Pressing left or right over a title bar begins a drag; focus follows.
+        const left_pressed = mouse.left_button and !prev_left;
+        const right_pressed = mouse.right_button and !prev_right;
+        if (left_pressed or right_pressed) {
             if (drag_index < 0) {
                 const hit = topmostAt(px, py);
                 if (hit >= 0) {
@@ -430,6 +438,7 @@ pub fn run() void {
                     const w = &windows[@intCast(hit)];
                     if (py < w.y + TITLE_H) {
                         drag_index = hit;
+                        drag_button = if (left_pressed) .left else .right;
                         drag_off_x = px - w.x;
                         drag_off_y = py - w.y;
                     }
@@ -437,11 +446,13 @@ pub fn run() void {
                     redrawAll();
                 }
             }
-        }
-        if (!mouse.left_button and prev_left) {
-            drag_index = -1;
+        } else if (drag_index >= 0) {
+            // Keep dragging only while the button that started the drag is held.
+            const held = if (drag_button == .left) mouse.left_button else mouse.right_button;
+            if (!held) drag_index = -1;
         }
         prev_left = mouse.left_button;
+        prev_right = mouse.right_button;
 
         if (timer.ticks >= next_clock_tick) {
             next_clock_tick = timer.ticks + 100; // 100 Hz ticks = ~1 s
