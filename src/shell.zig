@@ -115,7 +115,7 @@ fn printBanner() void {
     vga.write(" | |_| |  __/ (_|  __/ | | || | | | | | |\n");
     vga.write(" |____/ \\___|\\___\\___|\\__|\\_,_|_| |_| |_|\n");
     vga.setColor(.white, .black);
-    vga.write("\n  Zirconium v0.2.0 — Bare-metal x86_64\n");
+    vga.write("\n  Zirconium v0.3.0 — Bare-metal x86_64\n");
     vga.write("  Type 'help' for commands.\n\n");
 }
 

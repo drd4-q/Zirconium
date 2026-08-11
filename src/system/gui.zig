@@ -263,7 +263,7 @@ fn drawWindowBody(win: *Window) void {
             fb.drawString(@intCast(xpos), @intCast(line_y), ")", 200, 200, 200, 42, 42, 42);
         },
         .about => {
-            fb.drawString(@intCast(tx), @intCast(line_y), "Zirconium GUI", 100, 200, 255, 42, 42, 42);
+            fb.drawString(@intCast(tx), @intCast(line_y), "Zirconium GUI v0.3.0", 100, 200, 255, 42, 42, 42);
             line_y += 22;
             fb.drawString(@intCast(tx), @intCast(line_y), "Drag title bars.", 180, 180, 180, 42, 42, 42);
             line_y += 22;
@@ -327,10 +327,31 @@ fn drawDesktop() void {
     drawDesktopRect(0, 0, @intCast(fb.fb_width), @intCast(fb.fb_height));
 }
 
-// Restore the desktop underneath a window so it can be moved/redrawn
-// without repainting the whole screen.
-fn eraseWindow(win: *Window) void {
-    drawDesktopRect(win.x, win.y, win.w, win.h);
+fn winIntersects(rx: i32, ry: i32, rw: i32, rh: i32, w: *const Window) bool {
+    return w.x < rx + rw and rx < w.x + w.w and w.y < ry + rh and ry < w.y + w.h;
+}
+
+// Repaint a screen region in the correct z-order: desktop, then windows from
+// bottom to top (unfocused first, focused last). Moving a window must rebuild
+// the whole region underneath it, otherwise overlapping windows leave trails
+// of desktop (or stale copies) behind as the window slides over them.
+fn redrawRect(rx: i32, ry: i32, rw: i32, rh: i32) void {
+    if (rw <= 0 or rh <= 0) return;
+    drawDesktopRect(rx, ry, rw, rh);
+    var i: usize = 0;
+    while (i < num_windows) : (i += 1) {
+        if (!windows[i].visible) continue;
+        if (windows[i].focused) continue;
+        if (winIntersects(rx, ry, rw, rh, &windows[i])) drawWindow(&windows[i]);
+    }
+    i = 0;
+    while (i < num_windows) : (i += 1) {
+        if (!windows[i].visible) continue;
+        if (!windows[i].focused) continue;
+        if (winIntersects(rx, ry, rw, rh, &windows[i])) drawWindow(&windows[i]);
+    }
+    const taskbar_y = @as(i32, @intCast(fb.fb_height)) - TASKBAR_H;
+    if (ry + rh > taskbar_y) drawTaskbar();
 }
 
 fn redrawAll() void {
@@ -406,11 +427,15 @@ pub fn run() void {
                 if (w.x + w.w > sw) w.x = sw - w.w;
                 if (w.y + w.h > sh - TASKBAR_H) w.y = sh - TASKBAR_H - w.h;
                 if (w.x != ox or w.y != oy) {
-                    // Localized redraw: restore desktop under the old spot,
-                    // paint the window at the new spot, cursor on top.
+                    // Rebuild the union of the old and new window rects in
+                    // z-order so no trail is left behind (desktop or stale
+                    // copies) as the window slides over the screen.
                     restoreCursor();
-                    eraseWindow(w);
-                    drawWindow(w);
+                    const rx0 = @min(ox, w.x);
+                    const ry0 = @min(oy, w.y);
+                    const rx1 = @max(ox + w.w, w.x + w.w);
+                    const ry1 = @max(oy + w.h, w.y + w.h);
+                    redrawRect(rx0, ry0, rx1 - rx0, ry1 - ry0);
                     fb.flush();
                     drawCursor();
                 }
@@ -458,8 +483,7 @@ pub fn run() void {
             next_clock_tick = timer.ticks + 100; // 100 Hz ticks = ~1 s
             restoreCursor();
             if (clockWindow()) |w| {
-                eraseWindow(w);
-                drawWindow(w);
+                redrawRect(w.x, w.y, w.w, w.h);
             }
             drawTaskbarClock();
             fb.flush();

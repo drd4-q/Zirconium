@@ -8,7 +8,7 @@ pub fn run() void {
     vga.write("\n=== Extended System Info ===\n\n");
 
     vga.setColor(.white, .black);
-    vga.write("  Kernel:     ZigKernel v0.2.0\n");
+    vga.write("  Kernel:     ZigKernel v0.3.0\n");
     vga.write("  Arch:       x86_64 (long mode)\n");
     vga.write("  CPU:        x86_64 baseline\n");
     vga.write("  Display:    VGA text 80x25\n");
