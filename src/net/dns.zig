@@ -4,18 +4,27 @@ const vga = root.vga;
 const port = root.serial;
 const net = @import("mod.zig");
 const udp = @import("udp.zig");
+const timer = @import("../drivers/timer.zig");
 
 var dns_rx_buf: [512]u8 = undefined;
+var dns_tx_buf: [512]u8 = undefined;
 var dns_rx_len: usize = 0;
 var dns_rx_ready: bool = false;
 var dns_query_id: u16 = 0xAAAA;
 
+const DNS_SRC_PORT: u16 = 43210;
+
 pub fn resolve(hostname: []const u8) ?[4]u8 {
+    if (hostname.len == 0 or hostname.len > 253) return null;
+
     dns_rx_len = 0;
     dns_rx_ready = false;
     dns_query_id +%= 1;
 
-    const pkt_len = buildQuery(hostname, &dns_rx_buf);
+    // Build into a dedicated buffer: the query used to share dns_rx_buf with
+    // the response, and since sending can ARP (which polls and may deliver a
+    // packet into dns_rx_buf) the outgoing query could be corrupted in flight.
+    const pkt_len = buildQuery(hostname, &dns_tx_buf);
 
     vga.setColor(.light_cyan, .black);
     vga.write("[DNS] Resolving ");
@@ -25,15 +34,20 @@ pub fn resolve(hostname: []const u8) ?[4]u8 {
     vga.write("...\n");
     vga.setColor(.white, .black);
 
-    udp.sendPacket(udp.dns_server, 53, 43210, dns_rx_buf[0..pkt_len]);
+    port.serialWrite("[DNS] Resolving ");
+    port.serialWrite(hostname);
+    port.serialWrite("...\n");
 
-    // Poll for response
-    var timeout: u32 = 0;
-    while (timeout < 200 and !dns_rx_ready) : (timeout += 1) {
-        net.poll();
-        var j: u32 = 0;
-        while (j < 100000) : (j += 1) {
-            asm volatile ("nop");
+    // Two attempts: UDP queries do get lost, and one timeout used to fail the
+    // whole `get`/`nslookup`.
+    var attempt: u32 = 0;
+    while (attempt < 2 and !dns_rx_ready) : (attempt += 1) {
+        udp.sendPacket(udp.dns_server, udp.DNS_PORT, DNS_SRC_PORT, dns_tx_buf[0..pkt_len]);
+
+        // Poll for response (real internet RTT can be ~200ms+)
+        const deadline = timer.ticks +% 300; // 3s
+        while (timer.ticks < deadline and !dns_rx_ready) {
+            net.poll();
         }
     }
 
@@ -41,10 +55,17 @@ pub fn resolve(hostname: []const u8) ?[4]u8 {
         vga.setColor(.light_red, .black);
         vga.write("[DNS] Resolution failed (timeout)\n");
         vga.setColor(.white, .black);
+        port.serialWrite("[DNS] Resolution failed (timeout)\n");
         return null;
     }
 
-    return parseResponse(dns_rx_buf[0..dns_rx_len]);
+    const result = parseResponse(dns_rx_buf[0..dns_rx_len]);
+    if (result) |ip| {
+        port.serialWrite("[DNS] Resolved to ");
+        net.printIpSerial(ip);
+        port.serialWrite("\n");
+    }
+    return result;
 }
 
 fn buildQuery(hostname: []const u8, buf: []u8) usize {
@@ -197,6 +218,13 @@ pub fn handleResponse(frame: []const u8, ihl: usize, udp_hdr_len: usize) void {
     if (payload_start >= frame.len) return;
 
     const data = frame[payload_start..];
+    if (data.len < 12) return;
+
+    // Only accept the answer to the query we are currently waiting on.
+    const xid = (@as(u16, data[0]) << 8) | data[1];
+    if (xid != dns_query_id) return;
+    if (data[2] & 0x80 == 0) return; // not a response
+
     const copy_len = @min(data.len, dns_rx_buf.len);
     @memcpy(dns_rx_buf[0..copy_len], data[0..copy_len]);
     dns_rx_len = copy_len;

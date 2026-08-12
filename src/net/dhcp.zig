@@ -25,6 +25,7 @@ const OPT_SUBNET_MASK: u8 = 1;
 const OPT_ROUTER: u8 = 3;
 const OPT_DNS_SERVER: u8 = 6;
 const OPT_LEASE_TIME: u8 = 51;
+const OPT_SERVER_ID: u8 = 54;
 const OPT_END: u8 = 255;
 
 var dhcp_rx_buf: [548]u8 = undefined; // max DHCP message
@@ -39,7 +40,7 @@ pub var lease_dns: [4]u8 = .{ 0, 0, 0, 0 };
 pub var lease_lease_sec: u32 = 0;
 pub var lease_valid: bool = false;
 
-fn buildDiscover(buf: []u8) usize {
+fn buildDiscover(buf: []u8, requested_ip: [4]u8) usize {
     @memset(buf, 0);
 
     // BOOTP header
@@ -79,13 +80,27 @@ fn buildDiscover(buf: []u8) usize {
     buf[pos + 2] = DHCP_DISCOVER;
     pos += 3;
 
-    // Requested IP (we'd like our_ip if re-requesting)
-    buf[pos] = 50; // Requested IP option
+    // Requested IP — only when we actually have a preference. `run()` clears
+    // our_ip to 0.0.0.0 before discovering, so the old unconditional version
+    // asked for 0.0.0.0, which some servers (QEMU's slirp included) treat as an
+    // unsatisfiable request and answer with nothing at all.
+    if (requested_ip[0] != 0 or requested_ip[1] != 0 or requested_ip[2] != 0 or requested_ip[3] != 0) {
+        buf[pos] = 50; // Requested IP option
+        buf[pos + 1] = 4;
+        buf[pos + 2] = requested_ip[0];
+        buf[pos + 3] = requested_ip[1];
+        buf[pos + 4] = requested_ip[2];
+        buf[pos + 5] = requested_ip[3];
+        pos += 6;
+    }
+
+    // Parameter request list: ask for the options we actually parse.
+    buf[pos] = 55;
     buf[pos + 1] = 4;
-    buf[pos + 2] = net.our_ip[0];
-    buf[pos + 3] = net.our_ip[1];
-    buf[pos + 4] = net.our_ip[2];
-    buf[pos + 5] = net.our_ip[3];
+    buf[pos + 2] = OPT_SUBNET_MASK;
+    buf[pos + 3] = OPT_ROUTER;
+    buf[pos + 4] = OPT_DNS_SERVER;
+    buf[pos + 5] = OPT_LEASE_TIME;
     pos += 6;
 
     // Hostname
@@ -193,7 +208,7 @@ fn buildDhcpFrame(dst_mac: [6]u8, src_port: u16, dst_port: u16, payload: []const
     // IP header
     const src_ip = net.our_ip;
     const dst_ip = [4]u8{ 255, 255, 255, 255 }; // broadcast
-    ip_mod.buildHeader(src_ip, dst_ip, 17, @intCast(8 + payload.len), frame_buf[14..34]);
+    ip_mod.buildHeader(src_ip, dst_ip, 17, @intCast(20 + 8 + payload.len), frame_buf[14..34]);
 
     // UDP header
     frame_buf[34] = @intCast(src_port >> 8);
@@ -209,6 +224,14 @@ fn buildDhcpFrame(dst_mac: [6]u8, src_port: u16, dst_port: u16, payload: []const
     // Copy payload
     @memcpy(frame_buf[42..][0..payload.len], payload);
 
+    // UDP checksum over the pseudo header + real payload. Zero is legal for
+    // IPv4 UDP, but some servers/filters are stricter, and the checksum is
+    // cheap now that the payload is already in place.
+    const cs = ip_mod.checksumPseudo(src_ip, dst_ip, 17, frame_buf[34..][0 .. 8 + payload.len]);
+    const cs_final: u16 = if (cs == 0) 0xFFFF else cs;
+    frame_buf[40] = @intCast(cs_final >> 8);
+    frame_buf[41] = @intCast(cs_final & 0xFF);
+
     return total_len;
 }
 
@@ -216,14 +239,14 @@ var dhcp_tx_buf: [1514]u8 align(16) = undefined;
 var request_buf: [548]u8 align(16) = undefined;
 var discover_buf: [548]u8 align(16) = undefined;
 
-pub fn sendDiscover() void {
+pub fn sendDiscover(requested_ip: [4]u8) void {
     dhcp_xid +%= 0x12345678;
 
     vga.setColor(.light_cyan, .black);
     vga.write("[DHCP] Sending DISCOVER...\n");
     vga.setColor(.white, .black);
 
-    const len = buildDiscover(&discover_buf);
+    const len = buildDiscover(&discover_buf, requested_ip);
 
     // Build full frame: broadcast MAC, our MAC, IP/UDP/DHCP
     const frame_len = buildDhcpFrame(
@@ -238,8 +261,9 @@ pub fn sendDiscover() void {
 }
 
 pub fn sendRequest(offered_ip: [4]u8, server_ip: [4]u8) void {
-    dhcp_xid +%= 0x12345678;
-
+    // Keep the DISCOVER's xid: a REQUEST with a fresh transaction ID does not
+    // belong to the offer, and servers ignore it (the old code bumped dhcp_xid
+    // here, so the ACK never came).
     vga.setColor(.light_cyan, .black);
     vga.write("[DHCP] Sending REQUEST for ");
     net.printIp(offered_ip);
@@ -311,10 +335,16 @@ pub fn handleResponse(frame: []const u8, ihl: usize, udp_hdr_len: usize) void {
     // Check magic cookie
     if (data[236] != 0x63 or data[237] != 0x82 or data[238] != 0x53 or data[239] != 0x63) return;
 
+    // Only our own transaction, and only replies (BOOTREPLY = 2).
+    if (data[0] != 0x02) return;
+    const xid = (@as(u32, data[4]) << 24) | (@as(u32, data[5]) << 16) |
+        (@as(u32, data[6]) << 8) | data[7];
+    if (xid != dhcp_xid) return;
+
     // Get message type from options
     var msg_type: u8 = 0;
     const offered_ip: [4]u8 = .{ data[16], data[17], data[18], data[19] }; // yiaddr
-    const server_ip: [4]u8 = .{ data[20], data[21], data[22], data[23] }; // siaddr
+    var server_ip: [4]u8 = .{ data[20], data[21], data[22], data[23] }; // siaddr
 
     var opt_pos: usize = 240;
     while (opt_pos < data.len) {
@@ -326,6 +356,10 @@ pub fn handleResponse(frame: []const u8, ihl: usize, udp_hdr_len: usize) void {
 
         if (opt == OPT_MESSAGE_TYPE and opt_len == 1) {
             msg_type = data[opt_pos + 2];
+        } else if (opt == OPT_SERVER_ID and opt_len == 4) {
+            // Option 54 is authoritative; siaddr is frequently 0.0.0.0, and a
+            // REQUEST addressed to 0.0.0.0 is never acknowledged.
+            server_ip = .{ data[opt_pos + 2], data[opt_pos + 3], data[opt_pos + 4], data[opt_pos + 5] };
         }
         opt_pos += 2 + opt_len;
     }
@@ -414,15 +448,17 @@ pub fn run() void {
     const saved_ip = net.our_ip;
     net.our_ip = .{ 0, 0, 0, 0 };
 
-    sendDiscover();
+    const timer = @import("../drivers/timer.zig");
 
-    // Wait for OFFER then ACK
-    var timeout: u32 = 0;
-    while (timeout < 500 and !lease_valid) : (timeout += 1) {
-        net.poll();
-        var j: u32 = 0;
-        while (j < 100000) : (j += 1) {
-            asm volatile ("nop");
+    // Up to 3 DISCOVERs, 2s each — tick-based instead of a nop-count spin whose
+    // real duration changed between Debug and ReleaseFast.
+    var attempt: u32 = 0;
+    while (attempt < 3 and !lease_valid) : (attempt += 1) {
+        sendDiscover(saved_ip);
+
+        const deadline = timer.ticks +% 200;
+        while (timer.ticks < deadline and !lease_valid) {
+            net.poll();
         }
     }
 
@@ -431,5 +467,10 @@ pub fn run() void {
         vga.write("[DHCP] Failed to get lease, restoring static IP\n");
         vga.setColor(.white, .black);
         net.our_ip = saved_ip;
+    } else {
+        net.netmask = lease_mask;
+        // The gateway MAC must be re-resolved: our source IP changed and the old
+        // cache entry may be for a different subnet.
+        _ = net.resolveGateway();
     }
 }

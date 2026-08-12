@@ -3,6 +3,7 @@ pub const serial = @import("system/serial.zig");
 pub const vga = @import("system/vga.zig");
 const system_init = @import("system/init.zig");
 const shell = @import("shell.zig");
+const pci = @import("drivers/pci.zig");
 pub const scheduler = @import("kernel/scheduler.zig");
 pub const pmm = @import("kernel/pmm.zig");
 pub const vmm = @import("kernel/vmm.zig");
@@ -77,6 +78,14 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     kernel_init.init();
     vga.write("[BOOT] Kernel modules initialized\n");
     serial.serialWrite("[BOOT] Kernel init done\n");
+
+    vga.write("[BOOT] Initializing network...\n");
+    pci.scan();
+    if (pci.findByClass(0x02, 0x00)) |dev| {
+        _ = @import("drivers/e1000.zig").init(dev);
+        @import("net/mod.zig").init();
+    }
+    serial.serialWrite("[BOOT] Network init done\n");
 
     vga.write("[BOOT] Bringing secondary CPUs online...\n");
     @import("arch/smp.zig").init();

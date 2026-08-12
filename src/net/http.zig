@@ -8,7 +8,13 @@ const timer = @import("../drivers/timer.zig");
 
 var http_req_buf: [512]u8 = undefined;
 
+pub const DEFAULT_PORT: u16 = 80;
+
 pub fn httpGet(host: []const u8, path: []const u8) void {
+    httpGetPort(host, path, DEFAULT_PORT);
+}
+
+pub fn httpGetPort(host: []const u8, path: []const u8, dst_port: u16) void {
     // Try to parse host as IP first, otherwise resolve via DNS
     var host_ip: [4]u8 = undefined;
     if (parseIp(host)) |ip| {
@@ -18,26 +24,25 @@ pub fn httpGet(host: []const u8, path: []const u8) void {
             vga.setColor(.light_red, .black);
             vga.write("[HTTP] Failed to resolve host\n");
             vga.setColor(.white, .black);
+            port_io.serialWrite("[HTTP] Failed to resolve host\n");
             return;
         };
         host_ip = resolved;
     }
 
-    var conn = tcp.connect(host_ip, 80);
+    const conn = tcp.connect(host_ip, dst_port) orelse {
+        vga.setColor(.light_red, .black);
+        vga.write("[HTTP] No free connection slots\n");
+        vga.setColor(.white, .black);
+        return;
+    };
 
-    var timeout: u32 = 0;
-    while (timeout < 200 and conn.state != .established) : (timeout += 1) {
-        net.poll();
-        var j: u32 = 0;
-        while (j < 100000) : (j += 1) {
-            asm volatile ("nop");
-        }
-    }
-
-    if (conn.state != .established) {
+    // Wait up to 5s for TCP handshake (real internet RTT)
+    if (!tcp.waitEstablished(conn, 500)) {
         vga.setColor(.light_red, .black);
         vga.write("[HTTP] Connection failed\n");
         vga.setColor(.white, .black);
+        port_io.serialWrite("[HTTP] Connection failed\n");
         tcp.disconnect(conn);
         return;
     }
@@ -46,60 +51,83 @@ pub fn httpGet(host: []const u8, path: []const u8) void {
     vga.write("[HTTP] Connected to ");
     net.printIp(host_ip);
     vga.putChar(':');
-    vga.writeDec(80);
+    vga.writeDec(dst_port);
     vga.write("\n");
     vga.setColor(.white, .black);
 
-    var pos: usize = 0;
+    port_io.serialWrite("[HTTP] Connected to ");
+    net.printIpSerial(host_ip);
+    port_io.serialWrite("\n");
 
-    for ("GET ") |ch| {
-        http_req_buf[pos] = ch;
-        pos += 1;
-    }
-    for (path) |ch| {
-        http_req_buf[pos] = ch;
-        pos += 1;
-    }
-    for (" HTTP/1.0\r\nHost: ") |ch| {
-        http_req_buf[pos] = ch;
-        pos += 1;
-    }
-    for (host) |ch| {
-        http_req_buf[pos] = ch;
-        pos += 1;
-    }
-    for ("\r\nConnection: close\r\n\r\n") |ch| {
-        http_req_buf[pos] = ch;
-        pos += 1;
-    }
+    const req_len = buildRequest(host, path) orelse {
+        vga.setColor(.light_red, .black);
+        vga.write("[HTTP] URL too long\n");
+        vga.setColor(.white, .black);
+        tcp.close(conn);
+        tcp.disconnect(conn);
+        return;
+    };
 
-    tcp.send(conn, http_req_buf[0..pos]);
+    // Clear any stale bytes before the request so the response starts at 0.
+    tcp.resetState(conn);
+    tcp.send(conn, http_req_buf[0..req_len]);
 
     vga.write("[HTTP] Request sent, waiting for response...\n");
+    port_io.serialWrite("[HTTP] Request sent, waiting for response...\n");
 
-    // Wait for response
-    tcp.resetState(conn);
-
-    timeout = 0;
-    while (timeout < 300 and (!conn.rx_ready or conn.state == .established)) : (timeout += 1) {
+    // Wait for the server to finish: with "Connection: close" it FINs after the
+    // body, so keep polling while the connection is still established. Also
+    // stop early if the peer stalls for 3s after we already have data.
+    const response_deadline = timer.ticks +% 1500; // 15s hard cap
+    var last_len: usize = 0;
+    var last_progress = timer.ticks;
+    while (timer.ticks < response_deadline and conn.state == .established) {
         net.poll();
-        var j: u32 = 0;
-        while (j < 100000) : (j += 1) {
-            asm volatile ("nop");
+        if (conn.rx_len != last_len) {
+            last_len = conn.rx_len;
+            last_progress = timer.ticks;
+        } else if (last_len > 0 and timer.ticks -% last_progress > 300) {
+            break;
         }
     }
 
     // Print response
     if (conn.rx_len > 0) {
+        port_io.serialWrite("[HTTP] Response received: ");
+        port_io.serialWriteDec(conn.rx_len);
+        port_io.serialWrite(" bytes\n");
+        printStatusSerial(conn.rx_buf[0..@min(conn.rx_len, 512)]);
         printResponse(conn.rx_buf[0..conn.rx_len]);
     } else {
         vga.setColor(.light_red, .black);
         vga.write("[HTTP] No response received\n");
         vga.setColor(.white, .black);
+        port_io.serialWrite("[HTTP] No response received\n");
     }
 
     tcp.close(conn);
     tcp.disconnect(conn);
+}
+
+/// Serialize "GET <path> HTTP/1.0" into http_req_buf, or null if it won't fit.
+fn buildRequest(host: []const u8, path: []const u8) ?usize {
+    var pos: usize = 0;
+
+    const parts = [_][]const u8{
+        "GET ",
+        path,
+        " HTTP/1.0\r\nHost: ",
+        host,
+        "\r\nConnection: close\r\n\r\n",
+    };
+
+    for (parts) |part| {
+        if (pos + part.len > http_req_buf.len) return null;
+        @memcpy(http_req_buf[pos..][0..part.len], part);
+        pos += part.len;
+    }
+
+    return pos;
 }
 
 fn parseIp(host: []const u8) ?[4]u8 {
@@ -127,6 +155,16 @@ fn parseIp(host: []const u8) ?[4]u8 {
     if (!has_digit or part_idx != 3) return null;
     parts[part_idx] = @intCast(num);
     return parts;
+}
+
+fn printStatusSerial(data: []const u8) void {
+    var line: [256]u8 = undefined;
+    var n: usize = 0;
+    while (n < data.len and n < line.len and data[n] != '\r' and data[n] != '\n') : (n += 1) {
+        line[n] = data[n];
+    }
+    port_io.serialWrite(line[0..n]);
+    port_io.serialWrite("\n");
 }
 
 fn printResponse(data: []const u8) void {

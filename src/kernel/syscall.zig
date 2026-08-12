@@ -11,6 +11,8 @@ const pmm = @import("pmm.zig");
 const vmm = @import("vmm.zig");
 const kb = @import("../drivers/keyboard.zig");
 const timer = @import("../drivers/timer.zig");
+const tcp = @import("../net/tcp.zig");
+const net = @import("../net/mod.zig");
 
 pub const SyscallNumber = enum(u64) {
     SYS_WRITE = 1,
@@ -446,7 +448,7 @@ pub export fn syscall_handler(frame: *isr_mod.InterruptFrame) callconv(.c) void 
             }
 
             if (slot_idx) |idx| {
-                const conn = @import("../net/tcp.zig").allocConnection();
+                const conn = tcp.allocConnection();
                 if (conn) |c| {
                     t.sockets[idx] = c;
                     frame.rax = idx;
@@ -477,9 +479,14 @@ pub export fn syscall_handler(frame: *isr_mod.InterruptFrame) callconv(.c) void 
             const user_ip: [*]const u8 = @ptrFromInt(ip_ptr);
             const dst_ip = [4]u8{ user_ip[0], user_ip[1], user_ip[2], user_ip[3] };
 
-            _ = @import("../net/tcp.zig").connect(dst_ip, @intCast(port));
-            _ = conn;
-            frame.rax = 0;
+            // Configure the socket's own connection (not an orphaned one like
+            // the old code did), then block until the handshake completes.
+            tcp.openConn(conn, dst_ip, @intCast(port));
+            if (tcp.waitEstablished(conn, 500)) {
+                frame.rax = 0;
+            } else {
+                frame.rax = @bitCast(@as(isize, -111)); // ECONNREFUSED / timeout
+            }
         },
         .SYS_SEND => {
             // rdi = sockfd, rsi = buf_ptr, rdx = len
@@ -498,8 +505,13 @@ pub export fn syscall_handler(frame: *isr_mod.InterruptFrame) callconv(.c) void 
                 return;
             };
 
+            if (conn.state != tcp.TcpState.established) {
+                frame.rax = @bitCast(@as(isize, -107)); // ENOTCONN
+                return;
+            }
+
             const user_buf: [*]const u8 = @ptrFromInt(buf_ptr);
-            @import("../net/tcp.zig").send(conn, user_buf[0..len]);
+            tcp.send(conn, user_buf[0..len]);
             frame.rax = len;
         },
         .SYS_RECV => {
@@ -519,7 +531,16 @@ pub export fn syscall_handler(frame: *isr_mod.InterruptFrame) callconv(.c) void 
                 return;
             };
 
-            @import("../net/mod.zig").poll();
+            if (conn.state != tcp.TcpState.established and !conn.rx_ready) {
+                frame.rax = 0;
+                return;
+            }
+
+            // Block up to ~3s for data to arrive.
+            const deadline = timer.ticks +% 300;
+            while (!conn.rx_ready and conn.state == .established and timer.ticks < deadline) {
+                net.poll();
+            }
 
             if (conn.rx_ready and conn.rx_len > 0) {
                 const user_buf: [*]u8 = @ptrFromInt(buf_ptr);

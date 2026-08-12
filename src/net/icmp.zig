@@ -9,7 +9,7 @@ const timer = @import("../drivers/timer.zig");
 pub var last_rtt: u32 = 0;
 pub var last_rtt_ms: u32 = 0;
 
-var reply_buf: [98]u8 align(16) = undefined;
+var reply_buf: [1514]u8 align(16) = undefined;
 var ping_buf: [98]u8 align(16) = undefined;
 var ping_send_tick: u64 = 0;
 var ping_id: u16 = 0;
@@ -22,7 +22,10 @@ pub fn handlePacket(frame: []const u8, ihl: usize) void {
     if (icmp_type == 0x08) { // Echo Request
         sendReply(frame, ihl);
     } else if (icmp_type == 0x00) { // Echo Reply
-        const reply_id = (@as(u16, icmp_data[6]) << 8) | icmp_data[7];
+        // Identifier lives at ICMP offset 4..6 (6..8 is the sequence number).
+        // Reading the sequence number here meant our own replies never matched
+        // and `ping` always printed "timeout".
+        const reply_id = (@as(u16, icmp_data[4]) << 8) | icmp_data[5];
         if (reply_id == ping_id) {
             const elapsed = timer.ticks -% ping_send_tick;
             last_rtt_ms = @intCast(@min(elapsed * 10, 0xFFFFFFFF)); // ticks * 10ms
@@ -35,39 +38,44 @@ pub fn handlePacket(frame: []const u8, ihl: usize) void {
 fn sendReply(request_frame: []const u8, ihl: usize) void {
     const src_ip = [4]u8{ request_frame[26], request_frame[27], request_frame[28], request_frame[29] };
 
-    // Get MAC from ARP cache
-    const dst_mac = net.resolveMac(src_ip) orelse net.gateway_mac;
+    const icmp_req = request_frame[14 + ihl ..];
+    // Mirror the request payload: replying with a fixed 64-byte ICMP message to
+    // an arbitrary-sized ping made the IP total_len wrong and the checksum
+    // cover uninitialized bytes.
+    const icmp_len = @min(icmp_req.len, reply_buf.len - 34);
+    if (icmp_len < 8) return;
 
-    @memset(&reply_buf, 0);
+    const dst_mac = net.nextHopMac(src_ip) orelse return;
 
-    reply_buf[0] = dst_mac[0]; reply_buf[1] = dst_mac[1];
-    reply_buf[2] = dst_mac[2]; reply_buf[3] = dst_mac[3];
-    reply_buf[4] = dst_mac[4]; reply_buf[5] = dst_mac[5];
-    reply_buf[6] = net.our_mac[0]; reply_buf[7] = net.our_mac[1];
-    reply_buf[8] = net.our_mac[2]; reply_buf[9] = net.our_mac[3];
-    reply_buf[10] = net.our_mac[4]; reply_buf[11] = net.our_mac[5];
-    reply_buf[12] = 0x08; reply_buf[13] = 0x00;
+    const frame_len = 34 + icmp_len;
+    @memset(reply_buf[0..frame_len], 0);
 
-    ip_mod.buildHeader(net.our_ip, src_ip, 1, 64, reply_buf[14..34]);
+    @memcpy(reply_buf[0..6], &dst_mac);
+    @memcpy(reply_buf[6..12], &net.our_mac);
+    reply_buf[12] = 0x08;
+    reply_buf[13] = 0x00;
+
+    ip_mod.buildHeader(net.our_ip, src_ip, 1, @intCast(20 + icmp_len), reply_buf[14..34]);
 
     reply_buf[34] = 0x00; // Echo Reply Type
     reply_buf[35] = 0x00; // Code
     reply_buf[36] = 0x00; // Checksum High
     reply_buf[37] = 0x00; // Checksum Low
 
-    const req_icmp_len = request_frame.len - (14 + ihl);
-    const copy_len = @min(req_icmp_len - 4, 60);
-    @memcpy(reply_buf[38..][0..copy_len], request_frame[14 + ihl + 4 ..][0..copy_len]);
+    // Copy the request's id/seq/payload verbatim (everything after type/code/csum)
+    @memcpy(reply_buf[38..][0 .. icmp_len - 4], icmp_req[4..icmp_len]);
 
-    const cs = ip_mod.checksum(reply_buf[34..98]);
+    const cs = ip_mod.checksum(reply_buf[34..frame_len]);
     reply_buf[36] = @intCast(cs >> 8);
     reply_buf[37] = @intCast(cs & 0xFF);
 
-    e1000.transmit(reply_buf[0..98]);
+    e1000.transmit(reply_buf[0..frame_len]);
 }
 
 pub fn ping(target: [4]u8, count: u32) void {
-    _ = net.ensureArp(target);
+    // ICMP echo: 8-byte header + 56 bytes of payload = 64, the usual ping size.
+    const icmp_len: usize = 64;
+    const frame_len: usize = 34 + icmp_len;
 
     var i: u32 = 0;
     while (i < count) : (i += 1) {
@@ -75,26 +83,23 @@ pub fn ping(target: [4]u8, count: u32) void {
         last_rtt_ms = 0;
         ping_id +%= 1;
 
-        const target_mac = net.resolveMac(target) orelse net.gateway_mac;
+        const target_mac = net.nextHopMac(target) orelse {
+            vga.setColor(.light_red, .black);
+            vga.write("  ARP failed for ");
+            net.printIp(target);
+            vga.write("\n");
+            vga.setColor(.white, .black);
+            return;
+        };
 
-        @memset(&ping_buf, 0);
+        @memset(ping_buf[0..frame_len], 0);
 
-        ping_buf[0] = target_mac[0];
-        ping_buf[1] = target_mac[1];
-        ping_buf[2] = target_mac[2];
-        ping_buf[3] = target_mac[3];
-        ping_buf[4] = target_mac[4];
-        ping_buf[5] = target_mac[5];
-        ping_buf[6] = net.our_mac[0];
-        ping_buf[7] = net.our_mac[1];
-        ping_buf[8] = net.our_mac[2];
-        ping_buf[9] = net.our_mac[3];
-        ping_buf[10] = net.our_mac[4];
-        ping_buf[11] = net.our_mac[5];
+        @memcpy(ping_buf[0..6], &target_mac);
+        @memcpy(ping_buf[6..12], &net.our_mac);
         ping_buf[12] = 0x08;
         ping_buf[13] = 0x00;
 
-        ip_mod.buildHeader(net.our_ip, target, 1, 64, ping_buf[14..34]);
+        ip_mod.buildHeader(net.our_ip, target, 1, @intCast(20 + icmp_len), ping_buf[14..34]);
 
         ping_buf[34] = 0x08; // Type: Echo Request
         ping_buf[35] = 0x00; // Code
@@ -102,27 +107,31 @@ pub fn ping(target: [4]u8, count: u32) void {
         ping_buf[37] = 0x00; // Checksum
         ping_buf[38] = @intCast(ping_id >> 8);
         ping_buf[39] = @intCast(ping_id & 0xFF); // ID
-        ping_buf[40] = @intCast(i >> 8);
+        ping_buf[40] = @intCast((i >> 8) & 0xFF);
         ping_buf[41] = @intCast(i & 0xFF); // Sequence
 
-        const cs = ip_mod.checksum(ping_buf[34..98]);
+        // Payload: a recognizable pattern rather than zeros
+        var p: usize = 42;
+        while (p < frame_len) : (p += 1) {
+            ping_buf[p] = @intCast('a' + (p - 42) % 26);
+        }
+
+        const cs = ip_mod.checksum(ping_buf[34..frame_len]);
         ping_buf[36] = @intCast(cs >> 8);
         ping_buf[37] = @intCast(cs & 0xFF);
 
         ping_send_tick = timer.ticks;
-        e1000.transmit(ping_buf[0..98]);
+        e1000.transmit(ping_buf[0..frame_len]);
 
         vga.write("  Pinging ");
         net.printIp(target);
         vga.write(" ... ");
 
-        var timeout: u32 = 0;
-        while (timeout < 100 and last_rtt == 0) : (timeout += 1) {
+        // Tick-based 1s deadline instead of a nop-count spin, which ran at a
+        // wildly different rate between Debug and ReleaseFast.
+        const deadline = timer.ticks +% 100;
+        while (timer.ticks < deadline and last_rtt == 0) {
             net.poll();
-            var j: u32 = 0;
-            while (j < 50000) : (j += 1) {
-                asm volatile ("nop");
-            }
         }
 
         if (last_rtt != 0) {

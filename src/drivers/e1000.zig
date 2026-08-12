@@ -30,10 +30,23 @@ const RX_DESC_COUNT: u32 = 32;
 const TX_DESC_COUNT: u32 = 8;
 const PKT_SIZE: usize = 2048;
 
+// RCTL bits (Intel 8254x SDM 13.4.22)
+const RCTL_EN: u32 = 1 << 1; // Receiver enable
+const RCTL_UPE: u32 = 1 << 3; // Unicast promiscuous
+const RCTL_MPE: u32 = 1 << 4; // Multicast promiscuous
+const RCTL_BAM: u32 = 1 << 15; // Broadcast accept mode
+const RCTL_BSIZE_2048: u32 = 0 << 16; // BSIZE=00 + BSEX=0 → 2048 bytes
+const RCTL_SECRC: u32 = 1 << 26; // Strip Ethernet CRC
+
+// TCTL bits
+const TCTL_EN: u32 = 1 << 1; // Transmit enable
+const TCTL_PSP: u32 = 1 << 3; // Pad short packets
+
 var mmio_base: u64 = 0;
 
-// Descriptor rings must be 16-byte aligned, placed in a static buffer
-const RxDesc = struct {
+// Descriptor rings must be 16-byte aligned, placed in a static buffer.
+// extern struct: guaranteed C ABI layout (exact e1000 descriptor bit layout).
+const RxDesc = extern struct {
     addr: u64,
     length: u16,
     checksum: u16,
@@ -41,7 +54,7 @@ const RxDesc = struct {
     special: u16,
 };
 
-const TxDesc = struct {
+const TxDesc = extern struct {
     addr: u64,
     length: u16,
     cso: u8,
@@ -169,18 +182,24 @@ pub fn init(dev: *pci.PciDevice) bool {
     port.serialWrite("[E1000] Setting up TX\n");
     setupTx();
 
-    // Configure RX: enable, broadcast, no CRC strip, BSIZE=2048
-    mmioWrite(RCTL, 0x00000040 | // BSIZE=2048
-        0x00000008 | // BAM (broadcast accept)
-        0x02000000 | // SECRC (strip ethernet CRC)
-        0x00000002); // EN (enable RX)
+    // Configure RX. The previous bit values were wrong on every flag:
+    //   0x40 was labelled "BSIZE=2048" but bit 6 is LBM[0] (loopback mode);
+    //   0x08 was labelled "BAM" but bit 3 is UPE (unicast promiscuous).
+    // Real broadcast accept is bit 15, and BSIZE=2048 is bits 17:16 == 00 with
+    // BSEX clear, i.e. the default. Because BAM was never set, the NIC silently
+    // dropped every broadcast frame — which is exactly what a DHCP OFFER is, so
+    // `dhcp` could never get a lease.
+    mmioWrite(RCTL, RCTL_EN | RCTL_BAM | RCTL_SECRC | RCTL_BSIZE_2048);
 
-    // Configure TX: enable, collision default
-    mmioWrite(TCTL, 0x00000002 | // EN (enable TX)
-        (0x0F << 12)); // COLD=0x0F (collision distance)
+    // Configure TX: enable + pad short packets (the NIC pads to the 60-byte
+    // Ethernet minimum, which ARP frames need).
+    mmioWrite(TCTL, TCTL_EN | TCTL_PSP |
+        (0x0F << 12) | // COLD = collision distance
+        (0x10 << 4)); // CT = collision threshold
 
-    // Enable interrupts for RX
-    mmioWrite(IMS, 0x80); // RXDW - RX descriptor written
+    // Leave RX interrupts masked: the stack polls (net.poll) and an unhandled
+    // RXDW interrupt on a vector with no handler just burns time.
+    mmioWrite(IMS, 0x00000000);
 
     port.serialWrite("[E1000] Init complete, link up\n");
     return true;
@@ -236,30 +255,58 @@ fn setupTx() void {
     port.serialWrite("\n");
 }
 
+/// Verbose per-packet serial tracing. Off by default: it emitted ~15 lines per
+/// frame at 115200 baud, which is slower than the network itself and turned
+/// every TCP timeout into a self-fulfilling prophecy.
+pub var debug_trace: bool = false;
+
 pub fn transmit(data: []const u8) void {
+    if (data.len == 0) return;
     const len = @min(data.len, PKT_SIZE);
+
+    // Wait for the descriptor we are about to reuse to be free (DD set or never
+    // used). The old code just spun 10k nops and reused the slot regardless,
+    // which could clobber a frame the NIC had not sent yet.
+    var spins: u32 = 0;
+    while (tx_ring[tx_cur].length != 0 and (tx_ring[tx_cur].status & 0x01) == 0 and spins < 1_000_000) : (spins += 1) {
+        asm volatile ("pause");
+    }
+
     @memcpy(tx_bufs[tx_cur][0..len], data[0..len]);
 
     tx_ring[tx_cur].addr = @intFromPtr(&tx_bufs[tx_cur]);
     tx_ring[tx_cur].length = @intCast(len);
-    tx_ring[tx_cur].cmd = 0x03; // EOP + IFCS
+    tx_ring[tx_cur].cmd = 0x0B; // EOP + IFCS + RS (report status → DD gets set)
     tx_ring[tx_cur].status = 0;
     tx_ring[tx_cur].cso = 0;
+    tx_ring[tx_cur].css = 0;
+    tx_ring[tx_cur].special = 0;
 
+    const sent_idx = tx_cur;
     const new_tail = (tx_cur + 1) % TX_DESC_COUNT;
     mmioWrite(TDT, new_tail);
     tx_cur = new_tail;
 
-    // Wait for transmit to complete
-    var t: u32 = 0;
-    while (t < 10000) : (t += 1) {
-        asm volatile ("nop");
+    // Wait for the NIC to report this descriptor done.
+    spins = 0;
+    while ((tx_ring[sent_idx].status & 0x01) == 0 and spins < 1_000_000) : (spins += 1) {
+        asm volatile ("pause");
+    }
+
+    if (debug_trace) {
+        port.serialWrite("[E1000] TX len=");
+        port.serialWriteDec(len);
+        port.serialWrite(" desc=");
+        port.serialWriteDec(sent_idx);
+        port.serialWrite(" status=");
+        port.serialWriteHexShort(tx_ring[sent_idx].status);
+        port.serialWrite("\n");
     }
 }
 
 pub fn receive(buf: []u8) ?usize {
     const status = rx_ring[rx_cur].status;
-    if (status & 0x01 == 0) {
+    if (status & 0x01 == 0) { // DD
         return null;
     }
 
@@ -272,8 +319,18 @@ pub fn receive(buf: []u8) ?usize {
     rx_ring[rx_cur].length = 0;
     rx_ring[rx_cur].addr = @intFromPtr(&rx_bufs[@as(usize, @intCast(rx_cur))]);
 
+    // RDT must name the *last* descriptor software has handed back, i.e. the one
+    // just recycled. Writing the next index instead handed the NIC a descriptor
+    // we were about to read, so under load frames were overwritten mid-parse.
+    const recycled = rx_cur;
     rx_cur = (rx_cur + 1) % RX_DESC_COUNT;
-    mmioWrite(RDT, rx_cur);
+    mmioWrite(RDT, recycled);
+
+    if (debug_trace) {
+        port.serialWrite("[E1000] RX len=");
+        port.serialWriteDec(copy_len);
+        port.serialWrite("\n");
+    }
 
     return copy_len;
 }

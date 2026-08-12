@@ -13,6 +13,7 @@ var ring_tail: usize = 0;
 
 var shift_pressed: bool = false;
 var caps_lock: bool = false;
+var ctrl_pressed: bool = false;
 
 pub fn init() void {
     while ((port_io.inb(KB_STATUS) & 2) != 0) {}
@@ -69,6 +70,10 @@ pub const KEY_RIGHT: u8 = 0x83;
 pub const KEY_TAB: u8 = 0x84;
 pub const KEY_PAGE_UP: u8 = 0x85;
 pub const KEY_PAGE_DOWN: u8 = 0x86;
+pub const KEY_HOME: u8 = 0x87;
+pub const KEY_END: u8 = 0x88;
+pub const KEY_DELETE: u8 = 0x89;
+pub const KEY_INSERT: u8 = 0x8A;
 
 pub fn pollKey() ?u8 {
     while (true) {
@@ -82,7 +87,14 @@ pub fn pollKey() ?u8 {
         if (e0_prefix) {
             e0_prefix = false;
             if (sc & 0x80 != 0) {
+                if (sc & 0x7F == 0x1D) {
+                    ctrl_pressed = false;
+                }
                 handleKeyRelease(sc & 0x7F);
+                continue;
+            }
+            if (sc == 0x1D) {
+                ctrl_pressed = true;
                 continue;
             }
             return switch (sc) {
@@ -93,6 +105,10 @@ pub fn pollKey() ?u8 {
                 0x09 => KEY_TAB,
                 0x49 => KEY_PAGE_UP,
                 0x51 => KEY_PAGE_DOWN,
+                0x47 => KEY_HOME,
+                0x4F => KEY_END,
+                0x53 => KEY_DELETE,
+                0x52 => KEY_INSERT,
                 else => 0,
             };
         }
@@ -108,6 +124,8 @@ pub fn pollKey() ?u8 {
 fn handleKeyRelease(sc: u8) void {
     if (sc == 0x2A or sc == 0x36) {
         shift_pressed = false;
+    } else if (sc == 0x1D) {
+        ctrl_pressed = false;
     }
 }
 
@@ -118,6 +136,10 @@ fn scancodeToAscii(sc: u8) u8 {
     }
     if (sc == 0x3A) {
         caps_lock = !caps_lock;
+        return 0;
+    }
+    if (sc == 0x1D) {
+        ctrl_pressed = true;
         return 0;
     }
 
@@ -176,6 +198,13 @@ fn scancodeToAscii(sc: u8) u8 {
         0x35 => base = '/',
         0x39 => base = ' ',
         else => return 0,
+    }
+
+    // Ctrl + letter produces the classic control character (nano, shell, etc.).
+    if (ctrl_pressed) {
+        if (base >= 'a' and base <= 'z') return base & 0x1F;
+        if (base == '[') return 0x1B; // Ctrl+[ = ESC
+        return 0;
     }
 
     const is_letter = (base >= 'a' and base <= 'z');

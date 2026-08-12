@@ -4,7 +4,6 @@ const vga = root.vga;
 const kb = @import("drivers/keyboard.zig");
 const mouse = @import("drivers/mouse.zig");
 const pci = @import("drivers/pci.zig");
-const e1000 = @import("drivers/e1000.zig");
 const net = @import("net/mod.zig");
 const vga_fb = @import("system/framebuffer.zig");
 const gui = @import("system/gui.zig");
@@ -25,6 +24,7 @@ const arp_cache = @import("net/arp_cache.zig");
 const dhcp_mod = @import("net/dhcp.zig");
 const dns_mod = @import("net/dns.zig");
 const files = @import("programs/files.zig");
+const nano_prog = @import("programs/nano.zig");
 const vfs = @import("fs/vfs.zig");
 const smp = @import("arch/smp.zig");
 const acpi = @import("arch/acpi.zig");
@@ -56,7 +56,7 @@ const commands = [_][]const u8{
     "dhcp",  "arpcache","nslookup",
     "smp",   "cpuinfo",
     "ls",    "cat",     "touch",   "mkdir","rm",  "write", "cd",
-    "mount",
+    "mount", "nano",
 };
 
 var cmd_buf: [CMD_MAX]u8 = undefined;
@@ -65,11 +65,6 @@ pub fn run() void {
     kb.init();
 
     pci.scan();
-
-    if (pci.findByClass(0x02, 0x00)) |dev| {
-        _ = e1000.init(dev);
-        net.init();
-    }
 
     // Try to init virtio-blk disk
     @import("drivers/virtio_blk.zig").init();
@@ -238,6 +233,11 @@ fn execute(cmd: []const u8) void {
         files.cmdCd(args);
     } else if (eql(cmd_name, "mount")) {
         vfs.printMounts();
+    } else if (eql(cmd_name, "nano")) {
+        vga.clear();
+        nano_prog.run(args);
+        vga.clear();
+        printBanner();
     } else {
         vga.setColor(.light_red, .black);
         vga.write("  Unknown command: '");
@@ -598,6 +598,7 @@ fn printHelp() void {
     vga.write("    rm <file>     Remove file\n");
     vga.write("    write <f> <t> Write text to file\n");
     vga.write("    cd [path]     Change directory\n");
+    vga.write("    nano <file>   Nano-style text editor\n");
     vga.write("    mount         List mounted filesystems\n\n");
     vga.write("  Input:\n");
     vga.write("    mouse         Show mouse info\n");

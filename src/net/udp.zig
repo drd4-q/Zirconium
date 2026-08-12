@@ -27,11 +27,15 @@ pub fn handlePacket(frame: []const u8, ihl: usize) void {
 
     const src_ip = [4]u8{ frame[26], frame[27], frame[28], frame[29] };
 
-    _ = udp_len;
+    if (udp_len < 8) return;
+
     last_src_port = src_port;
     last_src_ip = src_ip;
 
-    if (dst_port == DNS_PORT) {
+    // Demultiplex on the *source* port for replies to our queries: a DNS answer
+    // arrives from port 53 to our ephemeral port, so the old `dst_port == 53`
+    // test never matched and every DNS response was silently dropped.
+    if (src_port == DNS_PORT) {
         dns.handleResponse(frame, ihl, 8);
     } else if (dst_port == DHCP_CLIENT_PORT) {
         dhcp.handleResponse(frame, ihl, 8);
@@ -39,13 +43,10 @@ pub fn handlePacket(frame: []const u8, ihl: usize) void {
 }
 
 pub fn sendPacket(dst_ip: [4]u8, dst_port_val: u16, src_port_val: u16, payload: []const u8) void {
-    // Resolve destination MAC via ARP cache
-    const dst_mac = net.resolveMac(dst_ip) orelse {
-        // ARP request + poll — if resolved, continue to send
-        if (!net.ensureArp(dst_ip)) return;
-        // Retry lookup after ARP resolved
-        const mac = net.resolveMac(dst_ip) orelse return;
-        sendPacketInner(mac, dst_ip, dst_port_val, src_port_val, payload);
+    if (payload.len > 1472) return; // would not fit a 1500-byte MTU frame
+
+    const dst_mac = net.nextHopMac(dst_ip) orelse {
+        port.serialWrite("[UDP] Dropping datagram: next hop MAC unknown\n");
         return;
     };
 
@@ -53,11 +54,11 @@ pub fn sendPacket(dst_ip: [4]u8, dst_port_val: u16, src_port_val: u16, payload: 
 }
 
 fn sendPacketInner(dst_mac: [6]u8, dst_ip: [4]u8, dst_port_val: u16, src_port_val: u16, payload: []const u8) void {
-
-    @memset(&udp_tx_buf, 0);
-
     const udp_hdr_len: u16 = 8;
     const ip_total: u16 = 20 + udp_hdr_len + @as(u16, @intCast(payload.len));
+    const frame_len: usize = 34 + udp_hdr_len + payload.len;
+
+    @memset(udp_tx_buf[0..frame_len], 0);
 
     // Ethernet
     @memcpy(udp_tx_buf[0..6], &dst_mac);
@@ -77,18 +78,21 @@ fn sendPacketInner(dst_mac: [6]u8, dst_ip: [4]u8, dst_port_val: u16, src_port_va
     const total_udp = udp_hdr_len + @as(u16, @intCast(payload.len));
     udp_tx_buf[udp_off + 4] = @intCast(total_udp >> 8);
     udp_tx_buf[udp_off + 5] = @intCast(total_udp & 0xFF);
-    udp_tx_buf[udp_off + 6] = 0; // checksum (0 = not computed)
+    udp_tx_buf[udp_off + 6] = 0;
     udp_tx_buf[udp_off + 7] = 0;
 
-    // UDP checksum (optional for IPv4, but we compute it for correctness)
-    const cs = ip_mod.checksumPseudo(net.our_ip, dst_ip, 17, udp_tx_buf[udp_off..][0 .. 8 + payload.len]);
-    udp_tx_buf[udp_off + 6] = @intCast(cs >> 8);
-    udp_tx_buf[udp_off + 7] = @intCast(cs & 0xFF);
-
-    // Payload
+    // Payload must be in place before the checksum is computed — the previous
+    // order checksummed the still-zeroed payload area, so every DNS query left
+    // with a bad checksum.
     if (payload.len > 0) {
         @memcpy(udp_tx_buf[udp_off + 8 ..][0..payload.len], payload);
     }
 
-    e1000.transmit(udp_tx_buf[0 .. udp_off + 8 + payload.len]);
+    const cs = ip_mod.checksumPseudo(net.our_ip, dst_ip, 17, udp_tx_buf[udp_off..][0 .. 8 + payload.len]);
+    // A computed checksum of 0 must be transmitted as 0xFFFF (0 means "none").
+    const cs_final: u16 = if (cs == 0) 0xFFFF else cs;
+    udp_tx_buf[udp_off + 6] = @intCast(cs_final >> 8);
+    udp_tx_buf[udp_off + 7] = @intCast(cs_final & 0xFF);
+
+    e1000.transmit(udp_tx_buf[0..frame_len]);
 }

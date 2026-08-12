@@ -124,8 +124,7 @@ fn parseParentAndName(path: []const u8) ?struct { parent: usize, name: []const u
 // VFS interface implementations
 
 fn ramfsOpen(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.FileHandle {
-    _ = fs;
-
+    // Root directory
     if (path.len == 0) return null;
 
     // Root directory
@@ -136,6 +135,7 @@ fn ramfsOpen(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.
         }
         const handle = kalloc.kmalloc(@sizeOf(vfs.FileHandle)) orelse return null;
         const h: *vfs.FileHandle = @ptrFromInt(@intFromPtr(handle));
+        h.fs = fs;
         h.inode = root_idx;
         h.offset = 0;
         h.flags = flags;
@@ -157,6 +157,7 @@ fn ramfsOpen(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.
         }
         const handle = kalloc.kmalloc(@sizeOf(vfs.FileHandle)) orelse return null;
         const h: *vfs.FileHandle = @ptrFromInt(@intFromPtr(handle));
+        h.fs = fs;
         h.inode = idx;
         h.offset = 0;
         h.flags = flags;
@@ -186,6 +187,7 @@ fn ramfsOpen(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.
 
         const handle = kalloc.kmalloc(@sizeOf(vfs.FileHandle)) orelse return null;
         const h: *vfs.FileHandle = @ptrFromInt(@intFromPtr(handle));
+        h.fs = fs;
         h.inode = new_idx;
         h.offset = 0;
         h.flags = flags;

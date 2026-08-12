@@ -1,84 +1,99 @@
 # AGENTS.md — Zirconium
 
-## What this is
-
-Bare-metal x86_64 OS kernel in Zig. Multiboot (GRUB) boot, identity-mapped 2MB pages, SMP (secondary CPUs via ACPI + AP trampoline), a shell with programs, a custom TCP/IP stack over an e1000 NIC, ring 3 user-space with INT 0x80 syscalls, VFS with ramfs + FAT16 over virtio-blk, and a minimal Lua interpreter. Runs in QEMU.
+Bare-metal x86_64 OS kernel in Zig. Multiboot/GRUB boot, identity-mapped 2MB pages, SMP via ACPI + AP trampoline, VGA-text shell with programs, custom TCP/IP stack over e1000, ring 3 user-space with INT 0x80 syscalls, VFS with ramfs + FAT16 over virtio-blk, framebuffer GUI, and a minimal Lua interpreter. Runs in QEMU only.
 
 ## Build & run
 
 ```bash
-zig build            # build only → zig-out/bin/kernel (Debug, safety on)
-zig build -Drelease  # ReleaseFast (what run.sh/tests use)
-./run.sh     # build (ReleaseFast) → grub-mkrescue ISO → launch QEMU (Linux/macOS)
-./run.sh --vnc   # same but VNC display (port 5901) instead of GTK
-./run.sh --gdb  # QEMU with -s -S — gdb remote localhost:1234
-run.bat      # Windows equivalent (same flow as run.sh)
+zig build            # Debug kernel (safety checks on) → zig-out/bin/kernel
+zig build -Drelease  # ReleaseFast — what run.sh and the tests ship
+./run.sh             # build -Drelease → grub-mkrescue ISO → QEMU (gtk)
+./run.sh --vnc       # VNC on host port 5901 instead of gtk
+./run.sh --gdb       # QEMU -s -S; attach gdb to localhost:1234
+./run.sh --test      # = python3 tools/test_runner.py (the only automated check)
+run.bat              # Windows equivalent of run.sh
 ```
 
-**Build modes:** the build uses `standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast })`, which in Zig 0.16 returns ReleaseFast **only when `-Drelease` is passed** — plain `zig build` produces a Debug kernel with safety checks on. `run.sh`, `run.bat` and the test runner all pass `-Drelease`, so the shipped kernel is always ReleaseFast. **Gotcha:** Release builds enable `--gc-sections`, so the multiboot header in `src/entry.S` must be kept via `KEEP(*(.multiboot))` in `linker.ld` (easy to break; a fully-silent DRAM: debug boots, release says "no multiboot header found" in GRUB).
+- **Zig 0.16.0 required.** `build.zig.zon` says `minimum_zig_version = "0.14.0"` — stale. `tools/bin2zig.zig` uses 0.16-only std APIs (`std.process.Init`, `std.Io.Dir`, `std.Options.debug_io`).
+- `zig build` exposes only `install` (default) and `build` steps. There is **no `zig build test`** and no unit tests anywhere; verification is the QEMU harness.
+- `-Drelease` is required for ReleaseFast: `standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast })` only honors the preference when the flag is passed. Full clean build ≈8 s, so always build before claiming anything.
+- Release enables `--gc-sections`, so `linker.ld` must keep `KEEP(*(.multiboot))` for `src/entry.S`'s header. Break it and Debug still boots while release fails in GRUB with "no multiboot header found".
+- **Toolchain:** `grub-mkrescue`, `qemu-system-x86_64`, `python3`, and GNU `as`+`ld` — the latter two **only** for `src/arch/trampoline.S` (`as --64` → `ld -Ttext=0x8000 --oformat=binary`, run as system commands from `build.zig`). `src/entry.S` and `src/arch/isr.S` go through Zig's own assembler via `addAssemblyFile`. Kernel requires `use_llvm = true`.
+- Stale helpers: `qemu.sh`, `qemu.bat`, `qemu_vnc.sh`, `qemu_vnc.bat` predate SMP/disk support (128 MB, no `-smp`, no virtio-blk). Use `run.sh`. `create_disk.sh` builds a richer `disk.img` via mtools (`mformat`/`mcopy`, with `/hello.txt`, `/test/data.txt`); `run.sh` only does `dd` + `mkfs.fat -F 16`.
 
-**Zig version: 0.16.0.** `build.zig.zon` says 0.14.0 but that is stale — `tools/bin2zig.zig` uses Zig 0.16 std APIs (`std.process.Init`, `std.Io.Dir`, `std.Options.debug_io`). `zig build` only compiles on 0.16.
+## Testing
 
-**Toolchain deps:** GNU `as` + `ld` are used **only** for `src/arch/trampoline.S` (assemble → `ld -Ttext=0x8000 --oformat=binary`, via system commands in `build.zig`). `src/entry.S` + `src/arch/isr.S` are compiled through `root_module.addAssemblyFile` (Zig's own assembler), not GNU `as`. Also need `grub-mkrescue` and `qemu-system-x86_64`. The kernel requires the LLVM backend (`use_llvm = true`).
+`tools/test_runner.py`: builds `zig build -Drelease`, gets the kernel into `kernel.iso`, boots QEMU headless (`-nographic -monitor none -smp 4 -m 512M`, serial → `serial_test.log`), **polls the log for the terminal marker `[USER-HEAP] free + reuse OK`** with a 90 s deadline (not a fixed sleep), kills QEMU, then asserts the exact marker list in `tools/test_runner.py:155`:
 
-**Tests:** `./run.sh --test` = `python3 tools/test_runner.py` — the only automated check (no CI). It builds `zig build -Drelease` (ReleaseFast, same binary `run.sh` ships), boots QEMU headless (`-nographic -monitor none`, `-smp 4`, serial into `serial_test.log`), **polls the log for the terminal marker `[USER-HEAP] free + reuse OK`** (90s deadline) rather than sleeping a fixed time, then kills QEMU and greps the log for the exact markers in `tools/test_runner.py:155`. Required markers: `[BOOT] Kernel loaded`, `[BOOT] System init done`, `[MEM] Physical memory manager initialized`, `[APIC] Local APIC timer initialized`, `[SMP] AP CPU 1 online`, `[USER] Hello from Ring 3 (user space)!`, `[USER-NET] Created socket via sys_socket`, `[USER-NET] Connected to 10.0.2.2:80 via sys_connect`, `[USER-HEAP] malloc(64)+malloc(128) via SYS_BRK OK`, `[USER-HEAP] free + reuse OK`. Run it after any change that risks the boot path, SMP bring-up, or ring-3 (syscalls/heap). It patches the freshly built kernel into an existing `kernel.iso` (`tools/patch_iso.py`-style in-place overwrite) **only if it fits the ISO slot** — otherwise it rebuilds the ISO with grub-mkrescue (a grown kernel won't fit and silently breaks without this fallback). Boots `zig-out/bin/kernel` via `-kernel` only when neither ISO patch nor ISO build is possible (i.e. no `kernel.iso` and no `zig-out/bin/kernel`).
+`[BOOT] Kernel loaded`, `[BOOT] System init done`, `[MEM] Physical memory manager initialized`, `[APIC] Local APIC timer initialized`, `[SMP] AP CPU 1 online`, `[USER] Hello from Ring 3 (user space)!`, `[USER-NET] Created socket via sys_socket`, `[USER-NET] Connected to 10.0.2.2:80 via sys_connect`, `[USER-HEAP] malloc(64)+malloc(128) via SYS_BRK OK`, `[USER-HEAP] free + reuse OK`.
 
-**Crash triage:** QEMU runs with `-d int,cpu_reset -D qemu.log` — on crash/triple-fault read `qemu.log`. Serial (the kernel debug log) goes to the terminal (`-serial stdio`); only the test harness writes `serial_test.log`. The `serial.log` files in the repo root are stale artifacts — no script produces them.
+Notes:
+- Run it after any change touching the boot path, SMP bring-up, syscalls, ring 3, or the TCP client path. It cannot test the shell, GUI, or FAT16 (no framebuffer under `-nographic`, no input driven).
+- Markers are matched as raw substrings — renaming a log string silently breaks the suite.
+- ISO handling: patches the new kernel in place into an existing `kernel.iso` **only if it fits the old ISO slot**, else rebuilds with `grub-mkrescue`. Falls back to `-kernel zig-out/bin/kernel` only when there is no ISO. `tools/patch_iso.py` is the standalone version of the same patcher (used by `run.bat` when grub-mkrescue is missing).
+- Crash triage: QEMU runs `-d int,cpu_reset -D qemu.log` — read `qemu.log` after a triple fault. Under `run.sh` the kernel debug log goes to the terminal (`-serial stdio`); only the harness writes `serial_test.log`.
 
-**Embedded user binary (codegen):** `build.zig` compiles `src/user/test.zig` (freestanding ELF, image base 0x2000000), runs host tool `tools/bin2zig.zig` to emit it as a Zig byte array, and injects it as the anonymous module `user_test_bin`. `kernel_init.init()` (`src/kernel/init.zig`) registers it via `scheduler.addElfUserTask` (`src/kernel/elf.zig:loadElf`), so it runs **before the shell** on every boot and exercises syscalls socket/connect/send/recv (70–73) against 10.0.2.2:80. The shell `user` command does the same on demand. Editing `src/user/test.zig` re-embeds on next `zig build`. The same bin2zig pipeline emits a **second** anonymous module `ap_tramp_bin` (the SMP trampoline, below) — editing either source re-runs codegen on next build.
+## Codegen (two embedded blobs)
 
-**SMP (multicore):** QEMU boots with `-smp 4`. `main.zig` calls `smp.init()` (`src/arch/smp.zig`) before the scheduler: parses ACPI/MADT for LAPIC IDs (`src/arch/acpi.zig`), then sends INIT-SIPI-SIPI (ICR mode bits in 10:8, not the `0x6000` variant) to wake APs into the embedded trampoline blob (`src/arch/trampoline.S`; built by `as` + `ld -Ttext=0x8000 --oformat=binary` in `build.zig`, loaded at 0x8000 with fixed control cells at 0x600–0x718). Each AP runs its own 16 KB stack from `CELL_STACK` and idle-loops in `ap_entry`. The test asserts `[SMP] AP CPU 1 online` — a broken trampoline layout or ICR encoding makes APs silently never come online. Shell: `smp` / `cpuinfo`.
+`build.zig` runs the host tool `tools/bin2zig.zig` twice to turn binaries into Zig byte arrays injected as anonymous modules:
+- `user_test_bin` ← `src/user/test.zig` built as a freestanding ELF, `image_base = 0x2000000`, entry `_start`. `kernel/init.zig` registers it with `scheduler.addElfUserTask`, so it runs in ring 3 **before the shell on every boot** and exercises write/socket/connect/send/recv/brk. The shell `user` command loads it on demand.
+- `ap_tramp_bin` ← `src/arch/trampoline.S` linked flat at 0x8000.
 
-**Disk / FAT16 gotcha:** `run.sh` creates a 64 MB `disk.img` (virtio-blk) if missing. At shell start `virtio_blk.init()` + `fat16.init()` auto-mount it at `/mnt/disk` — the `ls/cat/cd/touch/mkdir/rm/write/save` commands are FAT16-based and fail/empty if no `disk.img`/block device exists (`[FAT16]` messages). `disk.img` is gitignored build noise.
-
-**Network gotcha:** the guest is an HTTP *client* — `get`/`wget` fetches from the gateway 10.0.2.2 (= the host), and nothing listens on guest:80 despite the "open localhost:8080" comment in `run.sh`.
-
-**Framebuffer + GUI (recent work):** if GRUB provides a linear framebuffer, `vga.initFb(mbi_ptr)` makes it active and `gui`/`resolution`/`mouse` shell commands work (`resolution` cycles 640x480…1280x720). `src/system/framebuffer.zig` is a shadow-buffer driver (draw 32-bit pixels in RAM, then `flush()` the dirty region to the LFB to avoid flicker); `src/system/gui.zig` is a small windowing shell (draggable windows: clock/system/about; keyboard + PS/2 mouse; Esc quits). The console shell remains VGA-text; the GUI overlays the framebuffer. Live WIP: `framebuffer.zig` + `gui.zig` have uncommitted changes in the repo — verify against them, and check QEMU boots with a VM that passes a framebuffer (Bochs VBE / std VGA; the test harness runs `-nographic`, where there is no framebuffer).
+Editing either source re-runs codegen on the next `zig build`; no manual step.
 
 ## Architecture
 
-**Boot sequence** (`src/entry.S` → `src/main.zig`):
-1. `entry.S`: 32-bit Multiboot entry → zeroes 6 page tables → identity maps 4 GB (4 PDs × 512 × 2MB pages) → enables long mode → calls `kernel_entry`.
-2. `main.zig:39 kernel_entry`: serial → GDT (ring 3 segments + TSS) → framebuffer init → system init (PIC, IDT) → PMM → VMM → kalloc heap → VFS + ramfs mount → `kernel_init.init()` (timer + scheduler; registers idle/hello kernel tasks and the embedded user ELF task) → `smp.init()` (ACPI/MADT, wake APs) → `scheduler.runAll()` (runs every task; the user task jumps to ring 3) → `shell.run()`. FAT16 auto-mount happens later, in `shell.zig:run` startup, not during boot.
+**Boot:** `src/entry.S` (32-bit multiboot entry → zero 6 page tables → identity map 4 GB with 4 PDs × 512 × 2 MB pages → long mode) → `kernel_entry` (`src/main.zig:40`): serial → GDT (ring 3 segments + TSS) → `vga.initFb(mbi_ptr)` → `system_init` (PIC, IDT) → PMM → VMM → kalloc → VFS + ramfs mount → `kernel_init.init()` (timer, scheduler, task registration) → `pci.scan()` + e1000 + `net/mod.zig.init()` → `smp.init()` → `scheduler.runAll()` → `shell.run()`. **virtio-blk and FAT16 init happen in `shell.zig:run`, not during boot**, and `pci.scan()` runs twice as a result.
 
-**Key source layout:**
-- `src/arch/` — GDT, IDT (256 entries + INT 0x80 DPL3 gate), PIC, port I/O, ISR/IRQ handlers (`isr.S` + `isr.zig`), ACPI/MADT scan (`acpi.zig`), SMP AP bootstrap (`smp.zig` + `trampoline.S`)
-- `src/kernel/` — pmm, vmm (incl. COW resolution), kalloc (heap), scheduler, task, address_space, elf, syscall, init
-- `src/system/` — serial, vga, framebuffer, init, panic
-- `src/drivers/` — keyboard, timer (PIT 100 Hz IRQ0 + LAPIC timer via `apic.zig`), apic, pci, e1000, mouse, virtio_blk
-- `src/net/` — arp, arp_cache, ip, icmp, tcp, udp, dns, dhcp, http; `mod.zig` is the public interface
-- `src/fs/` — vfs, ramfs, blockdev, fat16 (auto-mounted at `/mnt/disk`)
-- `src/programs/` — shell commands; `src/shell.zig:execute` dispatches them
-- `src/lua/` — interpreter; `mod.zig` re-exports lexer/parser/vm/value/api
+**Layout:**
+- `src/arch/` — gdt, idt (256 entries + INT 0x80 DPL3 gate), pic, port, isr (`isr.S` + `isr.zig`), acpi (MADT scan), smp + trampoline.S
+- `src/kernel/` — pmm, vmm (incl. COW fault resolution), kalloc, scheduler, task, address_space, elf, syscall, init
+- `src/system/` — serial, vga, framebuffer, gui, init, panic
+- `src/drivers/` — keyboard, timer (PIT 100 Hz on IRQ0), apic, pci, e1000, mouse, virtio_blk
+- `src/net/` — arp, arp_cache, ip, icmp, tcp, udp, dns, dhcp, http; `mod.zig` is the public surface
+- `src/fs/` — vfs, ramfs (mounted at `/`), blockdev, fat16 (mounted at `/mnt/disk`)
+- `src/programs/` — one file per shell command, dispatched from `src/shell.zig:execute`
+- `src/lua/` — lexer, parser → AST, tree-walking VM; `mod.zig` re-exports
 
-**The scheduler is not preemptive:** `scheduler.runAll()` runs each registered task to completion in order (kernel tasks called directly; the user task via `jumpToUser`), then returns to the shell. `TIME_SLICE` is stored but unused.
+**Root module pattern:** `src/main.zig` is the root and re-exports `serial`, `vga`, `scheduler`, `pmm`, `vmm`, `kalloc`. ~45 files reach them via `const root = @import("root"); const vga = root.vga;` rather than relative imports. Follow that in new files.
 
-**Root module pattern:** `src/main.zig` is the root module and re-exports `vga`, `serial`, `scheduler`, `pmm`, `vmm`; other files reach them via `@import("root")` (e.g. `root.vga`).
+**Scheduler is not preemptive:** `scheduler.runAll()` runs each registered task to completion in order (kernel tasks called directly, user tasks via `jumpToUser`), then returns and the shell starts. `TIME_SLICE` is assigned to tasks but never enforced.
+
+**LAPIC timer is intentionally masked** (`src/drivers/apic.zig:83`) — the PIT is the single 100 Hz tick source. An unmasked periodic LAPIC timer on the same vector 32 double-counted every tick and made `sleep()`/`time()`/TCP timeouts run 2× fast. The `[APIC] Local APIC timer initialized` test marker is printed anyway; don't read it as "LAPIC timer ticking".
+
+**SMP:** `smp.init()` parses ACPI/MADT for LAPIC IDs, then INIT-SIPI-SIPI. SIPI delivery mode lives in ICR bits 10:8 (`(6 << 8) | (0x8000 >> 12)`, **not** the `0x6000` form). The trampoline is copied to 0x8000 with fixed control cells at 0x600 (GDT desc), 0x610 (IDT desc), 0x700 (PML4), 0x708 (stack top), 0x710 (index), 0x718 (entry). Each AP gets a 16 KB stack and idle-loops in `ap_entry`. A wrong cell layout or ICR encoding makes APs silently never come online — the only signal is the missing `[SMP] AP CPU 1 online`. Shell: `smp`, `cpuinfo`.
 
 ## User-space (ring 3)
 
-**GDT selectors** (`src/arch/gdt.zig`): 0x08 kernel code, 0x10 kernel data, 0x18|3 user code, 0x20|3 user data, 0x40 TSS (plus duplicate 0x28/0x30 kernel segments).
+- **GDT selectors** (`src/arch/gdt.zig`): 0x08 kernel code, 0x10 kernel data, `0x18|3` user code, `0x20|3` user data, 0x40 TSS; 0x28/0x30 are unused duplicate kernel segments.
+- **Syscalls:** INT 0x80, `rax` = number, args in `rdi`/`rsi`/`rdx`. Numbers in `src/kernel/syscall.zig:15`. Implemented: write=1 (fd 1–2 → VGA, 3 → serial), read=2 (fd 0 → keyboard), sleep=10, time=11, brk=12, fork=57 (COW clone), exec=59 (ELF from a VFS path), exit=60, waitpid=61, socket/connect/send/recv=70–73. `SYS_OPEN=3` and `SYS_CLOSE=4` exist in the enum but fall through the `else` arm to ENOSYS (-38).
+- Per-task state: 8 TCP socket slots (`src/kernel/task.zig:57`), user heap at `USER_HEAP_BASE = 0x04000000` grown page-wise by `brk`. `src/user/heap.zig` is the ring-3 free-list malloc built on `brk`.
+- **Address spaces** (`src/kernel/address_space.zig`): per-task PML4, create/destroy/switch, user pages mapped `PAGE_USER`; `destroy()` frees user physical pages.
 
-**Syscalls:** INT 0x80; numbers in `src/kernel/syscall.zig:15` (rax=num, rdi/rsi/rdx=args). Implemented: write=1 (fd 1–2 → VGA, 3 → serial), read=2 (fd 0 → keyboard), sleep=10, time=11, brk=12 (user heap: maps USER_HEAP_BASE pages per task), fork=57 (clones address space + user stack, COW), exec=59 (load ELF from ramfs path), exit=60, waitpid=61, socket/connect/send/recv=70–73 (8 per-task TCP socket slots). open=3 and close=4 still fall through to ENOSYS. `src/user/heap.zig` is a user-space malloc/free built on the brk syscall.
+## Gotchas
 
-**Address spaces** (`src/kernel/address_space.zig`): per-task PML4, create/destroy/switch, user pages mapped with PAGE_USER. `user` shell command loads the compiled-in ELF into a fresh address space and jumps to ring 3.
+- **Disk/FAT16:** `run.sh` creates a 64 MB FAT16 `disk.img` if missing; `virtio_blk.init()` + `fat16.init()` auto-mount it at `/mnt/disk` at shell start. Without a block device the `ls/cat/cd/touch/mkdir/rm/write/save` commands hit ramfs at `/` and FAT16 logs `[FAT16] No block device found`.
+- **Network is client-only:** static IP 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3 (`dhcp` overwrites all three from a lease). Real routing is in place — `net.nextHopMac()` picks the destination MAC (on-link host vs. gateway) and drops the packet when ARP fails, so `get`/`wget` reach the internet through QEMU's slirp, not just the host. Nothing listens on guest:80, so `run.sh`'s "open http://localhost:8080" hostfwd message is misleading.
+- **The stack polls, it does not use IRQs.** e1000 interrupts are masked on purpose; `net.poll()` drains the RX ring and is called from the blocking loops (`ensureArp`, `waitEstablished`, `dns.resolve`, `http`, `sys_recv`). `net.tick()` (ARP cache aging + TCP retransmit) runs from `scheduler.scheduleTick` once a second. `poll()` has a re-entrancy guard because handlers transmit and transmitting can ARP; inside a handler `nextHopMac` only fires the request and returns null instead of waiting.
+- **e1000 register bits are easy to get wrong** — RCTL bit 15 is BAM (broadcast accept, required for DHCP OFFERs), bit 3 is UPE (not BAM), bit 6 is loopback (not BSIZE). BSIZE=2048 is the default (bits 17:16 = 00, BSEX clear). TX descriptors need the RS bit (0x08) for the DD status bit to ever be set, and RDT must be written with the index just recycled, not the next one. Named constants for these live at the top of `src/drivers/e1000.zig`; `e1000.debug_trace` gates per-packet serial dumps (off by default — they are slower than the network and cause the timeouts they are meant to diagnose).
+- **IP payload length comes from the header, not the frame.** Ethernet pads to 60 bytes, so `ip.handlePacket` trims to the declared `total_len` before dispatch; TCP/UDP/ICMP all derive payload size from the slice they receive.
+- **TCP is minimal but real:** one segment per `MSS` (1440) with `send()` doing the splitting, a single retransmission slot per connection, ISN varied per connection, SYN retransmitted up to 3× inside `waitEstablished`, and in-order-only data acceptance (out-of-order/duplicate segments are re-ACKed, not appended). Checksums must be computed after the payload is in the buffer — `buildTcpHeader` takes the whole segment slice for that reason.
 
-## Lua interpreter
+- **Framebuffer/GUI:** `src/entry.S` requests a linear 1024x768x32 framebuffer (multiboot VIDEO flag). If GRUB supplies one, `vga.isFbActive()` is true and `gui`/`resolution <WxH>` (640x480, 800x600, 1024x768, 1280x720)/`mouse` work. `src/system/framebuffer.zig` is a shadow buffer: draw into RAM, then `flush()` the tracked dirty rect to the LFB (flicker-free). `src/system/gui.zig` is a small windowing shell (draggable clock/system/about windows, PS/2 mouse, Esc quits). The console shell stays VGA text. GUI changes need visual verification in a VM that provides a framebuffer — the harness runs `-nographic`.
+- **Adding a shell command needs four edits** in `src/shell.zig`: import the `src/programs/<name>.zig` module, add a branch in `execute`, add a line in `printHelp`, and append the name to the `commands` array (tab-completion source). Missing the array leaves the command working but uncompletable — `acpi` is currently in that state.
+- Kernel code has no std I/O: VGA is the user-facing UI, serial (`/dev/ttyS0`) is the debug log. `main.zig` defines its own `pub fn panic` (VGA + serial + `system/panic.zig:printBacktrace`, then `hlt`); the std panic handler is unused. `kernel_entry`, `syscall_handler` and `sys_exit_return` are `export`/`callconv(.c)` for the asm ABI.
+- Inline asm uses Zig 0.16 clobber syntax: `: .{ .rax = true, .memory = true }`.
+- Build target is x86_64-freestanding with SSE3–AVX2 removed via `cpu_features_sub` in `build.zig` (SSE/SSE2 stay). Don't emit wide vector ops.
+- `.gitignore` covers `.zig-cache/`, `zig-out/`, `isodir/`, `build/`, `kernel.iso`, `qemu.log`, `serial*.log`, `test_out.log`, `disk.img`, `*.o`. Several artifacts were committed before those rules and are still tracked (`fat_test.log`, `qemu_dbg.log`, `qemu_exec.log`, `qemu_smp.log`) — don't add more, and don't "fix" them without being asked. Loose `zig-out/bin/<hash>` binaries in the working copy are stale.
+- `README.md` is cosmetic prose. `AGENTS.md` and `TODO.md` (which tracks real known gaps) are the working docs.
 
-`src/lua/` — lexer, recursive-descent parser → AST, tree-walking VM. Runs via the `lua` shell command (`src/programs/lua.zig`; 128 KB `FixedBufferAllocator` heap).
+## Lua
 
-- Native bindings live in `src/lua/api.zig` and are registered in `vm.zig:VM.init` (globals: `print`, `type`, `tostring`, `tonumber`, `assert`, `error`, `ipairs`, `pairs`, `vga_write`, `serial_write`, `sleep`, `read_key`, `time`, plus `math.*` and `string.*` tables). Add new bindings there.
-- User-defined `function` definitions are parsed and callable (`vm.callFunction`).
-- No Lua modules/standard libraries beyond the above.
+`lua` shell command (`src/programs/lua.zig`) runs the interpreter on a 128 KB `FixedBufferAllocator`. Native bindings live in `src/lua/api.zig` and are registered in `vm.zig:VM.init`: `print`, `type`, `tostring`, `tonumber`, `assert`, `error`, `ipairs`, `pairs`, `vga_write`, `serial_write`, `sleep`, `read_key`, `time`, plus `math.*` and `string.*` tables. Add new bindings there. User `function` definitions parse and run (`vm.callFunction`). No modules, no stdlib beyond the above.
 
-## Conventions
+## Working tree state
 
-- `trampoline.S` (SMP AP entry) is the only file built with GNU `as` + `ld --oformat=binary`; `entry.S`/`isr.S` use Zig's `addAssemblyFile`. Inline asm uses Zig 0.16+ clobber syntax: `: .{ .rax = true, .memory = true }`.
-- VGA is the user-facing UI; serial (`/dev/ttyS0`) is debug logging. Don't use std output facilities in kernel code.
-- Hardcoded network config: IP 10.0.2.15, gateway 10.0.2.2, DNS 10.0.2.3, HTTP always targets 10.0.2.2:80.
-- New shell commands: create `src/programs/<name>.zig`, then import + dispatch it in `shell.zig:execute` and list it in `printHelp`.
-- `README.md` is cosmetic prose; `AGENTS.md` + `TODO.md` are the real docs.
-- `tools/patch_iso.py` overwrites the kernel inside an existing `kernel.iso` (ISO patching, no grub-mkrescue) — the test runner does the same inline.
-- Build target: x86_64-freestanding (Debug on plain `zig build`, ReleaseFast with `-Drelease`); SSE3–AVX2 stripped via `cpu_features_sub` in `build.zig`.
-- `.gitignore` covers `.zig-cache/`, `zig-out/`, `isodir/`, `build/`, `kernel.iso`, `qemu.log`, `serial*.log`, `test_out.log`, `disk.img`, `*.o` — all build noise; don't commit them.
-- `kernel_entry` is exported `callconv(.c)` and called from asm; `syscall_handler` and `main.zig:panic` are similarly exported for asm/ABI use. `main.zig` defines its own `pub fn panic` (prints to VGA+serial, halts) — the std one is unused.
+Uncommitted WIP touches `src/net/*`, `drivers/e1000.zig`, `drivers/keyboard.zig`, `fs/ramfs.zig`, `kernel/syscall.zig`, `main.zig`, `shell.zig`, `programs/web.zig`, plus untracked `src/programs/nano.zig`. Themes: network init moved from `shell.run` into `kernel_entry`, `sys_connect`/`sys_recv` block on the real handshake/data (`tcp.openConn` + `tcp.waitEstablished`), and the net stack was fixed (checksums, routing, RCTL/BAM, IP length trimming — see the Gotchas above).
+
+Debug and ReleaseFast both build, and `./run.sh --test` passes all ten markers.
+
