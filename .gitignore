@@ -10,4 +10,4 @@ kernel.iso
 qemu.log
 serial*.log
 test_out.log
-disk.img
+*.img
