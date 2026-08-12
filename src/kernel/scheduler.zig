@@ -64,11 +64,13 @@ pub fn addKernelTask(entry: *const fn () void) ?u32 {
 fn prepareUserStack(t: *task.Task, entry_vaddr: u64) bool {
     const addr_space = t.address_space orelse return false;
 
-    const user_stack_phys = @import("pmm.zig").allocPages(task.USER_STACK_SIZE / 4096) orelse {
+    const pages = task.USER_STACK_SIZE / 4096;
+    const user_stack_phys = @import("pmm.zig").allocPages(pages) orelse {
         port.serialWrite("[SCHED] Failed to allocate user stack\n");
         return false;
     };
     t.user_stack_phys = user_stack_phys;
+    t.user_stack_pages = pages;
 
     const user_stack_virt = address_space.USER_STACK_TOP - task.USER_STACK_SIZE;
     addr_space.mapUserRange(user_stack_virt, user_stack_phys, task.USER_STACK_SIZE, vmm.PAGE_WRITE);
@@ -183,6 +185,72 @@ pub fn addUserTaskFromPath(path: []const u8) ?u32 {
     }
 }
 
+/// Spawn a program from a file, auto-detecting its binary format (ELF or PE) and
+/// setting up the ABI its personality requires. `argline` is the full command
+/// line, program name first.
+pub fn spawnProgram(path: []const u8, argline: []const u8) !u32 {
+    const t = newUserTaskSlot() orelse return error.TooManyTasks;
+    errdefer t.state = .finished;
+
+    @import("process.zig").setupFromPath(t, path, argline) catch |err| {
+        port.serialWrite("[SCHED] spawn failed: ");
+        port.serialWrite(@errorName(err));
+        port.serialWrite("\n");
+        return err;
+    };
+
+    task_count += 1;
+    port.serialWrite("[SCHED] Program task ");
+    port.serialWriteDec(t.id);
+    port.serialWrite(" registered, entry=0x");
+    port.serialWriteHex(t.entry_point);
+    port.serialWrite("\n");
+    return t.id;
+}
+
+/// Spawn a program from an in-memory image (used for the embedded test binary).
+pub fn spawnProgramImage(data: []const u8, argline: []const u8) !u32 {
+    const t = newUserTaskSlot() orelse return error.TooManyTasks;
+    errdefer t.state = .finished;
+
+    try @import("process.zig").setup(t, data, argline);
+
+    task_count += 1;
+    port.serialWrite("[SCHED] Program task ");
+    port.serialWriteDec(t.id);
+    port.serialWrite(" registered, entry=0x");
+    port.serialWriteHex(t.entry_point);
+    port.serialWrite("\n");
+    return t.id;
+}
+
+/// Run a single task to completion (used by the shell to launch one program).
+pub fn runTask(id: u32) void {
+    if (id >= task_count) return;
+    const t = &tasks[id];
+    if (t.state != .ready) return;
+
+    t.state = .running;
+    current_task = @intCast(id);
+
+    if (t.task_type == .kernel) {
+        const entry_fn: *const fn () void = @ptrFromInt(t.entry_point);
+        entry_fn();
+    } else {
+        jumpToUser(t);
+    }
+
+    t.state = .finished;
+    current_task = -1;
+}
+
+/// Exit code of a finished task, or null if it is still running / not a task.
+pub fn exitCodeOf(id: u32) ?i32 {
+    if (id >= task_count) return null;
+    if (tasks[id].state != .finished) return null;
+    return tasks[id].exit_code;
+}
+
 pub fn runAll() void {
     vga.setColor(.yellow, .black);
     vga.write("[SCHED] Running all tasks...\n");
@@ -232,8 +300,18 @@ fn jumpToUser(t: *task.Task) void {
         addr_space.switchTo();
     }
 
-    // Set TSS RSP0 for ring 0 stack on syscalls/interrupts
-    gdt.setRsp0(@intFromPtr(&t.kernel_stack) + task.KERNEL_STACK_SIZE);
+    // Ring 0 stack for syscalls/interrupts taken from ring 3. Both entry paths
+    // need it: the CPU loads TSS.RSP0 for INT 0x80, while `syscall` does not
+    // switch stacks at all and the stub reads syscall_kernel_rsp instead.
+    const kstack_top = @intFromPtr(&t.kernel_stack) + task.KERNEL_STACK_SIZE;
+    gdt.setRsp0(kstack_top);
+    @import("../arch/syscall64.zig").setKernelStack(kstack_top);
+
+    // A Linux task expects the FS_BASE it set through arch_prctl; restore it
+    // here so a task resumed after another task ran still finds its TLS.
+    if (t.personality == .linux and t.fs_base != 0) {
+        @import("../arch/msr.zig").setFsBase(t.fs_base);
+    }
 
     switch_to_user(
         t.saved_state.rsp,

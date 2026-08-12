@@ -19,6 +19,7 @@ const IdtPtr = packed struct {
 
 extern fn load_idt(ptr: u64) void;
 extern fn syscall_entry() callconv(.naked) void;
+extern fn win_thunk_entry() callconv(.naked) void;
 
 var idt_entries: [256]IdtEntry align(16) = undefined;
 var idt_ptr: IdtPtr align(16) = undefined;
@@ -177,6 +178,9 @@ pub fn init() void {
     vga.write("  [IDT] Setting syscall gate 0x80...\n");
     serial.serialWrite("[IDT] Setting syscall gate 0x80...\n");
     setEntryDpl3(0x80, @intFromPtr(&syscall_entry));
+
+    // INT 0x81: Win32 import thunk gate for PE executables (also DPL=3).
+    setEntryDpl3(0x81, @intFromPtr(&win_thunk_entry));
 
     idt_ptr = .{
         .limit = @sizeOf(IdtEntry) * 256 - 1,

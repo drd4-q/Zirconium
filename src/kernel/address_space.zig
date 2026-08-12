@@ -264,6 +264,47 @@ pub const AddressSpace = struct {
         );
     }
 
+    /// Physical address backing `vaddr` in this address space, or null when the
+    /// page is not mapped. Only walks 4KB leaves — huge pages are reported as
+    /// unmapped on purpose, since callers use this to decide whether they may
+    /// write into a page they own.
+    pub fn translate(self: AddressSpace, vaddr: u64) ?u64 {
+        const pml4: [*]const u64 = @ptrFromInt(self.pml4_phys);
+        const pml4_e = pml4[@intCast((vaddr >> 39) & 0x1FF)];
+        if (pml4_e & vmm.PAGE_PRESENT == 0) return null;
+
+        const pdpt: [*]const u64 = @ptrFromInt(pml4_e & vmm.PAGE_ADDR_MASK);
+        const pdpt_e = pdpt[@intCast((vaddr >> 30) & 0x1FF)];
+        if (pdpt_e & vmm.PAGE_PRESENT == 0) return null;
+        if (pdpt_e & vmm.PAGE_SIZE != 0) return null;
+
+        const pd: [*]const u64 = @ptrFromInt(pdpt_e & vmm.PAGE_ADDR_MASK);
+        const pd_e = pd[@intCast((vaddr >> 21) & 0x1FF)];
+        if (pd_e & vmm.PAGE_PRESENT == 0) return null;
+        if (pd_e & vmm.PAGE_SIZE != 0) return null;
+
+        const pt: [*]const u64 = @ptrFromInt(pd_e & vmm.PAGE_ADDR_MASK);
+        const pt_e = pt[@intCast((vaddr >> 12) & 0x1FF)];
+        if (pt_e & vmm.PAGE_PRESENT == 0) return null;
+        return pt_e & vmm.PAGE_ADDR_MASK;
+    }
+
+    /// Allocate and map `size` bytes of zeroed anonymous user memory at `vaddr`.
+    /// Pages already present are left alone (so it is safe to call over a range
+    /// that partially overlaps an existing mapping).
+    pub fn allocUserRange(self: AddressSpace, vaddr_start: u64, size: u64, flags: u64) bool {
+        const start = vaddr_start & ~@as(u64, 0xFFF);
+        const end = (vaddr_start + size + 0xFFF) & ~@as(u64, 0xFFF);
+        var vaddr = start;
+        while (vaddr < end) : (vaddr += 0x1000) {
+            if (self.translate(vaddr) != null) continue;
+            const phys = pmm.allocPage() orelse return false;
+            @memset(@as([*]u8, @ptrFromInt(phys))[0..4096], 0);
+            self.mapUserPage(vaddr, phys, flags | vmm.PAGE_USER);
+        }
+        return true;
+    }
+
     pub fn mapUserPage(self: AddressSpace, vaddr: u64, paddr: u64, flags: u64) void {
         const pml4_idx: u16 = @intCast((vaddr >> 39) & 0x1FF);
         const pdpt_idx: u16 = @intCast((vaddr >> 30) & 0x1FF);
@@ -271,8 +312,8 @@ pub const AddressSpace = struct {
         const pt_idx: u16 = @intCast((vaddr >> 12) & 0x1FF);
 
         const pml4: [*]u64 = @ptrFromInt(self.pml4_phys);
-        const pdpt = nextPageTable(pml4, pml4_idx, vmm.PAGE_WRITE | vmm.PAGE_USER);
-        const pd = nextPageTable(pdpt, pdpt_idx, vmm.PAGE_WRITE | vmm.PAGE_USER);
+        const pdpt = nextPageTable(pml4, pml4_idx, vmm.PAGE_WRITE | vmm.PAGE_USER, .pd);
+        const pd = nextPageTable(pdpt, pdpt_idx, vmm.PAGE_WRITE | vmm.PAGE_USER, .pd);
 
         if (flags & vmm.PAGE_SIZE != 0) {
             setTableEntry(pd, pd_idx, paddr, flags | vmm.PAGE_PRESENT);
@@ -280,7 +321,7 @@ pub const AddressSpace = struct {
             return;
         }
 
-        const pt = nextPageTable(pd, pd_idx, vmm.PAGE_WRITE | vmm.PAGE_USER);
+        const pt = nextPageTable(pd, pd_idx, vmm.PAGE_WRITE | vmm.PAGE_USER, .pt);
         setTableEntry(pt, pt_idx, paddr, flags | vmm.PAGE_PRESENT);
         vmm.invalidatePage(vaddr);
     }
@@ -333,16 +374,43 @@ fn isSharedKernelTable(pd_phys: u64, pdpt_idx: u16) bool {
     return false;
 }
 
-fn nextPageTable(table: [*]u64, index: u16, flags: u64) [*]u64 {
+/// Page-table level of the *children* of the entry being created/split.
+const ChildLevel = enum {
+    /// Children are PD entries, i.e. splitting a 1GB PDPT huge page into 2MB ones.
+    pd,
+    /// Children are PT entries, i.e. splitting a 2MB PD huge page into 4KB ones.
+    pt,
+};
+
+fn nextPageTable(table: [*]u64, index: u16, flags: u64, child_level: ChildLevel) [*]u64 {
     const entry = table[index];
     if (entry & vmm.PAGE_PRESENT != 0) {
-        // If this is a 2MB huge page, we must NOT use its address as a page table.
-        // Replace it with a fresh 4KB PT so the caller can map individual pages.
+        // A huge page cannot be used as a page table. Split it into a table
+        // that still covers the exact same physical range with the same flags —
+        // the caller then overwrites only the entries it actually wants.
+        // Installing an empty table instead (what this used to do) punched a
+        // hole in the identity map this address space inherited from the
+        // kernel, so any kernel access to a physical address inside that
+        // 2MB/1GB window faulted while the task was active.
         if (entry & vmm.PAGE_SIZE != 0) {
             const new_page = pmm.allocPage() orelse panic.kernelPanic("ADDRSPACE: OOM splitting huge page");
-            @memset(@as([*]u8, @ptrFromInt(new_page))[0..4096], 0);
+            const child: [*]u64 = @ptrFromInt(new_page);
+            const base_phys = entry & vmm.PAGE_ADDR_MASK;
+            const inherited = entry & 0xFFF & ~vmm.PAGE_SIZE;
+            const stride: u64 = switch (child_level) {
+                .pd => 0x200000, // 1GB split into 512 × 2MB
+                .pt => 0x1000, // 2MB split into 512 × 4KB
+            };
+            const child_flags = switch (child_level) {
+                .pd => inherited | vmm.PAGE_SIZE, // children stay huge (2MB)
+                .pt => inherited,
+            };
+            var i: u16 = 0;
+            while (i < 512) : (i += 1) {
+                child[i] = ((base_phys + @as(u64, i) * stride) & vmm.PAGE_ADDR_MASK) | child_flags;
+            }
             setTableEntry(table, index, new_page, flags | vmm.PAGE_PRESENT);
-            return @ptrFromInt(new_page);
+            return child;
         }
         return @ptrFromInt(entry & vmm.PAGE_ADDR_MASK);
     }

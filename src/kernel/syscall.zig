@@ -32,6 +32,13 @@ pub const SyscallNumber = enum(u64) {
     SYS_RECV = 73,
 };
 
+fn isKnownNative(nr: u64) bool {
+    inline for (@typeInfo(SyscallNumber).@"enum".fields) |field| {
+        if (nr == field.value) return true;
+    }
+    return false;
+}
+
 var kernel_rsp: u64 = 0;
 extern fn sys_exit_return() callconv(.c) noreturn;
 
@@ -56,6 +63,39 @@ fn readUserStr(ptr: u64, max_len: usize) ?[256]u8 {
 }
 
 pub export fn syscall_handler(frame: *isr_mod.InterruptFrame) callconv(.c) void {
+    // Route by the current task's ABI. Linux binaries arrive here through
+    // `syscall_entry_64` with Linux call numbers, which do not overlap ours in
+    // meaning (e.g. 1 is write in both, but 2 is open there and read here), so
+    // the tables must stay separate.
+    if (scheduler.current_task >= 0) {
+        const t = &scheduler.tasks[@intCast(scheduler.current_task)];
+        switch (t.personality) {
+            .linux => {
+                @import("linux_syscalls.zig").dispatch(frame, t);
+                return;
+            },
+            .windows => {
+                // A PE program has no syscall ABI of its own; reaching here means
+                // it executed `syscall`/INT 0x80 directly.
+                serial.serialWrite("[SYSCALL] PE task issued a raw syscall; terminating\n");
+                @import("process.zig").exitCurrent(-1);
+            },
+            .native => {},
+        }
+    }
+    nativeDispatch(frame);
+}
+
+fn nativeDispatch(frame: *isr_mod.InterruptFrame) void {
+    // Guard the enum cast: an unknown number would be illegal behavior with
+    // @enumFromInt on an exhaustive enum (a Debug panic, UB in ReleaseFast).
+    if (!isKnownNative(frame.rax)) {
+        serial.serialWrite("[SYSCALL] Unknown syscall: ");
+        serial.serialWriteDec(frame.rax);
+        serial.serialWrite("\n");
+        frame.rax = @bitCast(@as(isize, -38)); // ENOSYS
+        return;
+    }
     const num: SyscallNumber = @enumFromInt(frame.rax);
 
     switch (num) {

@@ -2,6 +2,7 @@
 
 .extern isr_handler
 .extern syscall_handler
+.extern win_thunk_handler
 
 .macro ISR_NOERR num
 .global isr\num
@@ -164,6 +165,117 @@ syscall_entry:
     addq $16, %rsp    # pop int_num + error_code
     iretq
 
+# Win32 import thunk entry (INT 0x81, DPL=3).
+# The PE import thunks execute `mov eax,<id>; int 0x81; ret`, so this reuses the
+# exact frame layout of the syscall path and lets the handler read the Win64
+# argument registers (rcx/rdx/r8/r9) plus stack arguments via frame.rsp.
+.global win_thunk_entry
+win_thunk_entry:
+    pushq $0          # error_code = 0
+    pushq $0x81       # int_num
+
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %rbp
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+
+    movq %rsp, %rdi
+    call win_thunk_handler
+
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+
+    addq $16, %rsp
+    iretq
+
+# Syscall entry point for the `syscall` instruction (Linux ABI binaries).
+#
+# Unlike INT 0x80, `syscall` does NOT switch stacks and pushes nothing:
+#   RCX = return RIP, R11 = saved RFLAGS, CS/SS come from IA32_STAR.
+# We switch to the task's kernel stack ourselves and synthesize the same frame
+# layout isr_common/syscall_entry build, so syscall_handler is shared by both
+# entry paths. We return with iretq rather than sysret because the handler may
+# rewrite CS/SS/RSP/RIP wholesale (exec) or not return at all (exit).
+#
+# The scratch globals are safe without a per-CPU area because only the BSP runs
+# user tasks and the scheduler is not preemptive (APs idle in ap_entry).
+.global syscall_entry_64
+syscall_entry_64:
+    movq %rsp, syscall_user_rsp(%rip)
+    movq syscall_kernel_rsp(%rip), %rsp
+
+    # Build the iretq frame exactly as the CPU would for an interrupt.
+    pushq $0x23                          # SS  = user data selector (0x20|3)
+    pushq syscall_user_rsp(%rip)         # RSP = user stack
+    pushq %r11                           # RFLAGS (saved by syscall)
+    pushq $0x1B                          # CS  = user code selector (0x18|3)
+    pushq %rcx                           # RIP (saved by syscall)
+
+    pushq $0                             # error_code
+    pushq $0x80                          # int_num: same tag as the INT 0x80 path
+
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %rbp
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+
+    movq %rsp, %rdi
+    call syscall_handler
+
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+
+    addq $16, %rsp                       # pop int_num + error_code
+    iretq
+
 .global load_gdt
 load_gdt:
     lgdt (%rdi)
@@ -247,5 +359,15 @@ sys_exit_return:
 .data
 .global scheduler_kernel_rsp
 scheduler_kernel_rsp:
+    .quad 0
+
+# Kernel RSP loaded by syscall_entry_64; kept in sync with TSS.RSP0.
+.global syscall_kernel_rsp
+syscall_kernel_rsp:
+    .quad 0
+
+# Scratch slot for the user RSP across the syscall stack switch.
+.global syscall_user_rsp
+syscall_user_rsp:
     .quad 0
 

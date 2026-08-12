@@ -12,12 +12,14 @@ const kernel_init = @import("kernel/init.zig");
 const gdt = @import("arch/gdt.zig");
 
 const syscall = @import("kernel/syscall.zig");
+const winapi = @import("kernel/winapi.zig");
 
 pub var scheduler_ready: bool = false;
 
-// Force export of syscall_handler for asm reference
+// Force export of the asm-referenced entry handlers.
 comptime {
     _ = syscall.syscall_handler;
+    _ = winapi.win_thunk_handler;
 }
 
 pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
@@ -53,6 +55,10 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
 
     system_init.init(magic, mbi_ptr);
     serial.serialWrite("[BOOT] System init done\n");
+
+    // Enable the `syscall` instruction: Linux binaries enter the kernel that
+    // way, not through INT 0x80.
+    @import("arch/syscall64.zig").init();
 
     vga.write("[BOOT] Initializing PMM...\n");
     pmm.init(@intFromPtr(&__kernel_start), @intFromPtr(&__kernel_end));
