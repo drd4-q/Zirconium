@@ -48,21 +48,23 @@ pub fn build(b: *std.Build) void {
 
     // 3b. Build the AP trampoline blob (assemble + link at 0x8000, raw binary),
     //     then embed it as a Zig byte array via bin2zig.
-    var as_cmd = b.addSystemCommand(&.{"as"});
-    as_cmd.addArg("--64");
-    as_cmd.addFileArg(b.path("src/arch/trampoline.S"));
-    const tramp_obj = as_cmd.addPrefixedOutputFileArg("-o", "trampoline.o");
+    const tramp_exe = b.addExecutable(.{
+        .name = "trampoline",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    tramp_exe.root_module.addAssemblyFile(b.path("src/arch/trampoline.S"));
+    tramp_exe.setLinkerScript(b.path("src/arch/trampoline.ld"));
+    tramp_exe.entry = .{ .symbol_name = "_start" };
 
-    var ld_cmd = b.addSystemCommand(&.{"ld"});
-    ld_cmd.addArg("-Ttext=0x8000");
-    ld_cmd.addArg("--oformat=binary");
-    ld_cmd.addArg("-o");
-    const tramp_bin = ld_cmd.addOutputFileArg("trampoline.bin");
-    ld_cmd.addFileArg(tramp_obj);
+    const tramp_bin = tramp_exe.addObjCopy(.{ .format = .bin });
+    const tramp_bin_file = tramp_bin.getOutput();
 
     const run_bin2zig_t = b.addRunArtifact(bin2zig);
     run_bin2zig_t.addArg("-i");
-    run_bin2zig_t.addFileArg(tramp_bin);
+    run_bin2zig_t.addFileArg(tramp_bin_file);
     run_bin2zig_t.addArg("-o");
     const tramp_out = run_bin2zig_t.addOutputFileArg("ap_tramp_bin.zig");
 

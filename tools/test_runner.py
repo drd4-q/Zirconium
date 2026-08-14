@@ -91,14 +91,37 @@ def build_fresh_iso(repo_root):
     shutil.copy2(os.path.join(repo_root, "zig-out", "bin", "kernel"), os.path.join(isodir, "boot", "kernel.bin"))
     shutil.copy2(os.path.join(repo_root, "grub.cfg"), os.path.join(boot_dir, "grub.cfg"))
     iso_path = os.path.join(repo_root, "kernel.iso")
-    res = subprocess.run(
-        ["grub-mkrescue", "-o", iso_path, isodir],
-        cwd=repo_root,
-    )
-    if res.returncode != 0:
-        print("[TEST RUNNER ERROR] grub-mkrescue failed")
-        sys.exit(1)
-    print(f"[TEST RUNNER] Built fresh kernel.iso with grub-mkrescue")
+    try:
+        res = subprocess.run(
+            ["grub-mkrescue", "-o", iso_path, isodir],
+            cwd=repo_root,
+        )
+        if res.returncode == 0:
+            print(f"[TEST RUNNER] Built fresh kernel.iso with grub-mkrescue")
+            return
+    except Exception:
+        pass
+
+    # Try WSL grub-mkrescue via temp folder
+    try:
+        temp_dir = os.path.join(os.environ.get("TEMP", "C:\\Temp"), "isobuild")
+        tboot_dir = os.path.join(temp_dir, "boot", "grub")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        os.makedirs(tboot_dir, exist_ok=True)
+        shutil.copy2(os.path.join(repo_root, "zig-out", "bin", "kernel"), os.path.join(temp_dir, "boot", "kernel.bin"))
+        shutil.copy2(os.path.join(repo_root, "grub.cfg"), os.path.join(tboot_dir, "grub.cfg"))
+        wsl_temp = "/mnt/c" + temp_dir[2:].replace("\\", "/")
+        wsl_out = wsl_temp + "/kernel.iso"
+        res = subprocess.run(["wsl", "sh", "-c", f"grub-mkrescue -o {wsl_out} {wsl_temp}"])
+        if res.returncode == 0 and os.path.exists(os.path.join(temp_dir, "kernel.iso")):
+            shutil.copy2(os.path.join(temp_dir, "kernel.iso"), iso_path)
+            print(f"[TEST RUNNER] Built fresh kernel.iso with WSL grub-mkrescue")
+            return
+    except Exception:
+        pass
+
+    print("[TEST RUNNER ERROR] grub-mkrescue failed")
+    sys.exit(1)
 
 def patch_kernel_iso(repo_root):
     """Overwrite kernel.bin in kernel.iso if it fits; else rebuild the ISO fresh."""
@@ -179,28 +202,32 @@ def main():
         *boot_args,
         "-m", "512M",
         "-smp", "4",
-        "-nographic",
-        "-monitor", "none",
-        "-serial", "file:serial_test.log",
+        "-display", "none",
+        "-serial", "stdio",
+        "-netdev", "user,id=net0",
+        "-device", "e1000,netdev=net0,mac=52:54:52:54:52:54",
         "-no-reboot"
     ]
-    process = subprocess.Popen(qemu_cmd, cwd=repo_root)
+    process = subprocess.Popen(qemu_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=repo_root)
 
-    # Poll the serial log for the last boot marker instead of a fixed sleep:
-    # a fixed 5s made slow boots flaky (the harness killed QEMU mid-boot and
-    # the fresh log was missing every late marker even though the boot was fine).
-    terminal_marker = "[USER-HEAP] free + reuse OK"
-    content = ""
-    deadline = time.time() + 90.0
-    while time.time() < deadline:
-        try:
-            with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-        except FileNotFoundError:
-            content = ""
-        if terminal_marker in content:
-            break
-        time.sleep(0.25)
+    import threading
+    collected = []
+    done_event = threading.Event()
+
+    def reader():
+        while True:
+            line = process.stdout.readline()
+            if not line:
+                break
+            text_line = line.decode("utf-8", errors="ignore")
+            collected.append(text_line)
+            if "[USER-HEAP] free + reuse OK" in text_line:
+                done_event.set()
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+
+    done_event.wait(timeout=45.0)
 
     try:
         process.terminate()
@@ -211,10 +238,12 @@ def main():
         except Exception:
             pass
 
-    content = ""
-    if os.path.exists(log_file_path):
-        with open(log_file_path, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
+    content = "".join(collected)
+    try:
+        with open(log_file_path, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception:
+        pass
 
     print("\n--- QEMU SERIAL OUTPUT LOG ---")
     print(content)

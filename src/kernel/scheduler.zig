@@ -107,6 +107,7 @@ fn newUserTaskSlot() ?*task.Task {
     t.state = .ready;
     t.task_type = .user;
     t.time_slice = TIME_SLICE;
+    task_count += 1;
     return t;
 }
 
@@ -124,7 +125,6 @@ fn registerUser(t: *task.Task, entry_vaddr: u64, label: []const u8) ?u32 {
         return null;
     }
 
-    task_count += 1;
     port.serialWrite("[SCHED] ");
     port.serialWrite(label);
     port.serialWrite(" task ");
@@ -199,7 +199,6 @@ pub fn spawnProgram(path: []const u8, argline: []const u8) !u32 {
         return err;
     };
 
-    task_count += 1;
     port.serialWrite("[SCHED] Program task ");
     port.serialWriteDec(t.id);
     port.serialWrite(" registered, entry=0x");
@@ -215,7 +214,6 @@ pub fn spawnProgramImage(data: []const u8, argline: []const u8) !u32 {
 
     try @import("process.zig").setup(t, data, argline);
 
-    task_count += 1;
     port.serialWrite("[SCHED] Program task ");
     port.serialWriteDec(t.id);
     port.serialWrite(" registered, entry=0x");

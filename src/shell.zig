@@ -162,11 +162,12 @@ fn execute(cmd: []const u8) void {
         const sched = root.scheduler;
         const user_test_bin = @import("user_test_bin");
         vga.write("[SHELL] Spawning user-space ELF task...\n");
-        if (sched.addElfUserTask(&user_test_bin.data)) |task_id| {
-            _ = task_id;
-            sched.runAll();
-        } else {
-            vga.write("[SHELL] Error: failed to spawn user task\n");
+        if (sched.spawnProgramImage(&user_test_bin.data, "user_test")) |task_id| {
+            sched.runTask(task_id);
+        } else |err| {
+            vga.write("[SHELL] Error: failed to spawn user task: ");
+            vga.write(@errorName(err));
+            vga.write("\n");
         }
     } else if (eql(cmd_name, "exec")) {
         cmdExec(args);
@@ -239,6 +240,28 @@ fn execute(cmd: []const u8) void {
         vga.clear();
         printBanner();
     } else {
+        if (resolveExecutablePath(cmd_name)) |exec_path| {
+            vga.setColor(.light_cyan, .black);
+            vga.write("[SHELL] Executing ");
+            vga.write(exec_path);
+            vga.write("...\n");
+            vga.setColor(.white, .black);
+
+            const sched = root.scheduler;
+            const task_id = sched.spawnProgram(exec_path, cmd) catch |err| {
+                vga.setColor(.light_red, .black);
+                vga.write("[SHELL] Error: failed to spawn '");
+                vga.write(exec_path);
+                vga.write("': ");
+                vga.write(@errorName(err));
+                vga.write("\n");
+                vga.setColor(.white, .black);
+                return;
+            };
+            sched.runTask(task_id);
+            return;
+        }
+
         vga.setColor(.light_red, .black);
         vga.write("  Unknown command: '");
         vga.write(cmd_name);
@@ -489,30 +512,120 @@ fn cmdNslookup(args: []const u8) void {
     }
 }
 
+var resolved_path_buf: [256]u8 = undefined;
+
+fn resolveExecutablePath(raw: []const u8) ?[]const u8 {
+    if (raw.len == 0 or raw.len >= 200) return null;
+
+    // 1. Direct path as provided
+    if (vfs.stat(raw)) |st| {
+        if (st.file_type != .directory) return raw;
+    }
+
+    // 2. If it starts with "/" but not found, don't search search-paths
+    if (raw[0] == '/') return null;
+
+    // 3. Try /bin/<raw>
+    const bin_prefix = "/bin/";
+    @memcpy(resolved_path_buf[0..bin_prefix.len], bin_prefix);
+    @memcpy(resolved_path_buf[bin_prefix.len..][0..raw.len], raw);
+    const bin_len = bin_prefix.len + raw.len;
+    const bin_cand = resolved_path_buf[0..bin_len];
+    if (vfs.stat(bin_cand)) |st| {
+        if (st.file_type != .directory) return bin_cand;
+    }
+
+    // 4. Try /mnt/disk/<raw>
+    const disk_prefix = "/mnt/disk/";
+    @memcpy(resolved_path_buf[0..disk_prefix.len], disk_prefix);
+    @memcpy(resolved_path_buf[disk_prefix.len..][0..raw.len], raw);
+    const disk_len = disk_prefix.len + raw.len;
+    const disk_cand = resolved_path_buf[0..disk_len];
+    if (vfs.stat(disk_cand)) |st| {
+        if (st.file_type != .directory) return disk_cand;
+    }
+
+    // 5. If no extension, try with .exe
+    var has_ext = false;
+    for (raw) |ch| {
+        if (ch == '.') has_ext = true;
+    }
+    if (!has_ext and raw.len + 4 < 200) {
+        // Try <raw>.exe
+        @memcpy(resolved_path_buf[0..raw.len], raw);
+        @memcpy(resolved_path_buf[raw.len..][0..4], ".exe");
+        const exe_cand = resolved_path_buf[0 .. raw.len + 4];
+        if (vfs.stat(exe_cand)) |st| {
+            if (st.file_type != .directory) return exe_cand;
+        }
+
+        // Try /bin/<raw>.exe
+        @memcpy(resolved_path_buf[0..bin_prefix.len], bin_prefix);
+        @memcpy(resolved_path_buf[bin_prefix.len..][0..raw.len], raw);
+        @memcpy(resolved_path_buf[bin_prefix.len + raw.len ..][0..4], ".exe");
+        const bin_exe_cand = resolved_path_buf[0 .. bin_prefix.len + raw.len + 4];
+        if (vfs.stat(bin_exe_cand)) |st| {
+            if (st.file_type != .directory) return bin_exe_cand;
+        }
+
+        // Try /mnt/disk/<raw>.exe
+        @memcpy(resolved_path_buf[0..disk_prefix.len], disk_prefix);
+        @memcpy(resolved_path_buf[disk_prefix.len..][0..raw.len], raw);
+        @memcpy(resolved_path_buf[disk_prefix.len + raw.len ..][0..4], ".exe");
+        const disk_exe_cand = resolved_path_buf[0 .. disk_prefix.len + raw.len + 4];
+        if (vfs.stat(disk_exe_cand)) |st| {
+            if (st.file_type != .directory) return disk_exe_cand;
+        }
+    }
+
+    return null;
+}
+
 fn cmdExec(args: []const u8) void {
     if (args.len == 0) {
         vga.setColor(.light_red, .black);
-        vga.write("  Usage: exec <path>\n");
+        vga.write("  Usage: exec <path> [args...]\n");
         vga.setColor(.white, .black);
         return;
     }
 
-    const sched = root.scheduler;
+    var path_end: usize = args.len;
+    for (args, 0..) |ch, i| {
+        if (ch == ' ') {
+            path_end = i;
+            break;
+        }
+    }
+    const raw_path = args[0..path_end];
+
+    const resolved_path = resolveExecutablePath(raw_path) orelse {
+        vga.setColor(.light_red, .black);
+        vga.write("[SHELL] Error: file not found: ");
+        vga.write(raw_path);
+        vga.write("\n");
+        vga.setColor(.white, .black);
+        return;
+    };
+
     vga.setColor(.light_cyan, .black);
-    vga.write("[SHELL] exec: loading ");
-    vga.write(args);
-    vga.write("\n");
+    vga.write("[SHELL] Executing ");
+    vga.write(resolved_path);
+    vga.write("...\n");
     vga.setColor(.white, .black);
 
-    // Create a user task that loads from the ramfs path
-    if (sched.addUserTaskFromPath(args)) |task_id| {
-        _ = task_id;
-        sched.runAll();
-    } else {
-        vga.write("[SHELL] Error: failed to exec ");
-        vga.write(args);
+    const sched = root.scheduler;
+    const task_id = sched.spawnProgram(resolved_path, args) catch |err| {
+        vga.setColor(.light_red, .black);
+        vga.write("[SHELL] Error: failed to spawn '");
+        vga.write(resolved_path);
+        vga.write("': ");
+        vga.write(@errorName(err));
         vga.write("\n");
-    }
+        vga.setColor(.white, .black);
+        return;
+    };
+
+    sched.runTask(task_id);
 }
 
 fn cmdSave(args: []const u8) void {
@@ -579,7 +692,7 @@ fn printHelp() void {
     vga.write("    lua           Lua 5.x REPL interpreter\n");
     vga.write("    user          Run compiled-in user ELF\n");
     vga.write("    save [path]   Save user binary to ramfs\n");
-    vga.write("    exec <path>   Run ELF from ramfs path\n\n");
+    vga.write("    exec <path>   Run ELF or PE/EXE binary\n\n");
     vga.write("  Network:\n");
     vga.write("    net           Network interface info\n");
     vga.write("    ping [ip]     Ping (default: gateway)\n");

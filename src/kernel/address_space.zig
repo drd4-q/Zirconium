@@ -286,6 +286,7 @@ pub const AddressSpace = struct {
         const pt: [*]const u64 = @ptrFromInt(pd_e & vmm.PAGE_ADDR_MASK);
         const pt_e = pt[@intCast((vaddr >> 12) & 0x1FF)];
         if (pt_e & vmm.PAGE_PRESENT == 0) return null;
+        if (pt_e & vmm.PAGE_USER == 0) return null;
         return pt_e & vmm.PAGE_ADDR_MASK;
     }
 
@@ -316,13 +317,13 @@ pub const AddressSpace = struct {
         const pd = nextPageTable(pdpt, pdpt_idx, vmm.PAGE_WRITE | vmm.PAGE_USER, .pd);
 
         if (flags & vmm.PAGE_SIZE != 0) {
-            setTableEntry(pd, pd_idx, paddr, flags | vmm.PAGE_PRESENT);
+            setTableEntry(pd, pd_idx, paddr, flags | vmm.PAGE_PRESENT | vmm.PAGE_USER);
             vmm.invalidatePage(vaddr);
             return;
         }
 
         const pt = nextPageTable(pd, pd_idx, vmm.PAGE_WRITE | vmm.PAGE_USER, .pt);
-        setTableEntry(pt, pt_idx, paddr, flags | vmm.PAGE_PRESENT);
+        setTableEntry(pt, pt_idx, paddr, flags | vmm.PAGE_PRESENT | vmm.PAGE_USER);
         vmm.invalidatePage(vaddr);
     }
 
@@ -412,6 +413,7 @@ fn nextPageTable(table: [*]u64, index: u16, flags: u64, child_level: ChildLevel)
             setTableEntry(table, index, new_page, flags | vmm.PAGE_PRESENT);
             return child;
         }
+        table[index] |= (flags & (vmm.PAGE_USER | vmm.PAGE_WRITE));
         return @ptrFromInt(entry & vmm.PAGE_ADDR_MASK);
     }
 

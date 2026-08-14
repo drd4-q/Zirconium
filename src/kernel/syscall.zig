@@ -363,9 +363,10 @@ fn nativeDispatch(frame: *isr_mod.InterruptFrame) void {
             // Find path length
             var path_len: usize = 0;
             while (path[path_len] != 0 and path_len < 255) : (path_len += 1) {}
+            const path_slice = path[0..path_len];
 
             serial.serialWrite("[SYSCALL] exec: ");
-            serial.serialWrite(path[0..path_len]);
+            serial.serialWrite(path_slice);
             serial.serialWrite("\n");
 
             const task_idx = scheduler.current_task;
@@ -375,70 +376,65 @@ fn nativeDispatch(frame: *isr_mod.InterruptFrame) void {
             }
             const t = &scheduler.tasks[@intCast(task_idx)];
 
-            // Free old user stack
-            if (t.user_stack_phys != 0) {
-                pmm.freePages(t.user_stack_phys, task.USER_STACK_SIZE / 4096);
-                t.user_stack_phys = 0;
-            }
+            const binfmt = @import("binfmt.zig");
+            const process = @import("process.zig");
 
-            // Destroy old address space (frees user pages + page tables)
-            if (t.address_space) |old_as| {
-                old_as.destroy();
-                t.address_space = null;
-            }
-
-            // Create new address space
-            const new_as = address_space.AddressSpace.create() orelse {
-                serial.serialWrite("[SYSCALL] exec: failed to create address space\n");
-                frame.rax = @bitCast(@as(isize, -12)); // ENOMEM
-                return;
-            };
-            t.address_space = new_as;
-
-            // Load ELF from VFS
-            const entry_vaddr = @import("elf.zig").loadElfFromPath(new_as, path[0..path_len]) catch |err| {
-                serial.serialWrite("[SYSCALL] exec: failed to load ELF: ");
+            const file = binfmt.readFile(path_slice) catch |err| {
+                serial.serialWrite("[SYSCALL] exec: file not found: ");
                 serial.serialWrite(@errorName(err));
                 serial.serialWrite("\n");
-                new_as.destroy();
-                t.address_space = null;
-                frame.rax = @bitCast(@as(isize, -8)); // ENOEXEC
+                frame.rax = @bitCast(@as(isize, -2)); // ENOENT
+                return;
+            };
+            defer binfmt.freeFile(file);
+
+            const old_as = t.address_space;
+            const old_stack_phys = t.user_stack_phys;
+            const old_stack_pages = t.user_stack_pages;
+
+            t.address_space = null;
+            t.user_stack_phys = 0;
+            t.user_stack_pages = 0;
+
+            process.setup(t, file, path_slice) catch |err| {
+                serial.serialWrite("[SYSCALL] exec: setup failed: ");
+                serial.serialWrite(@errorName(err));
+                serial.serialWrite("\n");
+                t.address_space = old_as;
+                t.user_stack_phys = old_stack_phys;
+                t.user_stack_pages = old_stack_pages;
+                frame.rax = switch (err) {
+                    error.OutOfMemory => @bitCast(@as(isize, -12)), // ENOMEM
+                    else => @bitCast(@as(isize, -8)), // ENOEXEC
+                };
                 return;
             };
 
-            // Allocate new user stack
-            const user_stack_phys = pmm.allocPages(task.USER_STACK_SIZE / 4096) orelse {
-                serial.serialWrite("[SYSCALL] exec: failed to allocate stack\n");
-                new_as.destroy();
-                t.address_space = null;
-                frame.rax = @bitCast(@as(isize, -12));
-                return;
-            };
-            t.user_stack_phys = user_stack_phys;
+            // Free old resources
+            if (old_stack_phys != 0) {
+                pmm.freePages(old_stack_phys, if (old_stack_pages != 0) old_stack_pages else task.USER_STACK_SIZE / 4096);
+            }
+            if (old_as) |as| {
+                as.destroy();
+            }
 
-            // Map user stack
-            const user_stack_virt = address_space.USER_STACK_TOP - task.USER_STACK_SIZE;
-            new_as.mapUserRange(user_stack_virt, user_stack_phys, task.USER_STACK_SIZE, vmm.PAGE_WRITE);
+            if (t.address_space) |new_as| {
+                new_as.switchTo();
+            }
 
-            // Update task state
-            t.entry_point = entry_vaddr;
-            t.state = .ready;
-
-            // Update the interrupt frame to return to the new program
-            frame.rip = entry_vaddr;
-            frame.rsp = address_space.USER_STACK_TOP - 8;
-            frame.cs = @import("../arch/gdt.zig").USER_CODE_SEL;
-            frame.ss = @import("../arch/gdt.zig").USER_DATA_SEL;
-            frame.rflags = 0x200; // IF=1
-
-            // Switch to new address space before returning
-            new_as.switchTo();
-
-            // Return 0 to the new program (rax in frame will be the return value)
+            frame.rip = t.saved_state.rip;
+            frame.rsp = t.saved_state.rsp;
+            frame.cs = t.saved_state.cs;
+            frame.ss = t.saved_state.ss;
+            frame.rflags = t.saved_state.rflags;
             frame.rax = 0;
 
+            if (t.personality == .linux and t.fs_base != 0) {
+                @import("../arch/msr.zig").setFsBase(t.fs_base);
+            }
+
             serial.serialWrite("[SYSCALL] exec: jumping to 0x");
-            serial.serialWriteHex(entry_vaddr);
+            serial.serialWriteHex(t.saved_state.rip);
             serial.serialWrite("\n");
         },
         .SYS_WAITPID => {
