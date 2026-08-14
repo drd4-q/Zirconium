@@ -2,6 +2,8 @@
 
 A minimalist bare-metal x86_64 operating system kernel written in Zig.
 
+A special thanks to the [Dillo](https://git.dillo-browser.org/dillo/tree/) project for this browser.
+
 [![Project Status](https://img.shields.io/badge/status-active-brightgreen)](#)
 [![Roadmap](https://img.shields.io/badge/tasks-TODOs-blue)](TODO.md)
 
