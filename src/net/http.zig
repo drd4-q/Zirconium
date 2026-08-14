@@ -10,6 +10,67 @@ var http_req_buf: [512]u8 = undefined;
 
 pub const DEFAULT_PORT: u16 = 80;
 
+pub fn fetchBuffer(host: []const u8, path: []const u8, dst_port: u16, out_buf: []u8) ?usize {
+    var host_ip: [4]u8 = undefined;
+    if (parseIp(host)) |ip| {
+        host_ip = ip;
+    } else {
+        const resolved = dns.resolve(host) orelse {
+            port_io.serialWrite("[HTTP] Failed to resolve host: ");
+            port_io.serialWrite(host);
+            port_io.serialWrite("\n");
+            return null;
+        };
+        host_ip = resolved;
+    }
+
+    const conn = tcp.connect(host_ip, dst_port) orelse {
+        port_io.serialWrite("[HTTP] No free connection slots\n");
+        return null;
+    };
+
+    if (!tcp.waitEstablished(conn, 500)) {
+        port_io.serialWrite("[HTTP] Connection failed\n");
+        tcp.disconnect(conn);
+        return null;
+    }
+
+    const req_len = buildRequest(host, path) orelse {
+        port_io.serialWrite("[HTTP] URL too long\n");
+        tcp.close(conn);
+        tcp.disconnect(conn);
+        return null;
+    };
+
+    tcp.resetState(conn);
+    tcp.send(conn, http_req_buf[0..req_len]);
+
+    const response_deadline = timer.ticks +% 1500;
+    var last_len: usize = 0;
+    var last_progress = timer.ticks;
+    while (timer.ticks < response_deadline and (conn.state == .established or conn.state == .close_wait)) {
+        net.poll();
+        if (conn.rx_len != last_len) {
+            last_len = conn.rx_len;
+            last_progress = timer.ticks;
+        } else if (last_len > 0 and (conn.state == .close_wait or timer.ticks -% last_progress > 200)) {
+            break;
+        }
+    }
+
+    var total_copied: usize = 0;
+    if (conn.rx_len > 0) {
+        total_copied = @min(conn.rx_len, out_buf.len);
+        @memcpy(out_buf[0..total_copied], conn.rx_buf[0..total_copied]);
+    }
+
+    tcp.close(conn);
+    tcp.disconnect(conn);
+
+    if (total_copied == 0) return null;
+    return total_copied;
+}
+
 pub fn httpGet(host: []const u8, path: []const u8) void {
     httpGetPort(host, path, DEFAULT_PORT);
 }
@@ -118,7 +179,7 @@ fn buildRequest(host: []const u8, path: []const u8) ?usize {
         path,
         " HTTP/1.0\r\nHost: ",
         host,
-        "\r\nConnection: close\r\n\r\n",
+        "\r\nUser-Agent: Dillo/3.1 (Zirconium)\r\nAccept: text/html,text/plain,*/*\r\nConnection: close\r\n\r\n",
     };
 
     for (parts) |part| {

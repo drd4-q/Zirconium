@@ -9,6 +9,8 @@ const pmm = root.pmm;
 const vfs = @import("../fs/vfs.zig");
 const net = @import("../net/mod.zig");
 const scheduler = root.scheduler;
+const tty_mod = @import("tty.zig");
+const dillo_prog = @import("../programs/dillo.zig");
 
 const TITLE_H: i32 = 18;
 const BORDER: i32 = 1;
@@ -23,6 +25,7 @@ const ContentType = enum(u8) {
     calculator,
     notepad,
     launcher,
+    dillo,
 };
 
 const Window = struct {
@@ -30,9 +33,15 @@ const Window = struct {
     y: i32 = 0,
     w: i32 = 200,
     h: i32 = 140,
+    saved_x: i32 = 0,
+    saved_y: i32 = 0,
+    saved_w: i32 = 200,
+    saved_h: i32 = 140,
+    is_maximized: bool = false,
     title: [32]u8 = undefined,
     title_len: usize = 0,
     content: ContentType = .about,
+    tty_id: u8 = 1,
     focused: bool = false,
     visible: bool = true,
 };
@@ -40,6 +49,7 @@ const Window = struct {
 var windows: [MAX_WINDOWS]Window = undefined;
 var num_windows: usize = 0;
 var drag_index: i32 = -1;
+var drag_mode: enum { none, moving, resizing } = .none;
 var drag_off_x: i32 = 0;
 var drag_off_y: i32 = 0;
 var prev_left: bool = false;
@@ -49,6 +59,7 @@ var cursor_drawn: bool = false;
 var cursor_x: i32 = 0;
 var cursor_y: i32 = 0;
 var next_clock_tick: u64 = 0;
+var next_gui_tty: u8 = 1;
 
 // Start menu state
 var start_menu_open: bool = false;
@@ -56,10 +67,11 @@ const START_BTN_X: i32 = 4;
 const START_BTN_W: i32 = 64;
 const START_BTN_H: i32 = 20;
 const MENU_ITEM_H: i32 = 22;
-const MENU_W: i32 = 200;
-const MENU_ITEMS_COUNT: usize = 8;
+const MENU_W: i32 = 210;
+const MENU_ITEMS_COUNT: usize = 9;
 const menu_items = [_][]const u8{
-    "[>] Terminal / Shell",
+    "[w] Dillo Web Browser",
+    "[>] New Terminal (tty+1)",
     "[*] Clock & Uptime",
     "[@] System Monitor",
     "[#] Calculator",
@@ -68,26 +80,6 @@ const menu_items = [_][]const u8{
     "[i] About Zirconium",
     "[x] Exit to Shell",
 };
-
-// Terminal window state
-const TERM_MAX_LINES: usize = 128;
-const TERM_LINE_LEN: usize = 44;
-const TERM_VISIBLE_LINES: usize = 11;
-var term_lines: [TERM_MAX_LINES][TERM_LINE_LEN]u8 = undefined;
-var term_line_lens: [TERM_MAX_LINES]usize = [_]usize{0} ** TERM_MAX_LINES;
-var term_line_colors: [TERM_MAX_LINES]u32 = [_]u32{0xE0E0E0} ** TERM_MAX_LINES;
-var term_line_count: usize = 0;
-var term_scroll_offset: usize = 0;
-
-var term_cmd_buf: [64]u8 = undefined;
-var term_cmd_len: usize = 0;
-
-// Terminal History
-const TERM_HIST_MAX: usize = 16;
-var term_history: [TERM_HIST_MAX][64]u8 = undefined;
-var term_hist_lens: [TERM_HIST_MAX]usize = [_]usize{0} ** TERM_HIST_MAX;
-var term_hist_count: usize = 0;
-var term_hist_idx: i32 = -1;
 
 // Calculator window state
 var calc_display: [32]u8 = undefined;
@@ -105,7 +97,7 @@ var note_cur_line: usize = 0;
 
 // ----- Window management -----
 
-fn createWindow(c: ContentType, x: i32, y: i32, w: i32, h: i32, title: []const u8) void {
+fn createWindow(c: ContentType, x: i32, y: i32, w: i32, h: i32, title: []const u8, tty_id: u8) void {
     if (num_windows >= MAX_WINDOWS) return;
     const win = &windows[num_windows];
     win.* = .{};
@@ -114,6 +106,12 @@ fn createWindow(c: ContentType, x: i32, y: i32, w: i32, h: i32, title: []const u
     win.y = y;
     win.w = w;
     win.h = h;
+    win.saved_x = x;
+    win.saved_y = y;
+    win.saved_w = w;
+    win.saved_h = h;
+    win.is_maximized = false;
+    win.tty_id = tty_id;
     win.title_len = @min(title.len, 32);
     @memcpy(win.title[0..win.title_len], title[0..win.title_len]);
     win.focused = true;
@@ -123,6 +121,26 @@ fn createWindow(c: ContentType, x: i32, y: i32, w: i32, h: i32, title: []const u
 }
 
 fn openOrCreateWindow(c: ContentType) void {
+    const sw = @as(i32, @intCast(fb.fb_width));
+    const sh = @as(i32, @intCast(fb.fb_height));
+
+    if (c == .terminal) {
+        const assigned_tty = next_gui_tty;
+        next_gui_tty = (next_gui_tty % (@as(u8, @intCast(tty_mod.MAX_TTYS)) - 1)) + 1;
+
+        var title_buf: [32]u8 = undefined;
+        const prefix = "Terminal (tty";
+        @memcpy(title_buf[0..prefix.len], prefix);
+        title_buf[prefix.len] = '0' + assigned_tty;
+        title_buf[prefix.len + 1] = ')';
+        const title_len = prefix.len + 2;
+
+        const offset_x: i32 = 30 + @as(i32, @intCast((num_windows % 5) * 20));
+        const offset_y: i32 = 40 + @as(i32, @intCast((num_windows % 5) * 20));
+        createWindow(.terminal, offset_x, offset_y, 440, 270, title_buf[0..title_len], assigned_tty);
+        return;
+    }
+
     var i: usize = 0;
     while (i < num_windows) : (i += 1) {
         if (windows[i].content == c) {
@@ -132,17 +150,15 @@ fn openOrCreateWindow(c: ContentType) void {
         }
     }
 
-    const sw = @as(i32, @intCast(fb.fb_width));
-    const sh = @as(i32, @intCast(fb.fb_height));
-
     switch (c) {
-        .terminal => createWindow(.terminal, 30, 40, 380, 240, "Terminal"),
-        .calculator => createWindow(.calculator, sw - 210, 50, 180, 190, "Calculator"),
-        .notepad => createWindow(.notepad, @divTrunc(sw, 2) - 140, @divTrunc(sh, 3), 280, 200, "Notepad"),
-        .launcher => createWindow(.launcher, 50, 90, 300, 200, "Program Launcher"),
-        .system => createWindow(.system, sw - 220, 50, 200, 160, "System Monitor"),
-        .clock => createWindow(.clock, 50, 50, 180, 120, "Clock"),
-        .about => createWindow(.about, @divTrunc(sw, 2) - 120, @divTrunc(sh, 4), 240, 140, "Welcome"),
+        .terminal => {},
+        .dillo => createWindow(.dillo, 50, 40, 520, 340, "Dillo Web Browser", 0),
+        .calculator => createWindow(.calculator, sw - 210, 50, 180, 190, "Calculator", 0),
+        .notepad => createWindow(.notepad, @divTrunc(sw, 2) - 140, @divTrunc(sh, 3), 280, 200, "Notepad", 0),
+        .launcher => createWindow(.launcher, 50, 90, 300, 200, "Program Launcher", 0),
+        .system => createWindow(.system, sw - 220, 50, 200, 160, "System Monitor", 0),
+        .clock => createWindow(.clock, 50, 50, 180, 120, "Clock", 0),
+        .about => createWindow(.about, @divTrunc(sw, 2) - 120, @divTrunc(sh, 4), 240, 140, "Welcome", 0),
     }
 }
 
@@ -183,7 +199,6 @@ fn allFocused(fi: usize) void {
 const CURSOR_W: usize = 12;
 const CURSOR_H: usize = 18;
 
-// 0: transparent, 1: black border (0x000000), 2: white interior (0xFFFFFF)
 const CURSOR_PIXELS = [CURSOR_H][CURSOR_W]u8{
     [_]u8{ 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
     [_]u8{ 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
@@ -205,10 +220,6 @@ const CURSOR_PIXELS = [CURSOR_H][CURSOR_W]u8{
     [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
 var cursor_bg: [CURSOR_W * CURSOR_H]u32 = undefined;
-
-fn inBounds(x: i32, y: i32) bool {
-    return x >= 0 and y >= 0 and @as(u32, @intCast(x)) < fb.fb_width and @as(u32, @intCast(y)) < fb.fb_height;
-}
 
 fn saveCursorBg(x: i32, y: i32) void {
     const sw = fb.fb_width;
@@ -281,14 +292,6 @@ fn drawCursorShape() void {
     }
 }
 
-fn getDisplayed(x: i32, y: i32) u32 {
-    return fb.rawPixel(@intCast(x), @intCast(y));
-}
-
-fn putDisplayed(x: i32, y: i32, color: u32) void {
-    fb.rawPutPixel(@intCast(x), @intCast(y), @intCast((color >> 16) & 0xFF), @intCast((color >> 8) & 0xFF), @intCast(color & 0xFF));
-}
-
 fn restoreCursor() void {
     if (!cursor_drawn) return;
     restoreCursorBg();
@@ -321,230 +324,6 @@ fn fmtDec(val: u64, buf: []u8) []const u8 {
     return buf[i..];
 }
 
-fn termAddLineWithColor(s: []const u8, col: u32) void {
-    if (term_line_count < TERM_MAX_LINES) {
-        const len = @min(s.len, TERM_LINE_LEN);
-        @memcpy(term_lines[term_line_count][0..len], s[0..len]);
-        term_line_lens[term_line_count] = len;
-        term_line_colors[term_line_count] = col;
-        term_line_count += 1;
-    } else {
-        var i: usize = 0;
-        while (i < TERM_MAX_LINES - 1) : (i += 1) {
-            term_lines[i] = term_lines[i + 1];
-            term_line_lens[i] = term_line_lens[i + 1];
-            term_line_colors[i] = term_line_colors[i + 1];
-        }
-        const len = @min(s.len, TERM_LINE_LEN);
-        @memcpy(term_lines[TERM_MAX_LINES - 1][0..len], s[0..len]);
-        term_line_lens[TERM_MAX_LINES - 1] = len;
-        term_line_colors[TERM_MAX_LINES - 1] = col;
-    }
-    if (term_line_count > TERM_VISIBLE_LINES) {
-        term_scroll_offset = term_line_count - TERM_VISIBLE_LINES;
-    }
-}
-
-fn termAddLine(s: []const u8) void {
-    termAddLineWithColor(s, 0xE0E0E0);
-}
-
-// ----- Shell Command Execution in GUI Terminal -----
-
-fn executeTermCmd() void {
-    if (term_cmd_len == 0) return;
-    const raw_cmd = term_cmd_buf[0..term_cmd_len];
-
-    // Save to history
-    if (term_hist_count < TERM_HIST_MAX) {
-        @memcpy(term_history[term_hist_count][0..term_cmd_len], raw_cmd);
-        term_hist_lens[term_hist_count] = term_cmd_len;
-        term_hist_count += 1;
-    } else {
-        var h: usize = 0;
-        while (h < TERM_HIST_MAX - 1) : (h += 1) {
-            term_history[h] = term_history[h + 1];
-            term_hist_lens[h] = term_hist_lens[h + 1];
-        }
-        @memcpy(term_history[TERM_HIST_MAX - 1][0..term_cmd_len], raw_cmd);
-        term_hist_lens[TERM_HIST_MAX - 1] = term_cmd_len;
-    }
-    term_hist_idx = -1;
-
-    // Display prompt and command
-    var prompt_buf: [70]u8 = undefined;
-    @memcpy(prompt_buf[0..5], "zig> ");
-    const plen = @min(raw_cmd.len, 60);
-    @memcpy(prompt_buf[5..][0..plen], raw_cmd[0..plen]);
-    termAddLineWithColor(prompt_buf[0 .. 5 + plen], 0x70E070);
-
-    // Parse command and args
-    var cmd_end: usize = raw_cmd.len;
-    var args_start: usize = raw_cmd.len;
-    for (raw_cmd, 0..) |ch, i| {
-        if (ch == ' ') {
-            cmd_end = i;
-            args_start = i + 1;
-            break;
-        }
-    }
-    const cmd_name = raw_cmd[0..cmd_end];
-    const args = if (args_start < raw_cmd.len) raw_cmd[args_start..] else "";
-
-    if (std.mem.eql(u8, cmd_name, "help")) {
-        termAddLineWithColor("=== Zirconium Shell Commands ===", 0x80D0FF);
-        termAddLine("  help, clear, ls, cat, touch, mkdir, rm");
-        termAddLine("  pwd, cd, mem, ps, sysinfo, info, smp");
-        termAddLine("  net, ping, calc, fib, date, time, uname");
-        termAddLine("  exec <path>, user");
-    } else if (std.mem.eql(u8, cmd_name, "clear") or std.mem.eql(u8, cmd_name, "cls")) {
-        term_line_count = 0;
-        term_scroll_offset = 0;
-    } else if (std.mem.eql(u8, cmd_name, "pwd")) {
-        termAddLine(vfs.getCwd());
-    } else if (std.mem.eql(u8, cmd_name, "cd")) {
-        if (args.len == 0) {
-            vfs.setCwd("/");
-        } else {
-            vfs.setCwd(args);
-        }
-        termAddLine(vfs.getCwd());
-    } else if (std.mem.eql(u8, cmd_name, "ls")) {
-        const path = if (args.len > 0) args else vfs.getCwd();
-        var entries: [16]vfs.DirEntry = undefined;
-        const count = vfs.readdir(path, &entries);
-        if (count == 0) {
-            termAddLine("  (empty directory or not found)");
-        } else {
-            var idx: usize = 0;
-            while (idx < count) : (idx += 1) {
-                const name = entries[idx].name[0..entries[idx].name_len];
-                var lbuf: [44]u8 = undefined;
-                if (entries[idx].file_type == .directory) {
-                    @memcpy(lbuf[0..2], "d ");
-                    const nlen = @min(name.len, 38);
-                    @memcpy(lbuf[2..][0..nlen], name[0..nlen]);
-                    lbuf[2 + nlen] = '/';
-                    termAddLineWithColor(lbuf[0 .. 3 + nlen], 0x80D0FF);
-                } else {
-                    @memcpy(lbuf[0..2], "- ");
-                    const nlen = @min(name.len, 39);
-                    @memcpy(lbuf[2..][0..nlen], name[0..nlen]);
-                    termAddLine(lbuf[0 .. 2 + nlen]);
-                }
-            }
-        }
-    } else if (std.mem.eql(u8, cmd_name, "cat")) {
-        if (args.len == 0) {
-            termAddLineWithColor("Usage: cat <file>", 0xFF8080);
-        } else if (vfs.open(args, .{ .read = true })) |handle| {
-            defer vfs.close(handle);
-            var fbuf: [128]u8 = undefined;
-            const n = vfs.read(handle, &fbuf);
-            if (n == 0) {
-                termAddLine("  (empty file)");
-            } else {
-                termAddLine(fbuf[0..n]);
-            }
-        } else {
-            termAddLineWithColor("Error: file not found", 0xFF8080);
-        }
-    } else if (std.mem.eql(u8, cmd_name, "touch")) {
-        if (args.len == 0) {
-            termAddLineWithColor("Usage: touch <file>", 0xFF8080);
-        } else if (vfs.open(args, .{ .write = true, .create = true })) |handle| {
-            vfs.close(handle);
-            termAddLineWithColor("Created file successfully.", 0x80FF80);
-        } else {
-            termAddLineWithColor("Error: cannot create file", 0xFF8080);
-        }
-    } else if (std.mem.eql(u8, cmd_name, "mkdir")) {
-        if (args.len == 0) {
-            termAddLineWithColor("Usage: mkdir <dir>", 0xFF8080);
-        } else if (vfs.mkdir(args)) {
-            termAddLineWithColor("Directory created.", 0x80FF80);
-        } else {
-            termAddLineWithColor("Error: cannot create directory", 0xFF8080);
-        }
-    } else if (std.mem.eql(u8, cmd_name, "rm")) {
-        if (args.len == 0) {
-            termAddLineWithColor("Usage: rm <file>", 0xFF8080);
-        } else if (vfs.unlink(args)) {
-            termAddLineWithColor("File removed.", 0x80FF80);
-        } else {
-            termAddLineWithColor("Error: cannot delete file", 0xFF8080);
-        }
-    } else if (std.mem.eql(u8, cmd_name, "mem")) {
-        var dbuf: [32]u8 = undefined;
-        termAddLineWithColor("=== Memory Information ===", 0x80D0FF);
-        termAddLine("Total Memory: 128 MB");
-        const free_kb = fmtDec(@as(u64, @intCast(pmm.free_pages * 4)), dbuf[0..]);
-        var mbuf: [40]u8 = undefined;
-        @memcpy(mbuf[0..11], "Free PMM:  ");
-        @memcpy(mbuf[11..][0..free_kb.len], free_kb);
-        @memcpy(mbuf[11 + free_kb.len ..][0..3], " KB");
-        termAddLine(mbuf[0 .. 14 + free_kb.len]);
-    } else if (std.mem.eql(u8, cmd_name, "ps")) {
-        termAddLineWithColor("PID  NAME       STATE    TYPE", 0x80D0FF);
-        termAddLine(" 0   idle       running  kernel");
-        termAddLine(" 1   shell/gui  running  kernel");
-    } else if (std.mem.eql(u8, cmd_name, "uname") or std.mem.eql(u8, cmd_name, "uname -a")) {
-        termAddLineWithColor("Linux zirconium 6.0.0-zirconium #1 x86_64", 0x80FF80);
-    } else if (std.mem.eql(u8, cmd_name, "sysinfo") or std.mem.eql(u8, cmd_name, "info")) {
-        termAddLineWithColor("=== System Information ===", 0x80D0FF);
-        termAddLine("OS: Zirconium Kernel (x86_64)");
-        termAddLine("SMP: 4 CPUs Active (ACPI MADT)");
-        termAddLine("Network: e1000 Gigabit Ethernet");
-    } else if (std.mem.eql(u8, cmd_name, "net") or std.mem.eql(u8, cmd_name, "ip")) {
-        termAddLineWithColor("=== Network Status ===", 0x80D0FF);
-        termAddLine("IP: 10.0.2.15  Mask: 255.255.255.0");
-        termAddLine("Gateway: 10.0.2.2  DNS: 10.0.2.3");
-        termAddLine("Device: Intel e1000 (PCI)");
-    } else if (std.mem.eql(u8, cmd_name, "date") or std.mem.eql(u8, cmd_name, "time")) {
-        var tbuf: [32]u8 = undefined;
-        timer.formatTime(tbuf[0..9]);
-        termAddLine(tbuf[0..8]);
-    } else if (std.mem.eql(u8, cmd_name, "fib")) {
-        termAddLine("Fibonacci(10) = 55");
-        termAddLine("Fibonacci(20) = 6765");
-    } else if (std.mem.eql(u8, cmd_name, "user")) {
-        const user_test_bin = @import("user_test_bin");
-        termAddLine("Spawning Ring 3 user ELF test task...");
-        if (scheduler.spawnProgramImage(&user_test_bin.data, "user_test")) |task_id| {
-            scheduler.runTask(task_id);
-            termAddLineWithColor("User task finished OK (Ring 3).", 0x80FF80);
-        } else |err| {
-            termAddLineWithColor(@errorName(err), 0xFF8080);
-        }
-    } else if (std.mem.eql(u8, cmd_name, "exec")) {
-        if (args.len == 0) {
-            termAddLineWithColor("Usage: exec <path> [args...]", 0xFF8080);
-        } else {
-            termAddLine("Spawning program...");
-            if (scheduler.spawnProgram(args, raw_cmd)) |task_id| {
-                scheduler.runTask(task_id);
-                termAddLineWithColor("Program executed successfully.", 0x80FF80);
-            } else |err| {
-                termAddLineWithColor(@errorName(err), 0xFF8080);
-            }
-        }
-    } else {
-        // Try to execute directly from /mnt/disk
-        if (vfs.stat(cmd_name) != null) {
-            if (scheduler.spawnProgram(cmd_name, raw_cmd)) |task_id| {
-                scheduler.runTask(task_id);
-                termAddLineWithColor("Executed OK.", 0x80FF80);
-            } else |err| {
-                termAddLineWithColor(@errorName(err), 0xFF8080);
-            }
-        } else {
-            termAddLineWithColor("Unknown command. Type 'help'.", 0xFF8080);
-        }
-    }
-
-    term_cmd_len = 0;
-}
-
 fn drawWindowBody(win: *Window) void {
     const body_y = win.y + TITLE_H + BORDER;
     const body_h = win.h - TITLE_H - BORDER;
@@ -555,6 +334,62 @@ fn drawWindowBody(win: *Window) void {
     var line_y = body_y + 6;
 
     switch (win.content) {
+        .dillo => {
+            const dillo = dillo_prog.getDillo();
+
+            // Navigation toolbar (URL input + Go button)
+            fb.fillRect(@intCast(win.x + 6), @intCast(body_y + 4), @intCast(win.w - 12), 24, 30, 36, 50);
+            fb.drawRectBorder(@intCast(win.x + 6), @intCast(body_y + 4), @intCast(win.w - 12), 24, 1, 60, 80, 120);
+
+            // Nav buttons [<] [>] [R]
+            fb.drawString(@intCast(win.x + 10), @intCast(body_y + 8), "< > R", 180, 200, 240, 30, 36, 50);
+
+            // URL input box
+            const url_box_x = win.x + 58;
+            const url_box_w = win.w - 110;
+            fb.fillRect(@intCast(url_box_x), @intCast(body_y + 6), @intCast(url_box_w), 20, 18, 22, 32);
+            fb.drawRectBorder(@intCast(url_box_x), @intCast(body_y + 6), @intCast(url_box_w), 20, 1, 70, 95, 140);
+            if (dillo.url_len > 0) {
+                fb.drawString(@intCast(url_box_x + 6), @intCast(body_y + 8), dillo.url_buf[0..dillo.url_len], 255, 255, 255, 18, 22, 32);
+            }
+            if (win.focused) {
+                fb.drawString(@intCast(url_box_x + 6 + @as(i32, @intCast(dillo.url_len)) * 8), @intCast(body_y + 8), "|", 100, 200, 255, 18, 22, 32);
+            }
+
+            // Go Button
+            const go_x = win.x + win.w - 46;
+            fb.fillRect(@intCast(go_x), @intCast(body_y + 6), 38, 20, 40, 80, 150);
+            fb.drawRectBorder(@intCast(go_x), @intCast(body_y + 6), 38, 20, 1, 80, 130, 220);
+            fb.drawString(@intCast(go_x + 8), @intCast(body_y + 8), "Go", 255, 255, 255, 40, 80, 150);
+
+            // Bookmarks toolbar
+            const bmy = body_y + 32;
+            fb.drawString(@intCast(win.x + 10), @intCast(bmy), "[ Home ]", 140, 200, 255, 26, 28, 35);
+            fb.drawString(@intCast(win.x + 85), @intCast(bmy), "[ Kernel ]", 140, 200, 255, 26, 28, 35);
+            fb.drawString(@intCast(win.x + 175), @intCast(bmy), "[ Local Disk ]", 140, 200, 255, 26, 28, 35);
+            fb.drawString(@intCast(win.x + 295), @intCast(bmy), "[ 10.0.2.2 ]", 140, 200, 255, 26, 28, 35);
+
+            // HTML Web page display area
+            const view_y = body_y + 52;
+            const view_h = body_h - 74;
+            fb.fillRect(@intCast(win.x + 6), @intCast(view_y), @intCast(win.w - 12), @intCast(view_h), 16, 20, 30);
+            fb.drawRectBorder(@intCast(win.x + 6), @intCast(view_y), @intCast(win.w - 12), @intCast(view_h), 1, 40, 50, 70);
+
+            var dy = view_y + 6;
+            var idx: usize = 0;
+            while (idx < dillo.line_count and dy < view_y + view_h - 18) : (idx += 1) {
+                const col = dillo.line_colors[idx];
+                fb.drawString(@intCast(win.x + 12), @intCast(dy), dillo.lines[idx][0..dillo.line_lens[idx]], @intCast((col >> 16) & 0xFF), @intCast((col >> 8) & 0xFF), @intCast(col & 0xFF), 16, 20, 30);
+                dy += 18;
+            }
+
+            // Status bar at bottom
+            const sty = win.y + win.h - 18;
+            fb.fillRect(@intCast(win.x + 6), @intCast(sty), @intCast(win.w - 12), 14, 12, 14, 20);
+            if (dillo.status_len > 0) {
+                fb.drawString(@intCast(win.x + 10), @intCast(sty - 1), dillo.status_buf[0..dillo.status_len], 140, 220, 140, 12, 14, 20);
+            }
+        },
         .clock => {
             var tbuf: [32]u8 = undefined;
             timer.formatTime(tbuf[0..9]);
@@ -595,28 +430,43 @@ fn drawWindowBody(win: *Window) void {
         },
         .terminal => {
             fb.fillRect(@intCast(win.x + BORDER), @intCast(body_y), @intCast(win.w - 2 * BORDER), @intCast(body_h), 12, 14, 18);
-            
-            const max_vis = @min(TERM_VISIBLE_LINES, @as(usize, @intCast(@divTrunc(body_h - 24, 18))));
-            var start_idx: usize = term_scroll_offset;
-            if (term_line_count > max_vis and start_idx + max_vis > term_line_count) {
-                start_idx = term_line_count - max_vis;
+            const cur_tty = tty_mod.get(win.tty_id);
+
+            const vis_cols = @min(cur_tty.cols, @as(usize, @intCast(@divTrunc(win.w - 2 * BORDER - 8, 8))));
+            const vis_rows = @min(cur_tty.rows, @as(usize, @intCast(@divTrunc(body_h - 8, 16))));
+
+            const vga_colors = [_]u32{
+                0x000000, 0x0000AA, 0x00AA00, 0x00AAAA,
+                0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
+                0x555555, 0x5555FF, 0x55FF55, 0x55FFFF,
+                0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
+            };
+
+            var r: usize = 0;
+            while (r < vis_rows) : (r += 1) {
+                const py = body_y + 4 + @as(i32, @intCast(r * 16));
+                var c: usize = 0;
+                while (c < vis_cols) : (c += 1) {
+                    const entry = cur_tty.buffer[r][c];
+                    const ch: u8 = @intCast(entry & 0xFF);
+                    const fg_idx: usize = @intCast((entry >> 8) & 0x0F);
+                    const bg_idx: usize = @intCast((entry >> 12) & 0x0F);
+
+                    const fg_col = vga_colors[fg_idx];
+                    const bg_col = if (bg_idx == 0) 0x0C0E12 else vga_colors[bg_idx];
+
+                    const px = tx + @as(i32, @intCast(c * 8));
+                    fb.drawGlyph(@intCast(px), @intCast(py), if (ch == 0) ' ' else ch,
+                        @intCast((fg_col >> 16) & 0xFF), @intCast((fg_col >> 8) & 0xFF), @intCast(fg_col & 0xFF),
+                        @intCast((bg_col >> 16) & 0xFF), @intCast((bg_col >> 8) & 0xFF), @intCast(bg_col & 0xFF));
+                }
             }
 
-            var lidx: usize = start_idx;
-            const end_idx = @min(start_idx + max_vis, term_line_count);
-            while (lidx < end_idx) : (lidx += 1) {
-                const col = term_line_colors[lidx];
-                fb.drawString(@intCast(tx), @intCast(line_y), term_lines[lidx][0..term_line_lens[lidx]], @intCast((col >> 16) & 0xFF), @intCast((col >> 8) & 0xFF), @intCast(col & 0xFF), 12, 14, 18);
-                line_y += 18;
-            }
-
-            // Input prompt
-            fb.drawString(@intCast(tx), @intCast(line_y), "zig> ", 110, 230, 110, 12, 14, 18);
-            if (term_cmd_len > 0) {
-                fb.drawString(@intCast(tx + 40), @intCast(line_y), term_cmd_buf[0..term_cmd_len], 255, 255, 255, 12, 14, 18);
-            }
-            if (win.focused) {
-                fb.drawString(@intCast(tx + 40 + @as(i32, @intCast(term_cmd_len)) * 8), @intCast(line_y), "_", 240, 240, 240, 12, 14, 18);
+            // Draw cursor in TTY terminal
+            if (win.focused and cur_tty.cursor_row < vis_rows and cur_tty.cursor_col < vis_cols) {
+                const cpx = tx + @as(i32, @intCast(cur_tty.cursor_col * 8));
+                const cpy = body_y + 4 + @as(i32, @intCast(cur_tty.cursor_row * 16));
+                fb.drawString(@intCast(cpx), @intCast(cpy), "_", 240, 240, 240, 12, 14, 18);
             }
         },
         .calculator => {
@@ -675,7 +525,7 @@ fn drawWindowBody(win: *Window) void {
                 line_y += 18;
             }
             line_y += 6;
-            fb.drawString(@intCast(tx), @intCast(line_y), "Open Terminal to run them!", 140, 220, 140, 26, 28, 35);
+            fb.drawString(@intCast(tx), @intCast(line_y), "Open Terminal (tty1) to run them!", 140, 220, 140, 26, 28, 35);
         },
         .about => {
             fb.drawString(@intCast(tx), @intCast(line_y), "Zirconium OS GUI v0.4.0", 100, 200, 255, 26, 28, 35);
@@ -684,9 +534,18 @@ fn drawWindowBody(win: *Window) void {
             line_y += 20;
             fb.drawString(@intCast(tx), @intCast(line_y), "Drag windows by titlebar.", 180, 180, 180, 26, 28, 35);
             line_y += 20;
+            fb.drawString(@intCast(tx), @intCast(line_y), "Resize: drag bottom-right.", 140, 220, 140, 26, 28, 35);
+            line_y += 20;
             fb.drawString(@intCast(tx), @intCast(line_y), "Press Esc to exit GUI.", 220, 160, 120, 26, 28, 35);
         },
     }
+
+    // Draw bottom-right resize grip
+    const rx = win.x + win.w - 12;
+    const ry = win.y + win.h - 12;
+    fb.fillRect(@intCast(rx + 6), @intCast(ry + 6), 2, 2, 140, 170, 210);
+    fb.fillRect(@intCast(rx + 2), @intCast(ry + 6), 2, 2, 140, 170, 210);
+    fb.fillRect(@intCast(rx + 6), @intCast(ry + 2), 2, 2, 140, 170, 210);
 }
 
 fn drawWindow(win: *Window) void {
@@ -698,6 +557,13 @@ fn drawWindow(win: *Window) void {
     fb.fillRect(@intCast(win.x + BORDER), @intCast(win.y + BORDER), @intCast(win.w - 2 * BORDER), @intCast(TITLE_H - BORDER), @intCast((bar_color >> 16) & 0xFF), @intCast((bar_color >> 8) & 0xFF), @intCast(bar_color & 0xFF));
     const title_color: u32 = if (win.focused) 0xFFFFFF else 0xB0B0C0;
     fb.drawString(@intCast(win.x + 6), @intCast(win.y + BORDER + 2), win.title[0..win.title_len], @intCast((title_color >> 16) & 0xFF), @intCast((title_color >> 8) & 0xFF), @intCast(title_color & 0xFF), @intCast((bar_color >> 16) & 0xFF), @intCast((bar_color >> 8) & 0xFF), @intCast(bar_color & 0xFF));
+
+    // Maximize / Restore button [□]
+    const max_x = win.x + win.w - 34;
+    const max_y = win.y + 2;
+    fb.fillRect(@intCast(max_x), @intCast(max_y), 14, 14, 50, 90, 150);
+    fb.drawRectBorder(@intCast(max_x), @intCast(max_y), 14, 14, 1, 100, 150, 220);
+    fb.fillRect(@intCast(max_x + 3), @intCast(max_y + 3), 8, 8, 220, 230, 255);
 
     // Close button [X]
     const close_x = win.x + win.w - 18;
@@ -753,11 +619,11 @@ fn drawTaskbar() void {
     while (i < num_windows) : (i += 1) {
         if (!windows[i].visible) continue;
         const wbtn_bg: u32 = if (windows[i].focused) 0x304870 else 0x1E2430;
-        fb.fillRect(@intCast(btn_x), @intCast(ty + 3), 84, @as(u32, @intCast(START_BTN_H)), @intCast((wbtn_bg >> 16) & 0xFF), @intCast((wbtn_bg >> 8) & 0xFF), @intCast(wbtn_bg & 0xFF));
-        fb.drawRectBorder(@intCast(btn_x), @intCast(ty + 3), 84, @as(u32, @intCast(START_BTN_H)), 1, 60, 80, 110);
-        const slen = @min(windows[i].title_len, 9);
+        fb.fillRect(@intCast(btn_x), @intCast(ty + 3), 96, @as(u32, @intCast(START_BTN_H)), @intCast((wbtn_bg >> 16) & 0xFF), @intCast((wbtn_bg >> 8) & 0xFF), @intCast(wbtn_bg & 0xFF));
+        fb.drawRectBorder(@intCast(btn_x), @intCast(ty + 3), 96, @as(u32, @intCast(START_BTN_H)), 1, 60, 80, 110);
+        const slen = @min(windows[i].title_len, 11);
         fb.drawString(@intCast(btn_x + 6), @intCast(ty + 6), windows[i].title[0..slen], 210, 220, 240, @intCast((wbtn_bg >> 16) & 0xFF), @intCast((wbtn_bg >> 8) & 0xFF), @intCast(wbtn_bg & 0xFF));
-        btn_x += 92;
+        btn_x += 104;
     }
 
     drawTaskbarClock();
@@ -867,23 +733,18 @@ pub fn run() void {
         return;
     }
 
+    tty_mod.init();
+
     num_windows = 0;
     drag_index = -1;
+    drag_mode = .none;
     prev_left = false;
     prev_right = false;
     drag_button = .none;
     cursor_drawn = false;
     start_menu_open = false;
     next_clock_tick = timer.ticks;
-
-    // Initialize terminal
-    term_line_count = 0;
-    term_scroll_offset = 0;
-    term_cmd_len = 0;
-    term_hist_count = 0;
-    term_hist_idx = -1;
-    termAddLineWithColor("Zirconium OS Interactive Terminal", 0x80D0FF);
-    termAddLine("Type 'help' to see all available commands.");
+    next_gui_tty = 1;
 
     calc_len = 0;
     calc_val1 = 0;
@@ -901,12 +762,13 @@ pub fn run() void {
 
     drawDesktop();
 
-    createWindow(.about, @divTrunc(sw, 2) - 120, @divTrunc(sh, 4), 240, 140, "Welcome");
-    createWindow(.terminal, 30, 40, 380, 240, "Terminal");
-    createWindow(.clock, sw - 190, 40, 160, 110, "Clock");
+    createWindow(.about, @divTrunc(sw, 2) - 120, @divTrunc(sh, 4), 240, 140, "Welcome", 0);
+    createWindow(.terminal, 30, 40, 440, 270, "Terminal (tty1)", 1);
+    createWindow(.dillo, 50, 40, 520, 340, "Dillo Web Browser", 0);
+    createWindow(.clock, sw - 190, 40, 160, 110, "Clock", 0);
 
     redrawAll();
-    mouse.debug_log = true;
+    mouse.debug_log = false;
 
     while (true) {
         if (kb.pollKey()) |k| {
@@ -914,56 +776,23 @@ pub fn run() void {
 
             if (focusedWindow()) |fwin| {
                 if (fwin.content == .terminal) {
+                    const cur_tty = tty_mod.get(fwin.tty_id);
+                    if (cur_tty.handleKey(k)) {
+                        redrawWindowOnly(fwin);
+                    }
+                } else if (fwin.content == .dillo) {
+                    const dillo = dillo_prog.getDillo();
                     if (k == '\n' or k == '\r') {
-                        executeTermCmd();
+                        dillo.loadUrl(dillo.url_buf[0..dillo.url_len]);
                         redrawWindowOnly(fwin);
-                    } else if (k == 0x08) { // Backspace
-                        if (term_cmd_len > 0) {
-                            term_cmd_len -= 1;
+                    } else if (k == 0x08) {
+                        if (dillo.url_len > 0) {
+                            dillo.url_len -= 1;
                             redrawWindowOnly(fwin);
                         }
-                    } else if (k == kb.KEY_UP) {
-                        if (term_hist_count > 0) {
-                            if (term_hist_idx < 0) {
-                                term_hist_idx = @intCast(term_hist_count - 1);
-                            } else if (term_hist_idx > 0) {
-                                term_hist_idx -= 1;
-                            }
-                            const hidx: usize = @intCast(term_hist_idx);
-                            const hlen = term_hist_lens[hidx];
-                            @memcpy(term_cmd_buf[0..hlen], term_history[hidx][0..hlen]);
-                            term_cmd_len = hlen;
-                            redrawWindowOnly(fwin);
-                        }
-                    } else if (k == kb.KEY_DOWN) {
-                        if (term_hist_idx >= 0) {
-                            if (@as(usize, @intCast(term_hist_idx)) < term_hist_count - 1) {
-                                term_hist_idx += 1;
-                                const hidx: usize = @intCast(term_hist_idx);
-                                const hlen = term_hist_lens[hidx];
-                                @memcpy(term_cmd_buf[0..hlen], term_history[hidx][0..hlen]);
-                                term_cmd_len = hlen;
-                            } else {
-                                term_hist_idx = -1;
-                                term_cmd_len = 0;
-                            }
-                            redrawWindowOnly(fwin);
-                        }
-                    } else if (k == kb.KEY_PAGE_UP) {
-                        if (term_scroll_offset > 2) {
-                            term_scroll_offset -= 2;
-                        } else {
-                            term_scroll_offset = 0;
-                        }
-                        redrawWindowOnly(fwin);
-                    } else if (k == kb.KEY_PAGE_DOWN) {
-                        if (term_scroll_offset + TERM_VISIBLE_LINES < term_line_count) {
-                            term_scroll_offset += 2;
-                        }
-                        redrawWindowOnly(fwin);
-                    } else if (k >= 0x20 and k < 0x7F and term_cmd_len < 60) {
-                        term_cmd_buf[term_cmd_len] = k;
-                        term_cmd_len += 1;
+                    } else if (k >= 0x20 and k < 0x7F and dillo.url_len < 120) {
+                        dillo.url_buf[dillo.url_len] = k;
+                        dillo.url_len += 1;
                         redrawWindowOnly(fwin);
                     }
                 } else if (fwin.content == .notepad) {
@@ -997,21 +826,45 @@ pub fn run() void {
                 const w = &windows[@intCast(drag_index)];
                 const ox = w.x;
                 const oy = w.y;
-                w.x = px - drag_off_x;
-                w.y = py - drag_off_y;
-                if (w.x < 0) w.x = 0;
-                if (w.y < 0) w.y = 0;
-                if (w.x + w.w > sw) w.x = sw - w.w;
-                if (w.y + w.h > sh - TASKBAR_H) w.y = sh - TASKBAR_H - w.h;
-                if (w.x != ox or w.y != oy) {
-                    restoreCursor();
-                    const rx0 = @min(ox, w.x);
-                    const ry0 = @min(oy, w.y);
-                    const rx1 = @max(ox + w.w, w.x + w.w);
-                    const ry1 = @max(oy + w.h, w.y + w.h);
-                    redrawRect(rx0, ry0, rx1 - rx0, ry1 - ry0);
-                    fb.flush();
-                    drawCursor();
+                const ow = w.w;
+                const oh = w.h;
+
+                if (drag_mode == .moving) {
+                    w.x = px - drag_off_x;
+                    w.y = py - drag_off_y;
+                    if (w.x < 0) w.x = 0;
+                    if (w.y < 0) w.y = 0;
+                    if (w.x + w.w > sw) w.x = sw - w.w;
+                    if (w.y + w.h > sh - TASKBAR_H) w.y = sh - TASKBAR_H - w.h;
+
+                    if (w.x != ox or w.y != oy) {
+                        restoreCursor();
+                        const rx0 = @min(ox, w.x);
+                        const ry0 = @min(oy, w.y);
+                        const rx1 = @max(ox + w.w, w.x + w.w);
+                        const ry1 = @max(oy + w.h, w.y + w.h);
+                        redrawRect(rx0, ry0, rx1 - rx0, ry1 - ry0);
+                        fb.flush();
+                        drawCursor();
+                    }
+                } else if (drag_mode == .resizing) {
+                    const new_w = @max(160, @min(sw - w.x, px - w.x + drag_off_x));
+                    const new_h = @max(80, @min(sh - TASKBAR_H - w.y, py - w.y + drag_off_y));
+
+                    if (new_w != ow or new_h != oh) {
+                        w.w = new_w;
+                        w.h = new_h;
+                        w.saved_w = new_w;
+                        w.saved_h = new_h;
+                        restoreCursor();
+                        const rx0 = w.x;
+                        const ry0 = w.y;
+                        const rw = @max(ow, w.w) + 2;
+                        const rh = @max(oh, w.h) + 2;
+                        redrawRect(rx0, ry0, rw, rh);
+                        fb.flush();
+                        drawCursor();
+                    }
                 }
             } else {
                 restoreCursor();
@@ -1041,14 +894,15 @@ pub fn run() void {
                     const item_idx = @as(usize, @intCast(@divTrunc(py - (my + 24), MENU_ITEM_H)));
                     start_menu_open = false;
                     switch (item_idx) {
-                        0 => openOrCreateWindow(.terminal),
-                        1 => openOrCreateWindow(.clock),
-                        2 => openOrCreateWindow(.system),
-                        3 => openOrCreateWindow(.calculator),
-                        4 => openOrCreateWindow(.notepad),
-                        5 => openOrCreateWindow(.launcher),
-                        6 => openOrCreateWindow(.about),
-                        7 => break, // Exit GUI
+                        0 => openOrCreateWindow(.dillo),
+                        1 => openOrCreateWindow(.terminal),
+                        2 => openOrCreateWindow(.clock),
+                        3 => openOrCreateWindow(.system),
+                        4 => openOrCreateWindow(.calculator),
+                        5 => openOrCreateWindow(.notepad),
+                        6 => openOrCreateWindow(.launcher),
+                        7 => openOrCreateWindow(.about),
+                        8 => break, // Exit GUI
                         else => {},
                     }
                     redrawAll();
@@ -1065,18 +919,91 @@ pub fn run() void {
                     // Check [X] close button click
                     const close_x = w.x + w.w - 18;
                     const close_y = w.y + 2;
+                    // Check [□] Maximize / Restore button click
+                    const max_x = w.x + w.w - 34;
+                    const max_y = w.y + 2;
+                    // Check Bottom-Right Resize Grip Handle click
+                    const resize_hit = (px >= w.x + w.w - 16 and px <= w.x + w.w and
+                        py >= w.y + w.h - 16 and py <= w.y + w.h);
+
                     if (px >= close_x and px < close_x + 14 and py >= close_y and py < close_y + 14) {
                         w.visible = false;
                         redrawAll();
+                    } else if (px >= max_x and px < max_x + 14 and py >= max_y and py < max_y + 14) {
+                        if (w.is_maximized) {
+                            w.x = w.saved_x;
+                            w.y = w.saved_y;
+                            w.w = w.saved_w;
+                            w.h = w.saved_h;
+                            w.is_maximized = false;
+                        } else {
+                            w.saved_x = w.x;
+                            w.saved_y = w.y;
+                            w.saved_w = w.w;
+                            w.saved_h = w.h;
+                            w.x = 4;
+                            w.y = 4;
+                            w.w = sw - 8;
+                            w.h = sh - TASKBAR_H - 8;
+                            w.is_maximized = true;
+                        }
+                        redrawAll();
+                    } else if (resize_hit) {
+                        drag_index = hit;
+                        drag_mode = .resizing;
+                        drag_button = if (left_pressed) .left else .right;
+                        drag_off_x = w.w - (px - w.x);
+                        drag_off_y = w.h - (py - w.y);
+                        redrawAll();
                     } else if (py < w.y + TITLE_H) {
                         drag_index = hit;
+                        drag_mode = .moving;
                         drag_button = if (left_pressed) .left else .right;
                         drag_off_x = px - w.x;
                         drag_off_y = py - w.y;
                         redrawAll();
                     } else {
-                        // Body interaction (e.g. calculator buttons)
-                        if (w.content == .calculator) {
+                        // Body interaction for Dillo browser
+                        if (w.content == .dillo) {
+                            const body_y = w.y + TITLE_H + BORDER;
+                            const dillo = dillo_prog.getDillo();
+
+                            // Click Go button
+                            const go_x = w.x + w.w - 46;
+                            if (px >= go_x and px < go_x + 38 and py >= body_y + 6 and py < body_y + 26) {
+                                dillo.loadUrl(dillo.url_buf[0..dillo.url_len]);
+                                redrawWindowOnly(w);
+                            }
+
+                            // Bookmarks click
+                            const bmy = body_y + 32;
+                            if (py >= bmy and py < bmy + 16) {
+                                if (px >= w.x + 10 and px < w.x + 70) {
+                                    dillo.loadUrl("about:dillo");
+                                    redrawWindowOnly(w);
+                                } else if (px >= w.x + 85 and px < w.x + 155) {
+                                    dillo.loadUrl("about:kernel");
+                                    redrawWindowOnly(w);
+                                } else if (px >= w.x + 175 and px < w.x + 270) {
+                                    dillo.loadUrl("file:///mnt/disk/hello.txt");
+                                    redrawWindowOnly(w);
+                                } else if (px >= w.x + 295 and px < w.x + 390) {
+                                    dillo.loadUrl("http://10.0.2.2/");
+                                    redrawWindowOnly(w);
+                                }
+                            }
+
+                            // Click links in content area
+                            const view_y = body_y + 52;
+                            for (dillo.links[0..dillo.link_count]) |lk| {
+                                const lk_y = view_y + 6 + @as(i32, @intCast(lk.line_idx * 18));
+                                if (py >= lk_y and py < lk_y + 16 and px >= w.x + 12 and px < w.x + w.w - 20) {
+                                    dillo.loadUrl(lk.url[0..lk.url_len]);
+                                    redrawWindowOnly(w);
+                                    break;
+                                }
+                            }
+                        } else if (w.content == .calculator) {
                             const body_y = w.y + TITLE_H + BORDER;
                             var row: usize = 0;
                             while (row < 4) : (row += 1) {
@@ -1087,7 +1014,7 @@ pub fn run() void {
                                     if (px >= bx and px < bx + 32 and py >= by and py < by + 22) {
                                         const bidx = row * 4 + col;
                                         handleCalcClick(bidx);
-                                        redrawAll();
+                                        redrawWindowOnly(w);
                                     }
                                 }
                             }
@@ -1098,7 +1025,10 @@ pub fn run() void {
             }
         } else if (drag_index >= 0) {
             const held = if (drag_button == .left) mouse.left_button else mouse.right_button;
-            if (!held) drag_index = -1;
+            if (!held) {
+                drag_index = -1;
+                drag_mode = .none;
+            }
         }
 
         prev_left = mouse.left_button;

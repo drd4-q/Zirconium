@@ -28,6 +28,9 @@ const nano_prog = @import("programs/nano.zig");
 const vfs = @import("fs/vfs.zig");
 const smp = @import("arch/smp.zig");
 const acpi = @import("arch/acpi.zig");
+const usb_prog = @import("programs/usb.zig");
+const usb_drv = @import("drivers/usb.zig");
+const dillo_prog = @import("programs/dillo.zig");
 
 const HISTORY_SIZE: usize = 16;
 const CMD_MAX: usize = 128;
@@ -51,10 +54,10 @@ var env_store: [ENV_MAX]EnvEntry = undefined;
 const commands = [_][]const u8{
     "help",  "info",    "sysinfo", "mem",  "ps",   "clear", "cls",
     "halt",  "reboot",  "calc",    "color","clock","fib",   "matrix",
-    "lua",   "user",    "exec",    "save", "ping", "net",  "get",  "wget",
+    "lua",   "user",    "exec",    "save", "ping", "net",  "get",  "wget", "dillo",
     "set",   "unset",   "env",     "mouse","resolution", "gui",
     "dhcp",  "arpcache","nslookup",
-    "smp",   "cpuinfo",
+    "smp",   "cpuinfo", "usb",     "lsusb",
     "ls",    "cat",     "touch",   "mkdir","rm",  "write", "cd",
     "mount", "nano",
 };
@@ -71,6 +74,9 @@ pub fn run() void {
 
     // Auto-mount FAT16 if block device available
     @import("fs/fat16.zig").init();
+
+    // Init USB host controllers and root hubs
+    usb_drv.init();
 
     mouse.init();
 
@@ -144,6 +150,8 @@ fn execute(cmd: []const u8) void {
         ping_mod.run(args);
     } else if (eql(cmd_name, "get") or eql(cmd_name, "wget")) {
         web.run(args);
+    } else if (eql(cmd_name, "dillo")) {
+        dillo_prog.run(args);
     } else if (eql(cmd_name, "net")) {
         netinfo.run();
     } else if (eql(cmd_name, "sysinfo")) {
@@ -212,6 +220,8 @@ fn execute(cmd: []const u8) void {
         dhcp_mod.run();
     } else if (eql(cmd_name, "smp") or eql(cmd_name, "cpuinfo")) {
         showSmp();
+    } else if (eql(cmd_name, "usb") or eql(cmd_name, "lsusb")) {
+        usb_prog.run();
     } else if (eql(cmd_name, "acpi")) {
         showAcpi();
     } else if (eql(cmd_name, "arpcache")) {
@@ -697,12 +707,14 @@ fn printHelp() void {
     vga.write("    net           Network interface info\n");
     vga.write("    ping [ip]     Ping (default: gateway)\n");
     vga.write("    get <url>     Fetch URL (CLI web browser)\n");
+    vga.write("    dillo [url]   Dillo web browser (GUI / text)\n");
     vga.write("    dhcp          Auto-configure IP via DHCP\n");
     vga.write("    arpcache      Show ARP cache table\n");
     vga.write("    nslookup <h>  DNS lookup\n\n");
-    vga.write("  CPU / ACPI:\n");
+    vga.write("  CPU / Hardware:\n");
     vga.write("    smp/cpuinfo   SMP & per-CPU status\n");
-    vga.write("    acpi          ACPI tables (RSDP, MADT)\n\n");
+    vga.write("    acpi          ACPI tables (RSDP, MADT)\n");
+    vga.write("    usb/lsusb     USB controllers & devices status\n\n");
     vga.write("  Filesystem:\n");
     vga.write("    ls [path]     List directory\n");
     vga.write("    cat <file>    Print file contents\n");

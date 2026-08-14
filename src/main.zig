@@ -8,6 +8,7 @@ pub const scheduler = @import("kernel/scheduler.zig");
 pub const pmm = @import("kernel/pmm.zig");
 pub const vmm = @import("kernel/vmm.zig");
 pub const kalloc = @import("kernel/kalloc.zig");
+pub const tty = @import("system/tty.zig");
 const kernel_init = @import("kernel/init.zig");
 const gdt = @import("arch/gdt.zig");
 
