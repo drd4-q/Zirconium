@@ -349,11 +349,11 @@ fn drawWindowBody(win: *Window) void {
             const url_box_w = win.w - 110;
             fb.fillRect(@intCast(url_box_x), @intCast(body_y + 6), @intCast(url_box_w), 20, 18, 22, 32);
             fb.drawRectBorder(@intCast(url_box_x), @intCast(body_y + 6), @intCast(url_box_w), 20, 1, 70, 95, 140);
-            if (dillo.url_len > 0) {
-                fb.drawString(@intCast(url_box_x + 6), @intCast(body_y + 8), dillo.url_buf[0..dillo.url_len], 255, 255, 255, 18, 22, 32);
+            if (dillo.raw_url_len > 0) {
+                fb.drawString(@intCast(url_box_x + 6), @intCast(body_y + 8), dillo.raw_url_buf[0..dillo.raw_url_len], 255, 255, 255, 18, 22, 32);
             }
             if (win.focused) {
-                fb.drawString(@intCast(url_box_x + 6 + @as(i32, @intCast(dillo.url_len)) * 8), @intCast(body_y + 8), "|", 100, 200, 255, 18, 22, 32);
+                fb.drawString(@intCast(url_box_x + 6 + @as(i32, @intCast(dillo.raw_url_len)) * 8), @intCast(body_y + 8), "|", 100, 200, 255, 18, 22, 32);
             }
 
             // Go Button
@@ -367,7 +367,7 @@ fn drawWindowBody(win: *Window) void {
             fb.drawString(@intCast(win.x + 10), @intCast(bmy), "[ Home ]", 140, 200, 255, 26, 28, 35);
             fb.drawString(@intCast(win.x + 85), @intCast(bmy), "[ Kernel ]", 140, 200, 255, 26, 28, 35);
             fb.drawString(@intCast(win.x + 175), @intCast(bmy), "[ Local Disk ]", 140, 200, 255, 26, 28, 35);
-            fb.drawString(@intCast(win.x + 295), @intCast(bmy), "[ 10.0.2.2 ]", 140, 200, 255, 26, 28, 35);
+            fb.drawString(@intCast(win.x + 295), @intCast(bmy), "[ ACME ]", 140, 200, 255, 26, 28, 35);
 
             // HTML Web page display area
             const view_y = body_y + 52;
@@ -377,9 +377,9 @@ fn drawWindowBody(win: *Window) void {
 
             var dy = view_y + 6;
             var idx: usize = 0;
-            while (idx < dillo.line_count and dy < view_y + view_h - 18) : (idx += 1) {
-                const col = dillo.line_colors[idx];
-                fb.drawString(@intCast(win.x + 12), @intCast(dy), dillo.lines[idx][0..dillo.line_lens[idx]], @intCast((col >> 16) & 0xFF), @intCast((col >> 8) & 0xFF), @intCast(col & 0xFF), 16, 20, 30);
+            while (idx < dillo.doc.line_count and dy < view_y + view_h - 18) : (idx += 1) {
+                const col = dillo.doc.line_colors[idx];
+                fb.drawString(@intCast(win.x + 12), @intCast(dy), dillo.doc.lines[idx][0..dillo.doc.line_lens[idx]], @intCast((col >> 16) & 0xFF), @intCast((col >> 8) & 0xFF), @intCast(col & 0xFF), 16, 20, 30);
                 dy += 18;
             }
 
@@ -783,16 +783,16 @@ pub fn run() void {
                 } else if (fwin.content == .dillo) {
                     const dillo = dillo_prog.getDillo();
                     if (k == '\n' or k == '\r') {
-                        dillo.loadUrl(dillo.url_buf[0..dillo.url_len]);
+                        dillo.loadUrl(dillo.raw_url_buf[0..dillo.raw_url_len]);
                         redrawWindowOnly(fwin);
                     } else if (k == 0x08) {
-                        if (dillo.url_len > 0) {
-                            dillo.url_len -= 1;
+                        if (dillo.raw_url_len > 0) {
+                            dillo.raw_url_len -= 1;
                             redrawWindowOnly(fwin);
                         }
-                    } else if (k >= 0x20 and k < 0x7F and dillo.url_len < 120) {
-                        dillo.url_buf[dillo.url_len] = k;
-                        dillo.url_len += 1;
+                    } else if (k >= 0x20 and k < 0x7F and dillo.raw_url_len < 120) {
+                        dillo.raw_url_buf[dillo.raw_url_len] = k;
+                        dillo.raw_url_len += 1;
                         redrawWindowOnly(fwin);
                     }
                 } else if (fwin.content == .notepad) {
@@ -971,7 +971,7 @@ pub fn run() void {
                             // Click Go button
                             const go_x = w.x + w.w - 46;
                             if (px >= go_x and px < go_x + 38 and py >= body_y + 6 and py < body_y + 26) {
-                                dillo.loadUrl(dillo.url_buf[0..dillo.url_len]);
+                                dillo.loadUrl(dillo.raw_url_buf[0..dillo.raw_url_len]);
                                 redrawWindowOnly(w);
                             }
 
@@ -988,14 +988,14 @@ pub fn run() void {
                                     dillo.loadUrl("file:///mnt/disk/hello.txt");
                                     redrawWindowOnly(w);
                                 } else if (px >= w.x + 295 and px < w.x + 390) {
-                                    dillo.loadUrl("http://10.0.2.2/");
+                                    dillo.loadUrl("http://acme.com/");
                                     redrawWindowOnly(w);
                                 }
                             }
 
                             // Click links in content area
                             const view_y = body_y + 52;
-                            for (dillo.links[0..dillo.link_count]) |lk| {
+                            for (dillo.doc.links[0..dillo.doc.link_count]) |lk| {
                                 const lk_y = view_y + 6 + @as(i32, @intCast(lk.line_idx * 18));
                                 if (py >= lk_y and py < lk_y + 16 and px >= w.x + 12 and px < w.x + w.w - 20) {
                                     dillo.loadUrl(lk.url[0..lk.url_len]);

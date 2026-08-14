@@ -513,9 +513,9 @@ pub const TTY = struct {
                 dillo.loadUrl("about:dillo");
             }
             var lidx: usize = 0;
-            while (lidx < dillo.line_count) : (lidx += 1) {
+            while (lidx < dillo.doc.line_count) : (lidx += 1) {
                 self.write("  ");
-                self.write(dillo.lines[lidx][0..dillo.line_lens[lidx]]);
+                self.write(dillo.doc.lines[lidx][0..dillo.doc.line_lens[lidx]]);
                 self.write("\n");
             }
             self.setColor(.white, .black);
