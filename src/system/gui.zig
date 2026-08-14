@@ -178,27 +178,31 @@ fn allFocused(fi: usize) void {
     }
 }
 
-// ----- Cursor (XOR with saved background) -----
+// ----- Cursor (High-Contrast Arrow Pointer with Crisp Border) -----
 
 const CURSOR_W: usize = 12;
-const CURSOR_H: usize = 16;
-const CURSOR_MASK = [CURSOR_H]u16{
-    0b100000000000,
-    0b110000000000,
-    0b111000000000,
-    0b111100000000,
-    0b111110000000,
-    0b111111000000,
-    0b111111100000,
-    0b111111110000,
-    0b111111111000,
-    0b111111111100,
-    0b111111100000,
-    0b110111100000,
-    0b110011000000,
-    0b100011000000,
-    0b000011000000,
-    0b000011000000,
+const CURSOR_H: usize = 18;
+
+// 0: transparent, 1: black border (0x000000), 2: white interior (0xFFFFFF)
+const CURSOR_PIXELS = [CURSOR_H][CURSOR_W]u8{
+    [_]u8{ 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    [_]u8{ 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    [_]u8{ 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    [_]u8{ 1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0 },
+    [_]u8{ 1, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0 },
+    [_]u8{ 1, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0 },
+    [_]u8{ 1, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0 },
+    [_]u8{ 1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0 },
+    [_]u8{ 1, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0 },
+    [_]u8{ 1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0 },
+    [_]u8{ 1, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 0 },
+    [_]u8{ 1, 2, 2, 1, 2, 2, 1, 0, 0, 0, 0, 0 },
+    [_]u8{ 1, 2, 1, 0, 1, 2, 2, 1, 0, 0, 0, 0 },
+    [_]u8{ 1, 1, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0 },
+    [_]u8{ 1, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0 },
+    [_]u8{ 0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0 },
+    [_]u8{ 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0 },
+    [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
 var cursor_bg: [CURSOR_W * CURSOR_H]u32 = undefined;
 
@@ -207,42 +211,71 @@ fn inBounds(x: i32, y: i32) bool {
 }
 
 fn saveCursorBg(x: i32, y: i32) void {
+    const sw = fb.fb_width;
+    const sh = fb.fb_height;
     var cy: usize = 0;
     while (cy < CURSOR_H) : (cy += 1) {
-        var cx: usize = 0;
-        while (cx < CURSOR_W) : (cx += 1) {
-            const px = x + @as(i32, @intCast(cx));
-            const py = y + @as(i32, @intCast(cy));
-            cursor_bg[cy * CURSOR_W + cx] = if (inBounds(px, py)) getDisplayed(px, py) else 0;
+        const py = y + @as(i32, @intCast(cy));
+        if (py >= 0 and py < sh) {
+            const src_off: u64 = @as(u64, @intCast(py)) * fb.fb_pitch;
+            const src: [*]volatile u32 = @ptrFromInt(fb.fb_addr + src_off);
+            var cx: usize = 0;
+            while (cx < CURSOR_W) : (cx += 1) {
+                const px = x + @as(i32, @intCast(cx));
+                if (px >= 0 and px < sw) {
+                    cursor_bg[cy * CURSOR_W + cx] = src[@intCast(px)];
+                } else {
+                    cursor_bg[cy * CURSOR_W + cx] = 0;
+                }
+            }
+        } else {
+            var cx: usize = 0;
+            while (cx < CURSOR_W) : (cx += 1) {
+                cursor_bg[cy * CURSOR_W + cx] = 0;
+            }
         }
     }
 }
 
 fn restoreCursorBg() void {
+    const sw = fb.fb_width;
+    const sh = fb.fb_height;
     var cy: usize = 0;
     while (cy < CURSOR_H) : (cy += 1) {
-        var cx: usize = 0;
-        while (cx < CURSOR_W) : (cx += 1) {
-            const px = cursor_x + @as(i32, @intCast(cx));
-            const py = cursor_y + @as(i32, @intCast(cy));
-            if (inBounds(px, py)) putDisplayed(px, py, cursor_bg[cy * CURSOR_W + cx]);
+        const py = cursor_y + @as(i32, @intCast(cy));
+        if (py >= 0 and py < sh) {
+            const dst_off: u64 = @as(u64, @intCast(py)) * fb.fb_pitch;
+            const dst: [*]volatile u32 = @ptrFromInt(fb.fb_addr + dst_off);
+            var cx: usize = 0;
+            while (cx < CURSOR_W) : (cx += 1) {
+                const px = cursor_x + @as(i32, @intCast(cx));
+                if (px >= 0 and px < sw) {
+                    dst[@intCast(px)] = cursor_bg[cy * CURSOR_W + cx];
+                }
+            }
         }
     }
 }
 
 fn drawCursorShape() void {
+    const sw = fb.fb_width;
+    const sh = fb.fb_height;
     var cy: usize = 0;
     while (cy < CURSOR_H) : (cy += 1) {
-        const row = CURSOR_MASK[cy];
+        const py = cursor_y + @as(i32, @intCast(cy));
+        if (py < 0 or py >= sh) continue;
+        const dst_off: u64 = @as(u64, @intCast(py)) * fb.fb_pitch;
+        const dst: [*]volatile u32 = @ptrFromInt(fb.fb_addr + dst_off);
+
         var cx: usize = 0;
         while (cx < CURSOR_W) : (cx += 1) {
-            if ((row >> @intCast(CURSOR_W - 1 - cx)) & 1 != 0) {
-                const px = cursor_x + @as(i32, @intCast(cx));
-                const py = cursor_y + @as(i32, @intCast(cy));
-                if (inBounds(px, py)) {
-                    const c = getDisplayed(px, py) ^ 0x00FFFFFF;
-                    putDisplayed(px, py, c);
-                }
+            const px = cursor_x + @as(i32, @intCast(cx));
+            if (px < 0 or px >= sw) continue;
+            const code = CURSOR_PIXELS[cy][cx];
+            if (code == 1) {
+                dst[@intCast(px)] = 0x000000;
+            } else if (code == 2) {
+                dst[@intCast(px)] = 0xFFFFFF;
             }
         }
     }
@@ -808,6 +841,14 @@ fn clockWindow() ?*Window {
     return null;
 }
 
+fn redrawWindowOnly(win: *Window) void {
+    if (!win.visible) return;
+    restoreCursor();
+    drawWindow(win);
+    fb.flush();
+    drawCursor();
+}
+
 fn focusedWindow() ?*Window {
     var i: usize = 0;
     while (i < num_windows) : (i += 1) {
@@ -875,11 +916,11 @@ pub fn run() void {
                 if (fwin.content == .terminal) {
                     if (k == '\n' or k == '\r') {
                         executeTermCmd();
-                        redrawAll();
+                        redrawWindowOnly(fwin);
                     } else if (k == 0x08) { // Backspace
                         if (term_cmd_len > 0) {
                             term_cmd_len -= 1;
-                            redrawAll();
+                            redrawWindowOnly(fwin);
                         }
                     } else if (k == kb.KEY_UP) {
                         if (term_hist_count > 0) {
@@ -892,7 +933,7 @@ pub fn run() void {
                             const hlen = term_hist_lens[hidx];
                             @memcpy(term_cmd_buf[0..hlen], term_history[hidx][0..hlen]);
                             term_cmd_len = hlen;
-                            redrawAll();
+                            redrawWindowOnly(fwin);
                         }
                     } else if (k == kb.KEY_DOWN) {
                         if (term_hist_idx >= 0) {
@@ -906,7 +947,7 @@ pub fn run() void {
                                 term_hist_idx = -1;
                                 term_cmd_len = 0;
                             }
-                            redrawAll();
+                            redrawWindowOnly(fwin);
                         }
                     } else if (k == kb.KEY_PAGE_UP) {
                         if (term_scroll_offset > 2) {
@@ -914,35 +955,35 @@ pub fn run() void {
                         } else {
                             term_scroll_offset = 0;
                         }
-                        redrawAll();
+                        redrawWindowOnly(fwin);
                     } else if (k == kb.KEY_PAGE_DOWN) {
                         if (term_scroll_offset + TERM_VISIBLE_LINES < term_line_count) {
                             term_scroll_offset += 2;
                         }
-                        redrawAll();
+                        redrawWindowOnly(fwin);
                     } else if (k >= 0x20 and k < 0x7F and term_cmd_len < 60) {
                         term_cmd_buf[term_cmd_len] = k;
                         term_cmd_len += 1;
-                        redrawAll();
+                        redrawWindowOnly(fwin);
                     }
                 } else if (fwin.content == .notepad) {
                     if (k == '\n' or k == '\r') {
                         if (note_cur_line < NOTE_MAX_LINES - 1) {
                             note_cur_line += 1;
-                            redrawAll();
+                            redrawWindowOnly(fwin);
                         }
                     } else if (k == 0x08) {
                         if (note_lens[note_cur_line] > 0) {
                             note_lens[note_cur_line] -= 1;
-                            redrawAll();
+                            redrawWindowOnly(fwin);
                         } else if (note_cur_line > 0) {
                             note_cur_line -= 1;
-                            redrawAll();
+                            redrawWindowOnly(fwin);
                         }
                     } else if (k >= 0x20 and k < 0x7F and note_lens[note_cur_line] < NOTE_LINE_LEN - 1) {
                         note_lines[note_cur_line][note_lens[note_cur_line]] = k;
                         note_lens[note_cur_line] += 1;
-                        redrawAll();
+                        redrawWindowOnly(fwin);
                     }
                 }
             }
@@ -963,7 +1004,14 @@ pub fn run() void {
                 if (w.x + w.w > sw) w.x = sw - w.w;
                 if (w.y + w.h > sh - TASKBAR_H) w.y = sh - TASKBAR_H - w.h;
                 if (w.x != ox or w.y != oy) {
-                    redrawAll();
+                    restoreCursor();
+                    const rx0 = @min(ox, w.x);
+                    const ry0 = @min(oy, w.y);
+                    const rx1 = @max(ox + w.w, w.x + w.w);
+                    const ry1 = @max(oy + w.h, w.y + w.h);
+                    redrawRect(rx0, ry0, rx1 - rx0, ry1 - ry0);
+                    fb.flush();
+                    drawCursor();
                 }
             } else {
                 restoreCursor();

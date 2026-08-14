@@ -227,19 +227,26 @@ pub fn rawPixel(x: u32, y: u32) u32 {
     return (@as(u32, ptr[2]) << 16) | (@as(u32, ptr[1]) << 8) | @as(u32, ptr[0]);
 }
 
-fn markDirty(x: u32, y: u32) void {
+pub fn markDirtyRect(x: u32, y: u32, w: u32, h: u32) void {
+    if (w == 0 or h == 0) return;
+    const x1 = x + w;
+    const y1 = y + h;
     if (!has_dirty) {
         dirty_x0 = x;
         dirty_y0 = y;
-        dirty_x1 = x + 1;
-        dirty_y1 = y + 1;
+        dirty_x1 = x1;
+        dirty_y1 = y1;
         has_dirty = true;
     } else {
         if (x < dirty_x0) dirty_x0 = x;
         if (y < dirty_y0) dirty_y0 = y;
-        if (x + 1 > dirty_x1) dirty_x1 = x + 1;
-        if (y + 1 > dirty_y1) dirty_y1 = y + 1;
+        if (x1 > dirty_x1) dirty_x1 = x1;
+        if (y1 > dirty_y1) dirty_y1 = y1;
     }
+}
+
+fn markDirty(x: u32, y: u32) void {
+    markDirtyRect(x, y, 1, 1);
 }
 
 /// Copy the dirty shadow region to the real framebuffer in bulk.
@@ -252,13 +259,13 @@ pub fn flush() void {
     has_dirty = false;
     if (x0 >= x1 or y0 >= y1) return;
 
+    const w = x1 - x0;
     var y: u32 = y0;
     while (y < y1) : (y += 1) {
         const row_off = @as(u64, y) * fb_width + x0;
         const src: [*]const u32 = shadow + row_off;
         const dst_off: u64 = @as(u64, y) * fb_pitch + @as(u64, x0) * 4;
         const dst: [*]volatile u32 = @ptrFromInt(fb_addr + dst_off);
-        const w = x1 - x0;
         var x: u32 = 0;
         while (x < w) : (x += 1) {
             dst[x] = src[x];
@@ -267,11 +274,37 @@ pub fn flush() void {
 }
 
 pub fn fillRect(px: u32, py: u32, pw: u32, ph: u32, r: u8, g: u8, b: u8) void {
-    var y: u32 = py;
-    while (y < py + ph and y < fb_height) : (y += 1) {
-        var x: u32 = px;
-        while (x < px + pw and x < fb_width) : (x += 1) {
-            putPixel(x, y, r, g, b);
+    if (px >= fb_width or py >= fb_height or pw == 0 or ph == 0) return;
+    const x0 = px;
+    const y0 = py;
+    const x1 = @min(px + pw, fb_width);
+    const y1 = @min(py + ph, fb_height);
+    const w = x1 - x0;
+    const col: u32 = (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b);
+
+    if (ensureShadow() and shadow_pixels != 0) {
+        var y: u32 = y0;
+        while (y < y1) : (y += 1) {
+            const row = shadow + @as(u64, y) * fb_width + x0;
+            var x: u32 = 0;
+            while (x < w) : (x += 1) {
+                row[x] = col;
+            }
+        }
+        markDirtyRect(x0, y0, w, y1 - y0);
+        return;
+    }
+
+    var y: u32 = y0;
+    while (y < y1) : (y += 1) {
+        const offset = @as(u64, y) * fb_pitch + @as(u64, x0) * 4;
+        const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
+        var x: u32 = 0;
+        while (x < w) : (x += 1) {
+            ptr[x * 4] = b;
+            ptr[x * 4 + 1] = g;
+            ptr[x * 4 + 2] = r;
+            ptr[x * 4 + 3] = 0;
         }
     }
 }
@@ -283,8 +316,30 @@ pub fn drawRectBorder(px: u32, py: u32, pw: u32, ph: u32, thickness: u32, r: u8,
     fillRect(px + pw - thickness, py, thickness, ph, r, g, b);
 }
 
-pub fn drawGlyph(px: u32, py: u32, ch: u8, fr: u8, fg: u8, fb: u8, br: u8, bg: u8, bb: u8) void {
+pub fn drawGlyph(px: u32, py: u32, ch: u8, fr: u8, fg: u8, fb_col: u8, br: u8, bg: u8, bb: u8) void {
+    if (px + char_w > fb_width or py + char_h > fb_height) return;
     const glyph = getGlyph(ch);
+    const fg_pixel: u32 = (@as(u32, fr) << 16) | (@as(u32, fg) << 8) | @as(u32, fb_col);
+    const bg_pixel: u32 = (@as(u32, br) << 16) | (@as(u32, bg) << 8) | @as(u32, bb);
+
+    if (ensureShadow() and shadow_pixels != 0) {
+        var gy: usize = 0;
+        while (gy < char_h) : (gy += 1) {
+            const bits = glyph[gy];
+            const row = shadow + @as(u64, py + @as(u32, @intCast(gy))) * fb_width + px;
+            var gx: usize = 0;
+            while (gx < char_w) : (gx += 1) {
+                if ((@as(u8, 0x80) >> @intCast(gx)) & bits != 0) {
+                    row[gx] = fg_pixel;
+                } else {
+                    row[gx] = bg_pixel;
+                }
+            }
+        }
+        markDirtyRect(px, py, @as(u32, @intCast(char_w)), @as(u32, @intCast(char_h)));
+        return;
+    }
+
     var gy: usize = 0;
     while (gy < char_h) : (gy += 1) {
         const bits = glyph[gy];
@@ -292,8 +347,8 @@ pub fn drawGlyph(px: u32, py: u32, ch: u8, fr: u8, fg: u8, fb: u8, br: u8, bg: u
         while (gx < char_w) : (gx += 1) {
             const x = px + @as(u32, @intCast(gx));
             const y = py + @as(u32, @intCast(gy));
-            if (@as(u8, 0x80) >> @intCast(gx) & bits != 0) {
-                putPixel(x, y, fr, fg, fb);
+            if ((@as(u8, 0x80) >> @intCast(gx)) & bits != 0) {
+                putPixel(x, y, fr, fg, fb_col);
             } else {
                 putPixel(x, y, br, bg, bb);
             }
@@ -301,11 +356,42 @@ pub fn drawGlyph(px: u32, py: u32, ch: u8, fr: u8, fg: u8, fb: u8, br: u8, bg: u
     }
 }
 
-pub fn drawString(px: u32, py: u32, s: []const u8, fr: u8, fg: u8, fb: u8, br: u8, bg: u8, bb: u8) void {
+pub fn drawString(px: u32, py: u32, s: []const u8, fr: u8, fg: u8, fb_col: u8, br: u8, bg: u8, bb: u8) void {
+    if (py + char_h > fb_height or px >= fb_width or s.len == 0) return;
+    const fg_pixel: u32 = (@as(u32, fr) << 16) | (@as(u32, fg) << 8) | @as(u32, fb_col);
+    const bg_pixel: u32 = (@as(u32, br) << 16) | (@as(u32, bg) << 8) | @as(u32, bb);
+
+    const max_chars = @min(s.len, @as(usize, @intCast((fb_width - px) / char_w)));
+    if (max_chars == 0) return;
+
+    if (ensureShadow() and shadow_pixels != 0) {
+        var c_idx: usize = 0;
+        while (c_idx < max_chars) : (c_idx += 1) {
+            const ch = s[c_idx];
+            const ch_x = px + @as(u32, @intCast(c_idx * char_w));
+            const glyph = getGlyph(ch);
+
+            var gy: usize = 0;
+            while (gy < char_h) : (gy += 1) {
+                const bits = glyph[gy];
+                const row = shadow + @as(u64, py + @as(u32, @intCast(gy))) * fb_width + ch_x;
+                var gx: usize = 0;
+                while (gx < char_w) : (gx += 1) {
+                    if ((@as(u8, 0x80) >> @intCast(gx)) & bits != 0) {
+                        row[gx] = fg_pixel;
+                    } else {
+                        row[gx] = bg_pixel;
+                    }
+                }
+            }
+        }
+        markDirtyRect(px, py, @as(u32, @intCast(max_chars * char_w)), @as(u32, @intCast(char_h)));
+        return;
+    }
+
     var x = px;
-    for (s) |ch| {
-        if (x + char_w >= fb_width) break;
-        drawGlyph(x, py, ch, fr, fg, fb, br, bg, bb);
+    for (s[0..max_chars]) |ch| {
+        drawGlyph(x, py, ch, fr, fg, fb_col, br, bg, bb);
         x += char_w;
     }
 }
