@@ -3,7 +3,7 @@
 .set MBALIGN, 1 << 0
 .set MEMINFO, 1 << 1
 .set VIDEO,   1 << 2
-.set FLAGS,    MBALIGN | MEMINFO | VIDEO
+.set FLAGS,    MBALIGN | MEMINFO | VIDEO 
 .set MAGIC,    0x1BADB002
 .set CHECKSUM, -(MAGIC + FLAGS)
 
@@ -16,12 +16,11 @@
     .long MAGIC
     .long FLAGS
     .long CHECKSUM
-    // Video request: mode_type (0 = linear), width, height, depth
+    //video request: mode_typee (0 = linear)
     .long 0
-    .long 1024
-    .long 768
+    .long 0
+    .long 0
     .long 32
-
 .section .data, "aw", @progbits
     .align 4
 mb_magic_saved: .long 0
