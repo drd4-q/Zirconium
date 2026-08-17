@@ -15,7 +15,52 @@ var has_dirty: bool = false;
 
 // Covers every resolution the shell's `resolution` command supports,
 // plus common QEMU default modes like 1280x800 (GRUB may pick these on boot).
-const MAX_SHADOW_PIXELS: usize = 1920 * 1080;
+// Covers every resolution up to 4K (3840x2160)
+const MAX_SHADOW_PIXELS: usize = 3840 * 2160;
+
+// Static page tables for mapping framebuffer when fb_addr is above identity-mapped range
+var early_page_tables: [16][512]u64 align(4096) = [_][512]u64{[_]u64{0} ** 512} ** 16;
+var early_pt_used: usize = 0;
+
+fn mapFbRange(paddr: u64, size: u64) void {
+    if (paddr == 0 or size == 0) return;
+    const cr3 = asm volatile ("movq %%cr3, %[ret]" : [ret] "=r" (-> u64));
+    const pml4: [*]u64 = @ptrFromInt(cr3 & 0x000FFFFFFFFFF000);
+
+    var cur = paddr & ~@as(u64, 0x1FFFFF); // 2MB aligned
+    const end = (paddr + size + 0x1FFFFF) & ~@as(u64, 0x1FFFFF);
+
+    while (cur < end) : (cur += 0x200000) {
+        const pml4_idx = (cur >> 39) & 0x1FF;
+        const pdpt_idx = (cur >> 30) & 0x1FF;
+        const pd_idx = (cur >> 21) & 0x1FF;
+
+        var pdpt: [*]u64 = undefined;
+        if (pml4[pml4_idx] & 1 != 0) {
+            pdpt = @ptrFromInt(pml4[pml4_idx] & 0x000FFFFFFFFFF000);
+        } else {
+            if (early_pt_used >= early_page_tables.len) return;
+            pdpt = &early_page_tables[early_pt_used];
+            early_pt_used += 1;
+            pml4[pml4_idx] = @intFromPtr(pdpt) | 0x03; // PRESENT | WRITE
+        }
+
+        var pd: [*]u64 = undefined;
+        if (pdpt[pdpt_idx] & 1 != 0) {
+            if (pdpt[pdpt_idx] & 0x80 != 0) continue; // 1GB page
+            pd = @ptrFromInt(pdpt[pdpt_idx] & 0x000FFFFFFFFFF000);
+        } else {
+            if (early_pt_used >= early_page_tables.len) return;
+            pd = &early_page_tables[early_pt_used];
+            early_pt_used += 1;
+            pdpt[pdpt_idx] = @intFromPtr(pd) | 0x03; // PRESENT | WRITE
+        }
+
+        // Map 2MB page (PRESENT | WRITE | LARGE_PAGE = 0x83)
+        pd[pd_idx] = cur | 0x83;
+        asm volatile ("invlpg (%[addr])" : : [addr] "r" (cur) : .{ .memory = true });
+    }
+}
 
 fn ensureShadow() bool {
     if (shadow_pixels != 0) return true;
@@ -24,7 +69,7 @@ fn ensureShadow() bool {
     //  corrupt the uninitialized PMM bitmap.)
     if (root.pmm.free_pages == 0) return false;
     const pixels = @as(u64, fb_width) * fb_height;
-    if (pixels > MAX_SHADOW_PIXELS) return false;
+    if (pixels == 0 or pixels > MAX_SHADOW_PIXELS) return false;
     const bytes = (pixels * 4 + 4095) & ~@as(u64, 4095);
     const pages = @as(usize, @intCast(bytes / 4096));
     const phys = root.pmm.allocPages(pages) orelse return false;
@@ -122,7 +167,14 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
     fb_type = @as(u32, @intCast(mbi[109]));
 
     if (fb_addr == 0 or fb_width == 0 or fb_height == 0) return;
-    if (fb_bpp != 32) return;
+    if (fb_bpp != 32 and fb_bpp != 24) return;
+    if (fb_pitch == 0) {
+        fb_pitch = fb_width * (fb_bpp / 8);
+    }
+
+    // Ensure framebuffer range is identity-mapped in page tables (crucial if fb_addr >= 8GB)
+    const total_fb_bytes = @as(u64, fb_pitch) * fb_height;
+    mapFbRange(fb_addr, total_fb_bytes);
 
     cols = fb_width / char_w;
     rows = fb_height / char_h;
@@ -188,6 +240,14 @@ pub fn putPixel(x: u32, y: u32, r: u8, g: u8, b: u8) void {
         markDirty(x, y);
         return;
     }
+    if (fb_bpp == 24) {
+        const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 3;
+        const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
+        ptr[0] = b;
+        ptr[1] = g;
+        ptr[2] = r;
+        return;
+    }
     const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 4;
     const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
     ptr[0] = b;
@@ -201,6 +261,11 @@ pub fn getPixel(x: u32, y: u32) u32 {
     if (shadow_pixels != 0 and x < fb_width and y < fb_height) {
         return shadow[@as(u64, y) * fb_width + x];
     }
+    if (fb_bpp == 24) {
+        const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 3;
+        const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
+        return (@as(u32, ptr[2]) << 16) | (@as(u32, ptr[1]) << 8) | @as(u32, ptr[0]);
+    }
     const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 4;
     const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
     return (@as(u32, ptr[2]) << 16) | (@as(u32, ptr[1]) << 8) | @as(u32, ptr[0]);
@@ -212,6 +277,14 @@ pub fn getPixel(x: u32, y: u32) u32 {
 // shadow -> flush pipeline.
 pub fn rawPutPixel(x: u32, y: u32, r: u8, g: u8, b: u8) void {
     if (x >= fb_width or y >= fb_height) return;
+    if (fb_bpp == 24) {
+        const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 3;
+        const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
+        ptr[0] = b;
+        ptr[1] = g;
+        ptr[2] = r;
+        return;
+    }
     const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 4;
     const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
     ptr[0] = b;
@@ -222,6 +295,11 @@ pub fn rawPutPixel(x: u32, y: u32, r: u8, g: u8, b: u8) void {
 
 pub fn rawPixel(x: u32, y: u32) u32 {
     if (x >= fb_width or y >= fb_height) return 0;
+    if (fb_bpp == 24) {
+        const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 3;
+        const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
+        return (@as(u32, ptr[2]) << 16) | (@as(u32, ptr[1]) << 8) | @as(u32, ptr[0]);
+    }
     const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 4;
     const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
     return (@as(u32, ptr[2]) << 16) | (@as(u32, ptr[1]) << 8) | @as(u32, ptr[0]);
@@ -261,14 +339,30 @@ pub fn flush() void {
 
     const w = x1 - x0;
     var y: u32 = y0;
-    while (y < y1) : (y += 1) {
-        const row_off = @as(u64, y) * fb_width + x0;
-        const src: [*]const u32 = shadow + row_off;
-        const dst_off: u64 = @as(u64, y) * fb_pitch + @as(u64, x0) * 4;
-        const dst: [*]volatile u32 = @ptrFromInt(fb_addr + dst_off);
-        var x: u32 = 0;
-        while (x < w) : (x += 1) {
-            dst[x] = src[x];
+    if (fb_bpp == 24) {
+        while (y < y1) : (y += 1) {
+            const row_off = @as(u64, y) * fb_width + x0;
+            const src: [*]const u32 = shadow + row_off;
+            const dst_off: u64 = @as(u64, y) * fb_pitch + @as(u64, x0) * 3;
+            const dst: [*]volatile u8 = @ptrFromInt(fb_addr + dst_off);
+            var x: u32 = 0;
+            while (x < w) : (x += 1) {
+                const px = src[x];
+                dst[x * 3 + 0] = @intCast(px & 0xFF);
+                dst[x * 3 + 1] = @intCast((px >> 8) & 0xFF);
+                dst[x * 3 + 2] = @intCast((px >> 16) & 0xFF);
+            }
+        }
+    } else {
+        while (y < y1) : (y += 1) {
+            const row_off = @as(u64, y) * fb_width + x0;
+            const src: [*]const u32 = shadow + row_off;
+            const dst_off: u64 = @as(u64, y) * fb_pitch + @as(u64, x0) * 4;
+            const dst: [*]volatile u32 = @ptrFromInt(fb_addr + dst_off);
+            var x: u32 = 0;
+            while (x < w) : (x += 1) {
+                dst[x] = src[x];
+            }
         }
     }
 }
@@ -296,15 +390,28 @@ pub fn fillRect(px: u32, py: u32, pw: u32, ph: u32, r: u8, g: u8, b: u8) void {
     }
 
     var y: u32 = y0;
-    while (y < y1) : (y += 1) {
-        const offset = @as(u64, y) * fb_pitch + @as(u64, x0) * 4;
-        const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
-        var x: u32 = 0;
-        while (x < w) : (x += 1) {
-            ptr[x * 4] = b;
-            ptr[x * 4 + 1] = g;
-            ptr[x * 4 + 2] = r;
-            ptr[x * 4 + 3] = 0;
+    if (fb_bpp == 24) {
+        while (y < y1) : (y += 1) {
+            const offset = @as(u64, y) * fb_pitch + @as(u64, x0) * 3;
+            const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
+            var x: u32 = 0;
+            while (x < w) : (x += 1) {
+                ptr[x * 3 + 0] = b;
+                ptr[x * 3 + 1] = g;
+                ptr[x * 3 + 2] = r;
+            }
+        }
+    } else {
+        while (y < y1) : (y += 1) {
+            const offset = @as(u64, y) * fb_pitch + @as(u64, x0) * 4;
+            const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
+            var x: u32 = 0;
+            while (x < w) : (x += 1) {
+                ptr[x * 4] = b;
+                ptr[x * 4 + 1] = g;
+                ptr[x * 4 + 2] = r;
+                ptr[x * 4 + 3] = 0;
+            }
         }
     }
 }
@@ -494,11 +601,20 @@ pub fn scrollUp() void {
             const src_sh: [*]const u32 = shadow + @as(u64, py) * fb_width;
             @memcpy(dst_sh[0..text_w], src_sh[0..text_w]);
 
-            const dst_lfb: [*]volatile u32 = @ptrFromInt(fb_addr + @as(u64, py - row_px) * fb_pitch);
-            const src_lfb: [*]volatile u32 = @ptrFromInt(fb_addr + @as(u64, py) * fb_pitch);
-            var x: usize = 0;
-            while (x < text_w) : (x += 1) {
-                dst_lfb[x] = src_lfb[x];
+            if (fb_bpp == 24) {
+                const dst_lfb: [*]volatile u8 = @ptrFromInt(fb_addr + @as(u64, py - row_px) * fb_pitch);
+                const src_lfb: [*]volatile u8 = @ptrFromInt(fb_addr + @as(u64, py) * fb_pitch);
+                var x: usize = 0;
+                while (x < text_w * 3) : (x += 1) {
+                    dst_lfb[x] = src_lfb[x];
+                }
+            } else {
+                const dst_lfb: [*]volatile u32 = @ptrFromInt(fb_addr + @as(u64, py - row_px) * fb_pitch);
+                const src_lfb: [*]volatile u32 = @ptrFromInt(fb_addr + @as(u64, py) * fb_pitch);
+                var x: usize = 0;
+                while (x < text_w) : (x += 1) {
+                    dst_lfb[x] = src_lfb[x];
+                }
             }
         }
 

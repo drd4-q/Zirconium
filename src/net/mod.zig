@@ -2,10 +2,14 @@ const root = @import("root");
 const vga = root.vga;
 const port = root.serial;
 const e1000 = @import("../drivers/e1000.zig");
+const rtl8169 = @import("../drivers/rtl8169.zig");
 const arp = @import("arp.zig");
 const arp_cache = @import("arp_cache.zig");
 const ip_mod = @import("ip.zig");
 const dhcp_mod = @import("dhcp.zig");
+
+pub const NicType = enum { none, e1000, rtl8169 };
+pub var active_nic: NicType = .none;
 
 pub var gateway_ip: [4]u8 = .{ 10, 0, 2, 2 };
 pub var our_ip: [4]u8 = .{ 10, 0, 2, 15 };
@@ -17,8 +21,24 @@ pub var mac_known: bool = false;
 pub var rx_buf: [2048]u8 = undefined;
 pub var send_buf: [1514]u8 = undefined;
 
+pub fn hasNic() bool {
+    return active_nic != .none;
+}
+
 pub fn init() void {
-    @memcpy(&our_mac, &e1000.mac);
+    if (e1000.initialized) {
+        active_nic = .e1000;
+        @memcpy(&our_mac, &e1000.mac);
+    } else if (rtl8169.initialized) {
+        active_nic = .rtl8169;
+        @memcpy(&our_mac, &rtl8169.mac);
+    } else {
+        active_nic = .none;
+        our_mac = [_]u8{ 0, 0, 0, 0, 0, 0 };
+        port.serialWrite("[NET] No supported NIC detected\n");
+        return;
+    }
+
     arp_cache.init();
     port.serialWrite("[NET] IP: ");
     printIpSerial(our_ip);
@@ -37,11 +57,13 @@ pub fn init() void {
 }
 
 pub fn tick() void {
+    if (!hasNic()) return;
     arp_cache.tick();
     @import("tcp.zig").retxTick();
 }
 
 pub fn poll() void {
+    if (!hasNic()) return;
     // Re-entrancy guard: packet handlers transmit (ACKs, ICMP replies) and the
     // transmit path may want to ARP, which would call back into poll() and
     // overwrite `rx_buf` while the outer handler is still parsing it.
@@ -54,10 +76,15 @@ pub fn poll() void {
     // batch) and the handshake appeared to time out.
     var drained: usize = 0;
     while (drained < 32) : (drained += 1) {
-        const len = e1000.receive(&rx_buf) orelse return;
+        const len = switch (active_nic) {
+            .e1000 => e1000.receive(&rx_buf),
+            .rtl8169 => rtl8169.receive(&rx_buf),
+            .none => return,
+        } orelse return;
         handleFrame(rx_buf[0..len]);
     }
 }
+
 
 var polling: bool = false;
 
@@ -119,6 +146,7 @@ pub fn nextHopMac(dst: [4]u8) ?[6]u8 {
 }
 
 pub fn ensureArp(target_ip: [4]u8) bool {
+    if (!hasNic()) return false;
     if (arp_cache.lookup(target_ip)) |_| return true;
 
     const timer = @import("../drivers/timer.zig");
@@ -138,10 +166,12 @@ pub fn ensureArp(target_ip: [4]u8) bool {
 }
 
 pub fn resolveGateway() bool {
+    if (!hasNic()) return false;
     return ensureArp(gateway_ip);
 }
 
 pub fn sendFrame(dst: [6]u8, eth_type_val: u16, payload: []const u8) void {
+    if (!hasNic()) return;
     const total = 14 + payload.len;
 
     send_buf[0] = dst[0]; send_buf[1] = dst[1]; send_buf[2] = dst[2];
@@ -156,8 +186,13 @@ pub fn sendFrame(dst: [6]u8, eth_type_val: u16, payload: []const u8) void {
         send_buf[14 + i] = payload[i];
     }
 
-    e1000.transmit(send_buf[0..total]);
+    switch (active_nic) {
+        .e1000 => e1000.transmit(send_buf[0..total]),
+        .rtl8169 => rtl8169.transmit(send_buf[0..total]),
+        .none => {},
+    }
 }
+
 
 pub fn printIp(ip: [4]u8) void {
     vga.writeDec(ip[0]);

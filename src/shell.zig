@@ -72,8 +72,15 @@ pub fn run() void {
     // Try to init virtio-blk disk
     @import("drivers/virtio_blk.zig").init();
 
-    // Auto-mount FAT16 if block device available
+    // Try to init SATA AHCI disks
+    _ = @import("drivers/ahci.zig").init();
+
+    // Scan MBR & GPT partition tables on all block devices
+    @import("fs/partition.zig").scanAll();
+
+    // Auto-mount FAT16 if block device / partition available
     @import("fs/fat16.zig").init();
+
 
     // Init USB host controllers and root hubs
     usb_drv.init();
@@ -86,13 +93,22 @@ pub fn run() void {
     printBanner();
 
     vga.setColor(.light_gray, .black);
-    vga.write("  IRQ-based: keyboard (IRQ1), timer 100Hz (IRQ0)\n");
-    if (pci.findByClass(0x02, 0x00) != null) {
-        vga.write("  Network: e1000, IP: 10.0.2.15, GW: 10.0.2.2\n");
+    vga.write("  IRQ-based: keyboard (IRQ1), timer 100Hz (IRQ0/APIC)\n");
+    if (net.hasNic()) {
+        const nic_name = switch (net.active_nic) {
+            .e1000 => "e1000",
+            .rtl8169 => "RTL8168/8169",
+            .none => "none",
+        };
+        vga.write("  Network: ");
+        vga.write(nic_name);
+        vga.write(", IP: 10.0.2.15, GW: 10.0.2.2\n");
     } else {
         vga.write("  Network: none\n");
     }
     vga.setColor(.white, .black);
+
+
     vga.write("\n");
 
     while (true) {

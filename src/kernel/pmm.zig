@@ -126,6 +126,27 @@ pub fn init(kernel_start: usize, kernel_end: usize) void {
         total_pages = end_page;
     }
 
+    // Protect framebuffer physical memory if present in physical RAM range
+    const fb_mod = @import("../system/framebuffer.zig");
+    if (fb_mod.active and fb_mod.fb_addr != 0) {
+        const fb_start = fb_mod.fb_addr;
+        const fb_end = fb_start + @as(u64, fb_mod.fb_pitch) * fb_mod.fb_height;
+        if (fb_start < MAX_MEMORY) {
+            var p: usize = @intCast(fb_start / PAGE_SIZE);
+            const end_p: usize = @intCast(@min(fb_end + PAGE_SIZE - 1, @as(u64, MAX_MEMORY)) / PAGE_SIZE);
+            while (p < end_p) : (p += 1) {
+                if (p < TOTAL_PAGES) {
+                    const byte_idx = p / 8;
+                    const bit_idx: u3 = @intCast(p % 8);
+                    if (bitmap[byte_idx] & (@as(u8, 1) << bit_idx) == 0) {
+                        bitmap[byte_idx] |= @as(u8, 1) << bit_idx;
+                        if (free_pages > 0) free_pages -= 1;
+                    }
+                }
+            }
+        }
+    }
+
     serial.serialWrite("[MEM] Physical memory manager initialized\n");
     serial.serialWrite("[MEM] Total pages: ");
     serial.serialWriteDec(total_pages);

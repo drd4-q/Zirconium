@@ -515,6 +515,11 @@ fn nativeDispatch(frame: *isr_mod.InterruptFrame) void {
             const user_ip: [*]const u8 = @ptrFromInt(ip_ptr);
             const dst_ip = [4]u8{ user_ip[0], user_ip[1], user_ip[2], user_ip[3] };
 
+            if (!@import("../net/mod.zig").hasNic()) {
+                frame.rax = @bitCast(@as(isize, -100)); // ENETDOWN
+                return;
+            }
+
             // Configure the socket's own connection (not an orphaned one like
             // the old code did), then block until the handshake completes.
             tcp.openConn(conn, dst_ip, @intCast(port));
@@ -523,6 +528,7 @@ fn nativeDispatch(frame: *isr_mod.InterruptFrame) void {
             } else {
                 frame.rax = @bitCast(@as(isize, -111)); // ECONNREFUSED / timeout
             }
+
         },
         .SYS_SEND => {
             // rdi = sockfd, rsi = buf_ptr, rdx = len

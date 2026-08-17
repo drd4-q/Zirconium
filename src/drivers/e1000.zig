@@ -43,6 +43,7 @@ const TCTL_EN: u32 = 1 << 1; // Transmit enable
 const TCTL_PSP: u32 = 1 << 3; // Pad short packets
 
 var mmio_base: u64 = 0;
+pub var initialized: bool = false;
 
 // Descriptor rings must be 16-byte aligned, placed in a static buffer.
 // extern struct: guaranteed C ABI layout (exact e1000 descriptor bit layout).
@@ -112,6 +113,20 @@ fn readEeprom(addr: u32) u16 {
 }
 
 pub fn init(dev: *pci.PciDevice) bool {
+    if (dev.vendor_id != 0x8086) {
+        return false;
+    }
+    // Check for e1000-family device IDs (82540EM=0x100E, 82545EM=0x100F, 82543GC=0x1004, 82544EI=0x1008, 82574L=0x10D3, etc.)
+    switch (dev.device_id) {
+        0x100E, 0x100F, 0x1004, 0x1008, 0x107C, 0x10D3, 0x10EA, 0x1539, 0x1502, 0x1503 => {},
+        else => {
+            port.serialWrite("[E1000] Non-e1000 Intel device ID 0x");
+            port.serialWriteHex(dev.device_id);
+            port.serialWrite("\n");
+            return false;
+        },
+    }
+
     mmio_base = @as(u64, dev.bar0 & 0xFFFFFFF0);
     port.serialWrite("[E1000] MMIO base: 0x");
     port.serialWriteHex(mmio_base);
@@ -201,6 +216,7 @@ pub fn init(dev: *pci.PciDevice) bool {
     // RXDW interrupt on a vector with no handler just burns time.
     mmioWrite(IMS, 0x00000000);
 
+    initialized = true;
     port.serialWrite("[E1000] Init complete, link up\n");
     return true;
 }
@@ -261,6 +277,7 @@ fn setupTx() void {
 pub var debug_trace: bool = false;
 
 pub fn transmit(data: []const u8) void {
+    if (!initialized or mmio_base == 0) return;
     if (data.len == 0) return;
     const len = @min(data.len, PKT_SIZE);
 
@@ -305,6 +322,7 @@ pub fn transmit(data: []const u8) void {
 }
 
 pub fn receive(buf: []u8) ?usize {
+    if (!initialized or mmio_base == 0) return null;
     const status = rx_ring[rx_cur].status;
     if (status & 0x01 == 0) { // DD
         return null;

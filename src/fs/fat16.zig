@@ -882,20 +882,17 @@ fn fat16Seek(fs: *vfs.FileSystem, handle: *vfs.FileHandle, offset: u64) bool {
     return true;
 }
 
-pub fn init() void {
-    const dev = blockdev.getDevice(0) orelse {
-        serial.serialWrite("[FAT16] No block device found\n");
-        return;
-    };
-
+fn tryMount(dev: *blockdev.BlockDevice) bool {
     fat_dev = dev;
 
     // Read boot sector
     var buf: [SECTOR_SIZE]u8 = undefined;
     if (!readSector(0, &buf)) {
-        serial.serialWrite("[FAT16] Failed to read boot sector\n");
-        return;
+        return false;
     }
+
+    // Check FAT boot signature
+    if (buf[510] != 0x55 or buf[511] != 0xAA) return false;
 
     boot_sector = .{
         .bytes_per_sector = @as(u16, buf[11]) | (@as(u16, buf[12]) << 8),
@@ -912,18 +909,10 @@ pub fn init() void {
         .total_sectors_32 = @as(u32, buf[32]) | (@as(u32, buf[33]) << 8) | (@as(u32, buf[34]) << 16) | (@as(u32, buf[35]) << 24),
     };
 
-    // Validate
-    if (boot_sector.bytes_per_sector != SECTOR_SIZE) {
-        serial.serialWrite("[FAT16] Invalid bytes per sector: ");
-        serial.serialWriteDec(boot_sector.bytes_per_sector);
-        serial.serialWrite("\n");
-        return;
-    }
-
-    if (boot_sector.fat_size_sectors == 0) {
-        serial.serialWrite("[FAT16] FAT size is 0\n");
-        return;
-    }
+    // Validate FAT16 characteristics
+    if (boot_sector.bytes_per_sector != SECTOR_SIZE) return false;
+    if (boot_sector.fat_size_sectors == 0) return false;
+    if (boot_sector.sectors_per_cluster == 0) return false;
 
     // Calculate layout
     fat_start_sector = boot_sector.reserved_sectors;
@@ -931,14 +920,15 @@ pub fn init() void {
     const root_dir_sectors = (@as(u64, boot_sector.root_entry_count) * 32 + SECTOR_SIZE - 1) / SECTOR_SIZE;
     data_start = root_dir_start + root_dir_sectors;
 
-    serial.serialWrite("[FAT16] FAT16 found! Sectors/cluster=");
+    serial.serialWrite("[FAT16] FAT16 found on ");
+    const dev_name_len = std.mem.indexOfScalar(u8, &dev.name, 0) orelse dev.name.len;
+    serial.serialWrite(dev.name[0..dev_name_len]);
+    serial.serialWrite("! Sectors/cluster=");
     serial.serialWriteDec(boot_sector.sectors_per_cluster);
     serial.serialWrite(", FAT size=");
     serial.serialWriteDec(boot_sector.fat_size_sectors);
     serial.serialWrite(", root entries=");
     serial.serialWriteDec(boot_sector.root_entry_count);
-    serial.serialWrite(", total sectors=");
-    serial.serialWriteDec(boot_sector.total_sectors_16);
     serial.serialWrite("\n");
 
     // Mount
@@ -972,12 +962,25 @@ pub fn init() void {
 
     if (vfs.mount("fat16", "/mnt/disk", &fs)) {
         fs_mounted = true;
+        serial.serialWrite("[FAT16] Auto-mounted at /mnt/disk\n");
         vga.setColor(.green, .black);
         vga.write("  [FAT16] Auto-mounted at /mnt/disk\n");
         vga.setColor(.white, .black);
+        return true;
     }
+    return false;
+}
+
+pub fn init() void {
+    var i: usize = 0;
+    while (i < blockdev.device_count) : (i += 1) {
+        const dev = blockdev.devices[i];
+        if (tryMount(dev)) return;
+    }
+    serial.serialWrite("[FAT16] No FAT16 filesystem found on any block device\n");
 }
 
 pub fn isMounted() bool {
     return fs_mounted;
 }
+

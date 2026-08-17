@@ -16,11 +16,18 @@
     .long MAGIC
     .long FLAGS
     .long CHECKSUM
-    // video request: mode_type (0 = linear), width, height, depth
-    .long 0
+    // 5 unused aout-kludge address fields (required by multiboot 1 header offset layout when VIDEO bit is set)
+    .long 0   // header_addr
+    .long 0   // load_addr
+    .long 0   // load_end_addr
+    .long 0   // bss_end_addr
+    .long 0   // entry_addr
+    // video request: mode_type (0 = linear graphics), width, height, depth
+    .long 0   // mode_type: 0 = linear graphics
     .long 1024
     .long 768
     .long 32
+
 .section .data, "aw", @progbits
     .align 4
 mb_magic_saved: .long 0
@@ -47,17 +54,13 @@ pml4_table:
 pdpt_table:
     .skip 4096
 pd_table_0:
-    .skip 4096
-pd_table_1:
-    .skip 4096
-pd_table_2:
-    .skip 4096
-pd_table_3:
-    .skip 4096
+    .skip 4096 * 8   // 8 Page Directories = 8 GB identity map
 
 .section .text, "ax", @progbits
 .global _start
 .extern kernel_entry
+.extern __bss_start
+.extern __bss_end
 
 _start:
     movl %eax, mb_magic_saved
@@ -66,36 +69,40 @@ _start:
     cld
     movl $stack_top, %esp
 
-    leal pml4_table, %edi
-    movl $(4096 * 6 / 4), %ecx
+    // Zero out entire .bss section (critical on bare metal where RAM is uninitialized)
+    movl $__bss_start, %edi
+    movl $__bss_end, %ecx
+    subl %edi, %ecx
+    shrl $2, %ecx
     xorl %eax, %eax
     rep stosl
 
+    // Set up PML4 table (entry 0 -> pdpt_table)
     leal pdpt_table, %eax
     orl $(PAGE_PRESENT | PAGE_WRITE), %eax
     movl %eax, pml4_table
+    movl $0, pml4_table + 4
 
+    // Set up PDPT table (8 entries -> 8 PD tables, covering 0 to 8 GB)
     leal pd_table_0, %eax
+    leal pdpt_table, %edi
+    movl $8, %ecx
+.setup_pdpt:
     orl $(PAGE_PRESENT | PAGE_WRITE), %eax
-    movl %eax, pdpt_table
+    movl %eax, (%edi)
+    movl $0, 4(%edi)
+    addl $8, %edi
+    addl $4096, %eax
+    decl %ecx
+    jnz .setup_pdpt
 
-    leal pd_table_1, %eax
-    orl $(PAGE_PRESENT | PAGE_WRITE), %eax
-    movl %eax, pdpt_table + 8
-
-    leal pd_table_2, %eax
-    orl $(PAGE_PRESENT | PAGE_WRITE), %eax
-    movl %eax, pdpt_table + 16
-
-    leal pd_table_3, %eax
-    orl $(PAGE_PRESENT | PAGE_WRITE), %eax
-    movl %eax, pdpt_table + 24
-
+    // Fill the 8 Page Directories with 2MB huge pages (512 * 8 = 4096 entries = 8 GB)
     movl $(PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE), %eax
-    movl $2048, %ecx
+    movl $(512 * 8), %ecx
     leal pd_table_0, %edi
 .fill_pds:
     movl %eax, (%edi)
+    movl $0, 4(%edi)
     addl $8, %edi
     addl $0x200000, %eax
     decl %ecx
@@ -141,3 +148,4 @@ _start64:
     cli
     hlt
     jmp .hang
+

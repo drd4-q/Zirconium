@@ -1,5 +1,7 @@
 const serial = @import("../system/serial.zig");
 const isr_mod = @import("../arch/isr.zig");
+const port_io = @import("../arch/port.zig");
+const pic = @import("../arch/pic.zig");
 
 const APIC_BASE_MSR: u32 = 0x1B;
 const DEFAULT_APIC_BASE: u64 = 0xFEE00000;
@@ -55,6 +57,39 @@ pub fn sendEoi() void {
     }
 }
 
+fn calibrateLapicTimer() u32 {
+    // Set PIT channel 2 to one-shot mode for 10ms (100 Hz): 1193182 / 100 = 11931 ticks
+    const orig_port61 = port_io.inb(0x61);
+    port_io.outb(0x61, (orig_port61 & 0xFC)); // bit 0 = 0 (gate off), bit 1 = 0 (speaker off)
+    port_io.outb(0x43, 0xB0); // Channel 2, lobyte/hibyte, mode 0 (one-shot), binary
+    port_io.outb(0x42, @intCast(11931 & 0xFF));
+    port_io.outb(0x42, @intCast((11931 >> 8) & 0xFF));
+
+    // Reset LAPIC timer counter to max with divider 16
+    writeReg(REG_TIMER_DIV, 0x3);
+    writeReg(REG_TIMER_INIT, 0xFFFFFFFF);
+
+    // Gate PIT channel 2 on to start countdown
+    port_io.outb(0x61, (orig_port61 & 0xFC) | 0x01);
+
+    // Wait until PIT2 output goes high (bit 5 of port 0x61)
+    var timeout: u32 = 0;
+    while ((port_io.inb(0x61) & 0x20) == 0 and timeout < 1_000_000) : (timeout += 1) {
+        asm volatile ("pause");
+    }
+
+    const current_lapic = readReg(REG_TIMER_CURR);
+    const elapsed = 0xFFFFFFFF - current_lapic;
+
+    // Reset port 61
+    port_io.outb(0x61, orig_port61);
+
+    if (elapsed > 1000 and elapsed < 0xFFFFFFFF) {
+        return elapsed;
+    }
+    return 100000; // Fallback reasonable value for ~10ms
+}
+
 pub fn init() bool {
     const msr_val = rdmsr(APIC_BASE_MSR);
     apic_base = msr_val & 0xFFFFF000;
@@ -70,19 +105,17 @@ pub fn init() bool {
     // Set Task Priority Register to 0 (accept all interrupts)
     writeReg(REG_TPR, 0);
 
-    // Configure Timer divide register (0x3 = divide by 16)
-    writeReg(REG_TIMER_DIV, 0x3);
+    // Calibrate LAPIC timer against 10ms PIT pulse
+    const ticks_per_10ms = calibrateLapicTimer();
 
-    // LVT Timer Register: MASKED (bit 16). The LAPIC exists to deliver IPIs
-    // (SMP) and EOI handling, while the PIT remains the single 100 Hz tick
-    // source. Programming the periodic LAPIC timer to vector 32 (the same IDT
-    // vector as the PIT IRQ handler, which is what the old code did) makes
-    // BOTH sources fire into timer.irqHandler, doubling every tick and making
-    // sleep()/time()/TCP timers run 2x fast.
+    // Configure Periodic LAPIC Timer on Vector 32 (100 Hz)
     const timer_vector: u32 = 32;
-    const masked: u32 = 1 << 16;
-    writeReg(REG_LVT_TIMER, masked | timer_vector);
-    writeReg(REG_TIMER_INIT, 0);
+    const periodic_mode: u32 = 0x20000; // Bit 17 = Periodic
+    writeReg(REG_LVT_TIMER, periodic_mode | timer_vector);
+    writeReg(REG_TIMER_INIT, ticks_per_10ms);
+
+    // Mask legacy PIT IRQ 0 in 8259 PIC so LAPIC timer is the single clean 100 Hz source
+    pic.mask(0);
 
     apic_enabled = true;
     serial.serialWrite("[APIC] Local APIC timer initialized at 0x");
@@ -95,3 +128,4 @@ pub fn init() bool {
 pub fn isEnabled() bool {
     return apic_enabled;
 }
+

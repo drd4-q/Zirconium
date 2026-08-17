@@ -88,11 +88,18 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
 
     vga.write("[BOOT] Initializing network...\n");
     pci.scan();
-    if (pci.findByClass(0x02, 0x00)) |dev| {
-        _ = @import("drivers/e1000.zig").init(dev);
-        @import("net/mod.zig").init();
+    var net_dev_idx: usize = 0;
+    while (net_dev_idx < pci.device_count) : (net_dev_idx += 1) {
+        const dev = &pci.devices[net_dev_idx];
+        if (dev.class == 0x02 and (dev.subclass == 0x00 or dev.subclass == 0x80)) {
+            if (@import("drivers/e1000.zig").init(dev) or @import("drivers/rtl8169.zig").init(dev)) {
+                break;
+            }
+        }
     }
+    @import("net/mod.zig").init();
     serial.serialWrite("[BOOT] Network init done\n");
+
 
     vga.write("[BOOT] Bringing secondary CPUs online...\n");
     @import("arch/smp.zig").init();
