@@ -15,20 +15,57 @@ var shift_pressed: bool = false;
 var caps_lock: bool = false;
 var ctrl_pressed: bool = false;
 
+fn waitInput() void {
+    var timeout: u32 = 0;
+    while (timeout < 100000) : (timeout += 1) {
+        if ((port_io.inb(KB_STATUS) & 2) == 0) return;
+    }
+}
+
+fn waitOutput() bool {
+    var timeout: u32 = 0;
+    while (timeout < 100000) : (timeout += 1) {
+        if ((port_io.inb(KB_STATUS) & 1) != 0) return true;
+    }
+    return false;
+}
+
 pub fn init() void {
-    while ((port_io.inb(KB_STATUS) & 2) != 0) {}
-    port_io.outb(0x64, 0xAE);
-    while ((port_io.inb(KB_STATUS) & 2) != 0) {}
-    port_io.outb(0x64, 0xA8);
+    // Flush any pending data from previous BIOS/SMM operations
+    var flush_cnt: u32 = 0;
+    while ((port_io.inb(KB_STATUS) & 1) != 0 and flush_cnt < 1000) : (flush_cnt += 1) {
+        _ = port_io.inb(KB_DATA);
+    }
 
-    while ((port_io.inb(KB_STATUS) & 2) != 0) {}
-    port_io.outb(0x64, 0xAA);
-    while ((port_io.inb(KB_STATUS) & 1) == 0) {}
-    _ = port_io.inb(KB_DATA);
+    // Enable first PS/2 port (keyboard)
+    waitInput();
+    port_io.outb(KB_STATUS, 0xAE);
 
-    port_io.outb(0x64, 0x60);
-    while ((port_io.inb(KB_STATUS) & 2) != 0) {}
-    port_io.outb(KB_DATA, 0x45);
+    // Enable second PS/2 port (mouse)
+    waitInput();
+    port_io.outb(KB_STATUS, 0xA8);
+
+    // Read controller configuration byte
+    waitInput();
+    port_io.outb(KB_STATUS, 0x20);
+    var config: u8 = 0x45;
+    if (waitOutput()) {
+        config = port_io.inb(KB_DATA);
+    }
+
+    // Enable keyboard interrupt (bit 0 = 1), translation (bit 6 = 1), disable clock disable (bit 4 = 0)
+    config = (config | 0x01 | 0x40) & ~@as(u8, 0x10);
+
+    waitInput();
+    port_io.outb(KB_STATUS, 0x60);
+    waitInput();
+    port_io.outb(KB_DATA, config);
+
+    // Flush buffer again
+    flush_cnt = 0;
+    while ((port_io.inb(KB_STATUS) & 1) != 0 and flush_cnt < 1000) : (flush_cnt += 1) {
+        _ = port_io.inb(KB_DATA);
+    }
 
     isr_mod.registerIrq(1, irqHandler);
 }

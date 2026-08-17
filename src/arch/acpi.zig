@@ -63,16 +63,16 @@ fn hasSignature(addr: usize, sig: []const u8) bool {
 }
 
 fn findRsdp() ?usize {
-    // 1. Search the EBDA (1 KB starting at the EBDA segment from 0x40:0x0E)
-    const ebda_seg: u32 = readU32(0x406) & 0xFFFF;
-    if (ebda_seg >= 0x400 and ebda_seg < 0xA000) {
-        var addr: usize = @as(usize, ebda_seg) * 16;
-        var i: usize = 0;
-        while (i < 64) : (i += 1) {
+    // 1. Search the EBDA (1 KB starting at the EBDA segment from BDA 0x40:0x0E / 0x40E)
+    const ebda_ptr: *const volatile u16 = @ptrFromInt(0x40E);
+    const ebda_seg: usize = ebda_ptr.*;
+    if (ebda_seg >= 0x40 and ebda_seg < 0xA000) {
+        var addr: usize = ebda_seg * 16;
+        const end_addr = addr + 1024;
+        while (addr < end_addr) : (addr += 16) {
             if (hasSignature(addr, "RSD PTR ")) {
                 if (checksumOk(addr, 20)) return addr;
             }
-            addr += 16;
         }
     }
 
@@ -89,9 +89,12 @@ fn findRsdp() ?usize {
 const MADT_DATA_OFFSET: usize = 44; // header(36) + lapic(4) + flags(4)
 
 fn parseMadt(table: usize) void {
-    lapic_base = readU32(table + 36);
+    if (table == 0) return;
     const length = readU32(table + 4);
-    if (length < MADT_DATA_OFFSET) return;
+    if (length < MADT_DATA_OFFSET or length > 0x10000) return;
+    if (!checksumOk(table, length)) return;
+
+    lapic_base = readU32(table + 36);
     const end = table + length;
     var pos: usize = table + MADT_DATA_OFFSET;
 
@@ -116,8 +119,10 @@ fn parseMadt(table: usize) void {
 fn parseRsdt(rsdp: usize) void {
     const rsdt: usize = readU32(rsdp + 16);
     if (rsdt == 0) return;
+    if (!hasSignature(rsdt, "RSDT")) return;
     const length = readU32(rsdt + 4);
-    if (length < 36) return;
+    if (length < 36 or length > 0x10000) return;
+    if (!checksumOk(rsdt, length)) return;
     const count = (length - 36) / 4;
     var i: usize = 0;
     while (i < count) : (i += 1) {
@@ -128,13 +133,18 @@ fn parseRsdt(rsdp: usize) void {
 
 fn parseXsdt(rsdp: usize) void {
     const xsdt = readU64(rsdp + 24);
-    if (xsdt == 0) return;
-    const length = readU32(xsdt + 4);
-    if (length < 36) return;
+    if (xsdt == 0 or xsdt > 0xFFFFFFFF) return;
+    const xsdt_addr: usize = @intCast(xsdt);
+    if (!hasSignature(xsdt_addr, "XSDT")) return;
+    const length = readU32(xsdt_addr + 4);
+    if (length < 36 or length > 0x10000) return;
+    if (!checksumOk(xsdt_addr, length)) return;
     const count = (length - 36) / 8;
     var i: usize = 0;
     while (i < count) : (i += 1) {
-        const tab: usize = @intCast(readU64(xsdt + 36 + i * 8));
+        const tab_addr = readU64(xsdt_addr + 36 + i * 8);
+        if (tab_addr == 0 or tab_addr > 0xFFFFFFFF) continue;
+        const tab: usize = @intCast(tab_addr);
         if (hasSignature(tab, "APIC")) parseMadt(tab);
     }
 }

@@ -120,8 +120,8 @@ def build_fresh_iso(repo_root):
     except Exception:
         pass
 
-    print("[TEST RUNNER ERROR] grub-mkrescue failed")
-    sys.exit(1)
+    print("[TEST RUNNER WARNING] grub-mkrescue/xorriso not available; falling back to direct -kernel boot")
+    return False
 
 def patch_kernel_iso(repo_root):
     """Overwrite kernel.bin in kernel.iso if it fits; else rebuild the ISO fresh."""
@@ -131,8 +131,7 @@ def patch_kernel_iso(repo_root):
     if not os.path.exists(bin_path):
         return False
     if not os.path.exists(iso_path):
-        build_fresh_iso(repo_root)
-        return True
+        return build_fresh_iso(repo_root)
 
     with open(bin_path, "rb") as f:
         k_data = f.read()

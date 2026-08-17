@@ -250,7 +250,16 @@ fn totalSectorsFn(_: *blockdev.BlockDevice) u64 {
 }
 
 pub fn init() void {
-    const dev = pci.findByClass(0x01, 0x00) orelse {
+    var dev_opt: ?*pci.PciDevice = pci.findDevice(0x1AF4, 0x1001);
+    if (dev_opt == null) {
+        dev_opt = pci.findDevice(0x1AF4, 0x1042);
+    }
+    if (dev_opt == null) {
+        if (pci.findByClass(0x01, 0x00)) |d| {
+            if (d.vendor_id == 0x1AF4) dev_opt = d;
+        }
+    }
+    const dev = dev_opt orelse {
         serial.serialWrite("[VIRTIO-BLK] No virtio-blk device found\n");
         return;
     };

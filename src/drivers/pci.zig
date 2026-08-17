@@ -19,7 +19,7 @@ pub const PciDevice = struct {
     irq: u8,
 };
 
-pub var devices: [32]PciDevice = undefined;
+pub var devices: [128]PciDevice = undefined;
 pub var device_count: usize = 0;
 
 fn outb(p: u16, v: u8) void {
@@ -60,9 +60,10 @@ fn writeConfig(bus: u8, dev: u8, func: u8, reg: u8, val: u32) void {
 
 pub fn readBar(bus: u8, dev: u8, func: u8, bar_num: u8) u32 {
     const reg: u8 = 0x10 + bar_num * 4;
+    const orig = readConfig(bus, dev, func, reg);
     writeConfig(bus, dev, func, reg, 0xFFFFFFFF);
     const val = readConfig(bus, dev, func, reg);
-    writeConfig(bus, dev, func, reg, 0);
+    writeConfig(bus, dev, func, reg, orig);
     return val;
 }
 
@@ -72,34 +73,48 @@ pub fn scan() void {
     while (bus < 256) : (bus += 1) {
         var dev: u8 = 0;
         while (dev < 32) : (dev += 1) {
-            const v0 = readConfig(@intCast(bus), dev, 0, 0);
-            const vid = @as(u16, @intCast(v0 & 0xFFFF));
-            if (vid == 0xFFFF) continue;
+            var func: u8 = 0;
+            while (func < 8) : (func += 1) {
+                const v0 = readConfig(@intCast(bus), dev, func, 0);
+                const vid = @as(u16, @intCast(v0 & 0xFFFF));
+                if (vid == 0xFFFF) {
+                    if (func == 0) break;
+                    continue;
+                }
 
-            const v2 = readConfig(@intCast(bus), dev, 0, 0x08);
-            const cls = @as(u8, @intCast((v2 >> 24) & 0xFF));
-            const sub = @as(u8, @intCast((v2 >> 16) & 0xFF));
-            const pi = @as(u8, @intCast((v2 >> 8) & 0xFF));
+                const v2 = readConfig(@intCast(bus), dev, func, 0x08);
+                const cls = @as(u8, @intCast((v2 >> 24) & 0xFF));
+                const sub = @as(u8, @intCast((v2 >> 16) & 0xFF));
+                const pi = @as(u8, @intCast((v2 >> 8) & 0xFF));
 
-            const v10 = readConfig(@intCast(bus), dev, 0, 0x10);
-            const v14 = readConfig(@intCast(bus), dev, 0, 0x14);
-            const v3C = readConfig(@intCast(bus), dev, 0, 0x3C);
+                const v3 = readConfig(@intCast(bus), dev, func, 0x0C);
+                const header_type = @as(u8, @intCast((v3 >> 16) & 0xFF));
 
-            if (device_count < devices.len) {
-                devices[device_count] = PciDevice{
-                    .bus = @intCast(bus),
-                    .dev = dev,
-                    .func = 0,
-                    .vendor_id = vid,
-                    .device_id = @intCast((v0 >> 16) & 0xFFFF),
-                    .class = cls,
-                    .subclass = sub,
-                    .prog_if = pi,
-                    .bar0 = v10,
-                    .bar1 = v14,
-                    .irq = @intCast(v3C & 0xFF),
-                };
-                device_count += 1;
+                const v10 = readConfig(@intCast(bus), dev, func, 0x10);
+                const v14 = readConfig(@intCast(bus), dev, func, 0x14);
+                const v3C = readConfig(@intCast(bus), dev, func, 0x3C);
+
+                if (device_count < devices.len) {
+                    devices[device_count] = PciDevice{
+                        .bus = @intCast(bus),
+                        .dev = dev,
+                        .func = func,
+                        .vendor_id = vid,
+                        .device_id = @intCast((v0 >> 16) & 0xFFFF),
+                        .class = cls,
+                        .subclass = sub,
+                        .prog_if = pi,
+                        .bar0 = v10,
+                        .bar1 = v14,
+                        .irq = @intCast(v3C & 0xFF),
+                    };
+                    device_count += 1;
+                }
+
+                // If func 0 is not a multi-function device, don't probe functions 1-7
+                if (func == 0 and (header_type & 0x80) == 0) {
+                    break;
+                }
             }
         }
     }
