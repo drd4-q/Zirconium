@@ -67,7 +67,7 @@ fn setTssEntry(idx: usize, base: u64, limit: u32) void {
     entry.base_upper = @intCast((base >> 32) & 0xFFFFFFFF);
     entry.limit_low = @intCast(limit & 0xFFFF);
     entry.access = 0x89;
-    entry.granularity = 0x20;
+    entry.granularity = @intCast((limit >> 16) & 0x0F);
     entry.reserved = 0;
 }
 

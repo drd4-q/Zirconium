@@ -54,7 +54,7 @@ pml4_table:
 pdpt_table:
     .skip 4096
 pd_table_0:
-    .skip 4096 * 8   // 8 Page Directories = 8 GB identity map
+    .skip 4096 * 64  // 64 Page Directories = 64 GB identity map
 
 .section .text, "ax", @progbits
 .global _start
@@ -83,10 +83,10 @@ _start:
     movl %eax, pml4_table
     movl $0, pml4_table + 4
 
-    // Set up PDPT table (8 entries -> 8 PD tables, covering 0 to 8 GB)
+    // Set up PDPT table (64 entries -> 64 PD tables, covering 0 to 64 GB)
     leal pd_table_0, %eax
     leal pdpt_table, %edi
-    movl $8, %ecx
+    movl $64, %ecx
 .setup_pdpt:
     orl $(PAGE_PRESENT | PAGE_WRITE), %eax
     movl %eax, (%edi)
@@ -96,15 +96,17 @@ _start:
     decl %ecx
     jnz .setup_pdpt
 
-    // Fill the 8 Page Directories with 2MB huge pages (512 * 8 = 4096 entries = 8 GB)
+    // Fill the 64 Page Directories with 2MB huge pages (512 * 64 = 32768 entries = 64 GB)
     movl $(PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE), %eax
-    movl $(512 * 8), %ecx
+    xorl %edx, %edx
+    movl $(512 * 64), %ecx
     leal pd_table_0, %edi
 .fill_pds:
     movl %eax, (%edi)
-    movl $0, 4(%edi)
+    movl %edx, 4(%edi)
     addl $8, %edi
     addl $0x200000, %eax
+    adcl $0, %edx
     decl %ecx
     jnz .fill_pds
 

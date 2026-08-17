@@ -26,11 +26,10 @@ pub fn init() void {
     msr.write(msr.IA32_STAR, star);
     msr.write(msr.IA32_LSTAR, @intFromPtr(&syscall_entry_64));
 
-    // FMASK = 0: keep RFLAGS (notably IF) as the caller had it. Masking IF here
-    // would break every blocking syscall for the same reason the INT 0x80 gate
-    // is a trap gate and not an interrupt gate — sleep()/recv() halt waiting for
-    // the PIT tick and would never wake with interrupts off.
-    msr.write(msr.IA32_FMASK, 0);
+    // Mask DF (0x400), TF (0x100), NT (0x4000), AC (0x40000) on syscall entry while
+    // keeping IF=1 so timer/interrupts continue to work for blocking syscalls.
+    const fmask: u64 = (1 << 8) | (1 << 10) | (1 << 14) | (1 << 18); // TF, DF, NT, AC
+    msr.write(msr.IA32_FMASK, fmask);
 
     // Enable the instruction itself.
     msr.write(msr.IA32_EFER, msr.read(msr.IA32_EFER) | msr.EFER_SCE);

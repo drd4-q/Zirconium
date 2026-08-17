@@ -78,6 +78,7 @@ IRQ 14, 46
 IRQ 15, 47
 
 isr_common:
+    cld
     pushq %rax
     pushq %rbx
     pushq %rcx
@@ -124,6 +125,7 @@ isr_common:
 # then call syscall_handler exactly like isr_common calls isr_handler.
 .global syscall_entry
 syscall_entry:
+    cld
     pushq $0          # error_code = 0
     pushq $0x80       # int_num = 0x80
 
@@ -171,6 +173,7 @@ syscall_entry:
 # argument registers (rcx/rdx/r8/r9) plus stack arguments via frame.rsp.
 .global win_thunk_entry
 win_thunk_entry:
+    cld
     pushq $0          # error_code = 0
     pushq $0x81       # int_num
 
@@ -225,6 +228,7 @@ win_thunk_entry:
 # user tasks and the scheduler is not preemptive (APs idle in ap_entry).
 .global syscall_entry_64
 syscall_entry_64:
+    cld
     movq %rsp, syscall_user_rsp(%rip)
     movq syscall_kernel_rsp(%rip), %rsp
 
@@ -302,6 +306,7 @@ load_idt:
 # switch_to_user(rdi=user_rsp, rsi=user_rip, rdx=user_cs, rcx=user_ss, r8=user_rflags)
 .global switch_to_user
 switch_to_user:
+    cld
     # Save kernel callee-saved registers
     pushq %rbx
     pushq %rbp
@@ -342,6 +347,7 @@ switch_to_user:
 # sys_exit_return()
 .global sys_exit_return
 sys_exit_return:
+    cld
     # Switch back to kernel stack
     movq scheduler_kernel_rsp(%rip), %rsp
 

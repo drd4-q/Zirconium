@@ -46,11 +46,13 @@ pub const AddressSpace = struct {
             new_pml4[0] = (new_pdpt_phys & vmm.PAGE_ADDR_MASK) | vmm.PAGE_PRESENT | vmm.PAGE_WRITE | vmm.PAGE_USER;
             const new_pdpt: [*]u64 = @ptrFromInt(new_pdpt_phys);
 
-            // Copy PDPT entries 1-3 from kernel: covers 1-4GB.
-            // PDPT[3] has LAPIC at 0xFEE00000 — accessible kernel-mode during IRQ.
+            // Copy PDPT entries 1-511 from kernel: covers 1GB-512GB (including LAPIC
+            // at 0xFEE00000 and all physical identity-mapped RAM up to 8GB+).
             var j: u16 = 1;
-            while (j < 4) : (j += 1) {
-                new_pdpt[j] = kernel_pdpt[j] | vmm.PAGE_USER;
+            while (j < 512) : (j += 1) {
+                if (kernel_pdpt[j] & vmm.PAGE_PRESENT != 0) {
+                    new_pdpt[j] = kernel_pdpt[j] | vmm.PAGE_USER;
+                }
             }
 
             // PDPT[0] covers 0-1GB (user ELF lives at 0x2000000 here).

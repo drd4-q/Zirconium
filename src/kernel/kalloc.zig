@@ -106,9 +106,6 @@ pub fn kfree(ptr: [*]u8) void {
 
     // Merge with adjacent free blocks
     mergeBlocks(block);
-
-    // Add to free list if not already there
-    addToFreeList(block);
 }
 
 pub fn krealloc(ptr: [*]u8, new_size: usize) ?[*]u8 {
@@ -128,9 +125,11 @@ pub fn krealloc(ptr: [*]u8, new_size: usize) ?[*]u8 {
         if (next.free) {
             const total = block.size + @sizeOf(BlockHeader) + next.size;
             if (total >= aligned_new) {
-                // Remove next from free list
-                removeBlock(next);
-                block.size = total - @sizeOf(BlockHeader);
+                block.size += @sizeOf(BlockHeader) + next.size;
+                block.next = next.next;
+                if (next.next) |nn| {
+                    nn.prev = block;
+                }
                 splitBlock(block, aligned_new);
                 return ptr;
             }
@@ -191,26 +190,6 @@ fn mergeBlocks(block: *BlockHeader) void {
     }
 }
 
-fn addToFreeList(block: *BlockHeader) void {
-    block.next = free_list;
-    block.prev = null;
-    if (free_list) |head| {
-        head.prev = block;
-    }
-    free_list = block;
-}
-
-fn removeBlock(block: *BlockHeader) void {
-    if (block.prev) |prev| {
-        prev.next = block.next;
-    } else {
-        free_list = block.next;
-    }
-    if (block.next) |next| {
-        next.prev = block.prev;
-    }
-}
-
 fn expandHeap(min_needed: usize) bool {
     const pages_needed = (min_needed + 4095) / 4096;
     const new_pages = pmm.allocPages(pages_needed) orelse return false;
@@ -239,12 +218,16 @@ fn expandHeap(min_needed: usize) bool {
         const last_end = @intFromPtr(last) + @sizeOf(BlockHeader) + last.size;
         if (last_end == new_pages and last.free) {
             // Merge
-            last.size += @sizeOf(BlockHeader) + new_block.size;
+            last.size += new_size;
             return true;
         }
+
+        last.next = new_block;
+        new_block.prev = last;
+    } else {
+        free_list = new_block;
     }
 
-    addToFreeList(new_block);
     return true;
 }
 

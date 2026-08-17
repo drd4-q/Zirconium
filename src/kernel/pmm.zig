@@ -2,12 +2,12 @@ const serial = @import("../system/serial.zig");
 const system_init = @import("../system/init.zig");
 
 pub const PAGE_SIZE: usize = 4096;
-pub const MAX_MEMORY: usize = 1024 * 1024 * 1024; // 1 GB supported physical memory
-pub const TOTAL_PAGES: usize = MAX_MEMORY / PAGE_SIZE; // 262,144 pages
-const BITMAP_SIZE: usize = TOTAL_PAGES / 8; // 32,768 bytes
+pub const MAX_MEMORY: usize = 64 * 1024 * 1024 * 1024; // 64 GB supported physical memory
+pub const TOTAL_PAGES: usize = MAX_MEMORY / PAGE_SIZE; // 16,777,216 pages
+const BITMAP_SIZE: usize = TOTAL_PAGES / 8; // 2,097,152 bytes (2 MB)
 
 var bitmap: [BITMAP_SIZE]u8 = [_]u8{0xFF} ** BITMAP_SIZE;
-var ref_counts: [TOTAL_PAGES]u16 = [_]u16{0} ** TOTAL_PAGES;
+var ref_counts: [TOTAL_PAGES]u8 = [_]u8{0} ** TOTAL_PAGES;
 pub var total_pages: usize = 0;
 pub var free_pages: usize = 0;
 
@@ -74,8 +74,8 @@ pub fn init(kernel_start: usize, kernel_end: usize) void {
                                 const addr = p * PAGE_SIZE;
                                 // Protect kernel image and multiboot structures
                                 const is_kernel = (addr < kernel_end and (addr + PAGE_SIZE) > kernel_start);
-                                const is_mbi = (addr <= mbi_addr and (addr + PAGE_SIZE) > mbi_addr);
-                                const is_mmap = (addr <= mmap_addr and (addr + PAGE_SIZE) > (mmap_addr + mmap_length));
+                                const is_mbi = (addr < (mbi_addr + 128) and (addr + PAGE_SIZE) > mbi_addr);
+                                const is_mmap = (addr < (mmap_addr + mmap_length) and (addr + PAGE_SIZE) > mmap_addr);
 
                                 if (!is_kernel and !is_mbi and !is_mmap) {
                                     markPageFree(p);
@@ -216,11 +216,13 @@ pub fn allocPages(count: usize) ?usize {
 pub fn incRef(addr: usize) void {
     const page = addr / PAGE_SIZE;
     if (page < TOTAL_PAGES) {
-        ref_counts[page] += 1;
+        if (ref_counts[page] < 255) {
+            ref_counts[page] += 1;
+        }
     }
 }
 
-pub fn decRef(addr: usize) u16 {
+pub fn decRef(addr: usize) u8 {
     const page = addr / PAGE_SIZE;
     if (page < TOTAL_PAGES and ref_counts[page] > 0) {
         ref_counts[page] -= 1;
@@ -233,7 +235,7 @@ pub fn decRef(addr: usize) u16 {
     return 0;
 }
 
-pub fn getRef(addr: usize) u16 {
+pub fn getRef(addr: usize) u8 {
     const page = addr / PAGE_SIZE;
     if (page < TOTAL_PAGES) {
         return ref_counts[page];

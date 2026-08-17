@@ -60,11 +60,18 @@ fn writeConfig(bus: u8, dev: u8, func: u8, reg: u8, val: u32) void {
 
 pub fn readBar(bus: u8, dev: u8, func: u8, bar_num: u8) u32 {
     const reg: u8 = 0x10 + bar_num * 4;
+    return readConfig(bus, dev, func, reg);
+}
+
+pub fn getBarSize(bus: u8, dev: u8, func: u8, bar_num: u8) u32 {
+    const reg: u8 = 0x10 + bar_num * 4;
     const orig = readConfig(bus, dev, func, reg);
     writeConfig(bus, dev, func, reg, 0xFFFFFFFF);
-    const val = readConfig(bus, dev, func, reg);
+    const mask = readConfig(bus, dev, func, reg);
     writeConfig(bus, dev, func, reg, orig);
-    return val;
+    if (mask == 0 or mask == 0xFFFFFFFF) return 0;
+    const size_mask = if ((orig & 1) == 0) mask & 0xFFFFFFF0 else mask & 0xFFFFFFFC;
+    return ~size_mask +% 1;
 }
 
 pub fn scan() void {

@@ -358,7 +358,11 @@ pub fn openConn(conn: *Connection, dst_ip: [4]u8, dst_port_val: u16) void {
     // Resolve the next hop (the host itself on-link, otherwise the gateway) so
     // the SYN goes to a real unicast MAC instead of broadcast, which QEMU's
     // slirp drops.
-    _ = net.ensureArp(net.nextHop(dst_ip));
+    if (net.nextHopMac(dst_ip) == null) {
+        conn.state = .closed;
+        port_io.serialWrite("[TCP] Connect failed: could not resolve MAC for target/gateway\n");
+        return;
+    }
 
     conn.state = .syn_sent;
     conn.syn_sent_at = timer.ticks;
