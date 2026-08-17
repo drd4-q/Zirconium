@@ -24,7 +24,7 @@ var last_dbg_buttons: u8 = 0;
 
 // Cursor bound following any pixel movement: clamped to both char-cell grid
 // and pixel framebuffer.
-fn clampCoords() void {
+pub fn clampCoords() void {
     if (fb.active) {
         if (mx < 0) mx = 0;
         if (my < 0) my = 0;
@@ -180,4 +180,38 @@ fn irqHandler(_: *isr_mod.InterruptFrame) void {
             }
         }
     }
+}
+
+pub fn updateFromUsb(buttons: u8, delta_x: i32, delta_y: i32) void {
+    left_button = (buttons & 0x01) != 0;
+    right_button = (buttons & 0x02) != 0;
+    middle_button = (buttons & 0x04) != 0;
+    dx = delta_x;
+    dy = delta_y;
+
+    mx += dx;
+    my += dy; // USB HID mouse Y axis: positive delta is downwards
+
+    clampCoords();
+    ready = true;
+
+    if (debug_log) {
+        packet_cnt += 1;
+        if (packet_cnt % 50 == 0) {
+            serial.serialWrite("USB-M ");
+            serial.serialWriteDec(@intCast(mx));
+            serial.serialWrite(" ");
+            serial.serialWriteDec(@intCast(my));
+        }
+        const chg = (buttons ^ last_dbg_buttons) & 0x07;
+        if (chg != 0) {
+            serial.serialWrite("\nUSB-BTN ");
+            serial.serialWriteHexShort(chg);
+        }
+        last_dbg_buttons = buttons;
+    }
+}
+
+pub fn poll() void {
+    @import("usb.zig").poll();
 }

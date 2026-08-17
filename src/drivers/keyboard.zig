@@ -93,9 +93,25 @@ fn readScancode() ?u8 {
     return sc;
 }
 
+const KEY_BUF_SIZE: usize = 64;
+var direct_key_ring: [KEY_BUF_SIZE]u8 = undefined;
+var direct_key_head: usize = 0;
+var direct_key_tail: usize = 0;
+
+pub fn pushKey(ch: u8) void {
+    if (ch == 0) return;
+    const next = (direct_key_head + 1) % KEY_BUF_SIZE;
+    if (next != direct_key_tail) {
+        direct_key_ring[direct_key_head] = ch;
+        direct_key_head = next;
+    }
+}
+
 pub fn flush() void {
     ring_head = 0;
     ring_tail = 0;
+    direct_key_head = 0;
+    direct_key_tail = 0;
 }
 
 var e0_prefix: bool = false;
@@ -113,6 +129,23 @@ pub const KEY_DELETE: u8 = 0x89;
 pub const KEY_INSERT: u8 = 0x8A;
 
 pub fn pollKey() ?u8 {
+    // 1. Check directly queued keys (e.g. from USB keyboard)
+    if (direct_key_head != direct_key_tail) {
+        const k = direct_key_ring[direct_key_tail];
+        direct_key_tail = (direct_key_tail + 1) % KEY_BUF_SIZE;
+        return k;
+    }
+
+    // 2. Poll USB subsystem
+    @import("usb.zig").poll();
+
+    if (direct_key_head != direct_key_tail) {
+        const k = direct_key_ring[direct_key_tail];
+        direct_key_tail = (direct_key_tail + 1) % KEY_BUF_SIZE;
+        return k;
+    }
+
+    // 3. Process PS/2 keyboard scancodes
     while (true) {
         const sc = readScancode() orelse return null;
 
