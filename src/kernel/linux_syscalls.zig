@@ -148,12 +148,14 @@ pub fn dispatch(frame: *isr.InterruptFrame, t: *task.Task) void {
         SYS_fcntl => ret(frame, sysFcntl(t, a1, a2, a3)),
         SYS_dup => ret(frame, sysDup(t, a1)),
         SYS_dup2, SYS_dup3 => ret(frame, sysDup2(t, a1, a2)),
-        SYS_pipe, SYS_pipe2 => ret(frame, 0),
+        // Pipes have no kernel implementation; failing honestly beats handing
+        // out fd numbers the caller then reads from/writes to.
+        SYS_pipe, SYS_pipe2 => ret(frame, ENOSYS),
         SYS_poll, SYS_ppoll, SYS_select, SYS_pselect6 => ret(frame, 1),
         SYS_getcwd => ret(frame, sysGetcwd(a1, a2)),
-        SYS_chdir => ret(frame, 0),
+        SYS_chdir => ret(frame, sysChdir(a1)),
         SYS_gettimeofday => ret(frame, sysGettimeofday(a1, a2)),
-        SYS_sysinfo => ret(frame, 0),
+        SYS_sysinfo => ret(frame, sysSysinfo(a1)),
         SYS_nanosleep => ret(frame, sysNanosleep(a1)),
         SYS_clock_gettime => ret(frame, sysClockGettime(a2)),
         SYS_arch_prctl => ret(frame, sysArchPrctl(t, a1, a2)),
@@ -175,6 +177,7 @@ pub fn dispatch(frame: *isr.InterruptFrame, t: *task.Task) void {
             const buf = uaccess.userSlice(a2, a3) orelse return ret(frame, EFAULT);
             ret(frame, fdtable.read(t, @intCast(a1), buf));
         },
+        SYS_getdents64 => ret(frame, sysGetdents64(t, a1, a2, a3)),
         SYS_execve => ret(frame, sysExecve(frame, t, a1, a2, a3)),
         SYS_exit, SYS_exit_group => {
             _ = a4;
@@ -225,6 +228,22 @@ fn sysOpenat(t: *task.Task, dirfd: i64, path_ptr: u64, flags: u64) isize {
     const O_TRUNC: u64 = 0o1000;
 
     const want_write = (flags & O_WRONLY != 0) or (flags & O_RDWR != 0);
+
+    // Directories never go through vfs.open: the VFS enumerates them by path
+    // via readdir, so remember the path in a directory descriptor instead.
+    if (!want_write) {
+        if (vfs.stat(path)) |st| {
+            if (st.file_type == .directory) {
+                var d = task.DirDesc{};
+                const n = @min(path.len, d.path_buf.len);
+                @memcpy(d.path_buf[0..n], path[0..n]);
+                d.path_len = n;
+                const fd = fdtable.alloc(t, .{ .dir = d }) orelse return -24; // EMFILE
+                return @intCast(fd);
+            }
+        }
+    }
+
     const handle = vfs.open(path, .{
         .read = !want_write or (flags & O_RDWR != 0),
         .write = want_write,
@@ -237,6 +256,64 @@ fn sysOpenat(t: *task.Task, dirfd: i64, path_ptr: u64, flags: u64) isize {
         return -24; // EMFILE
     };
     return @intCast(fd);
+}
+
+/// struct linux_dirent64 { u64 d_ino; i64 d_off; u16 d_reclen; u8 d_type;
+///                          char d_name[]; } entries packed into the buffer.
+fn sysGetdents64(t: *task.Task, fd: u64, buf_ptr: u64, buf_len: u64) isize {
+    // The read cursor lives in the descriptor itself, so mutate it in place
+    // through the fd table slot.
+    if (fd >= task.MAX_FDS) return EBADF;
+    const slot = &t.fds[@intCast(fd)];
+    const desc = &(slot.* orelse return EBADF);
+    if (desc.* != .dir) return -20; // ENOTDIR
+    const dir = &desc.dir;
+
+    var entries: [32]vfs.DirEntry = undefined;
+    const count = vfs.readdir(dir.path_buf[0..dir.path_len], &entries);
+    if (dir.cursor >= count) {
+        dir.cursor = 0; // rewind so reopening-by-seek semantics stay sane
+        return 0; // EOF
+    }
+
+    const DT_REG: u8 = 8;
+    const DT_DIR: u8 = 4;
+
+    var written: usize = 0;
+    var i = dir.cursor;
+    while (i < count) : (i += 1) {
+        const e = &entries[i];
+        // 19 fixed bytes + name + NUL, padded to 8.
+        const reclen = (@as(usize, 19) + e.name_len + 1 + 7) & ~@as(usize, 7);
+        if (written + reclen > buf_len) break;
+
+        _ = uaccess.writeU64(buf_ptr + written, i + 1); // d_ino
+        _ = uaccess.writeU64(buf_ptr + written + 8, i + 1); // d_off
+        _ = uaccess.writeU16(buf_ptr + written + 16, @intCast(reclen));
+        _ = uaccess.writeU8(buf_ptr + written + 18, if (e.file_type == .directory) DT_DIR else DT_REG);
+        var k: usize = 0;
+        while (k < e.name_len) : (k += 1) {
+            _ = uaccess.writeU8(buf_ptr + written + 19 + k, e.name[k]);
+        }
+        var p = 19 + e.name_len;
+        while (p < reclen) : (p += 1) {
+            _ = uaccess.writeU8(buf_ptr + written + p, 0); // NUL + padding
+        }
+        written += reclen;
+    }
+
+    if (written == 0 and count > dir.cursor) return EINVAL; // buffer too small
+    dir.cursor = i;
+    return @intCast(written);
+}
+
+fn sysChdir(path_ptr: u64) isize {
+    var path_buf: [256]u8 = undefined;
+    const path = uaccess.readCStr(path_ptr, &path_buf) orelse return EFAULT;
+    const info = vfs.stat(path) orelse return ENOENT;
+    if (info.file_type != .directory) return -20; // ENOTDIR
+    vfs.setCwd(path);
+    return 0;
 }
 
 fn sysLseek(t: *task.Task, fd: u64, offset: u64, whence: u64) isize {
@@ -342,15 +419,24 @@ fn sysAccess(path_ptr: u64) isize {
 }
 
 fn sysFcntl(t: *task.Task, fd: u64, cmd: u64, arg: u64) isize {
-    _ = t;
-    _ = arg;
     const F_DUPFD: u64 = 0;
     const F_GETFD: u64 = 1;
     const F_SETFD: u64 = 2;
     const F_GETFL: u64 = 3;
     const F_SETFL: u64 = 4;
     return switch (cmd) {
-        F_DUPFD => @intCast(fd),
+        F_DUPFD => blk: {
+            // Duplicate onto the lowest free fd >= arg.
+            const desc = fdtable.get(t, @intCast(fd)) orelse break :blk EBADF;
+            var cand: usize = @intCast(@min(arg, task.MAX_FDS));
+            while (cand < task.MAX_FDS) : (cand += 1) {
+                if (t.fds[cand] == null) {
+                    t.fds[cand] = desc;
+                    break :blk @intCast(cand);
+                }
+            }
+            break :blk -24; // EMFILE
+        },
         F_GETFD => 0,
         F_SETFD => 0,
         F_GETFL => 0o2, // O_RDWR
@@ -374,13 +460,31 @@ fn sysDup2(t: *task.Task, oldfd: u64, newfd: u64) isize {
 }
 
 fn sysGetcwd(buf_ptr: u64, size: u64) isize {
-    const cwd = "/mnt/disk";
+    const cwd = vfs.getCwd();
     if (size < cwd.len + 1) return ERANGE;
     for (cwd, 0..) |ch, i| {
         if (!uaccess.writeU8(buf_ptr + i, ch)) return EFAULT;
     }
     if (!uaccess.writeU8(buf_ptr + cwd.len, 0)) return EFAULT;
     return @intCast(cwd.len + 1);
+}
+
+/// struct sysinfo: fill in the fields libc actually reads (memory totals,
+/// process count) and zero the rest.
+fn sysSysinfo(info_ptr: u64) isize {
+    if (info_ptr == 0) return EFAULT;
+    var off: u64 = 0;
+    while (off < 112) : (off += 8) {
+        _ = uaccess.writeU64(info_ptr + off, 0);
+    }
+    const ticks = timer.ticks;
+    _ = uaccess.writeU64(info_ptr + 0, ticks / 100); // uptime
+    _ = uaccess.writeU64(info_ptr + 32, pmm.total_pages * 4096); // totalram
+    _ = uaccess.writeU64(info_ptr + 40, pmm.free_pages * 4096); // freeram
+    const sched = @import("scheduler.zig");
+    _ = uaccess.writeU16(info_ptr + 80, @intCast(sched.task_count + 1)); // procs
+    _ = uaccess.writeU32(info_ptr + 104, 1); // mem_unit
+    return 0;
 }
 
 fn sysGettimeofday(tv_ptr: u64, tz_ptr: u64) isize {

@@ -34,6 +34,11 @@ def find_qemu():
 
 def find_iso_kernel_offset(iso_data):
     """Return (sector_offset, slot_bytes) of KERNEL.BIN inside the ISO, or (None, 0)."""
+    def rec_name(rec):
+        # ISO level-1 names may be upper- or lowercase depending on the
+        # mkrescue implementation, and may carry a ';1' version suffix.
+        return rec[33:33 + rec[32]].decode('ascii', 'ignore').upper().rstrip(';1').rstrip('.')
+
     try:
         pvd = iso_data[0x8000:0x8800]
         root_dir_rec = pvd[156:190]
@@ -50,9 +55,7 @@ def find_iso_kernel_offset(iso_data):
                 offset = (offset + 2047) & ~2047
                 continue
             rec = root_data[offset:offset+length]
-            name_len = rec[32]
-            name = rec[33:33+name_len].decode('ascii', 'ignore')
-            if name.startswith('BOOT'):
+            if rec_name(rec) == 'BOOT':
                 boot_extent = int.from_bytes(rec[2:6], 'little')
                 boot_size = int.from_bytes(rec[10:14], 'little')
                 break
@@ -67,9 +70,7 @@ def find_iso_kernel_offset(iso_data):
                     offset = (offset + 2047) & ~2047
                     continue
                 rec = boot_data[offset:offset+length]
-                name_len = rec[32]
-                name = rec[33:33+name_len].decode('ascii', 'ignore')
-                if name.startswith('KERNEL.BIN'):
+                if rec_name(rec) == 'KERNEL.BIN':
                     extent = int.from_bytes(rec[2:6], 'little')
                     # ISO-9660 directory record: size is stored twice,
                     # little-endian at [10:14] and big-endian at [14:18].

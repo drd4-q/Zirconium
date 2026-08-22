@@ -88,10 +88,7 @@ pub fn init(stack_top: u64) void {
     setEntry(3, 0, 0xFFFFF, 0xFA, 0xA0);
     // 0x20: User data (64-bit, DPL=3)
     setEntry(4, 0, 0xFFFFF, 0xF2, 0xC0);
-    // 0x28: Kernel code (duplicate, DPL=0)
-    setEntry(5, 0, 0xFFFFF, 0x9A, 0xA0);
-    // 0x30: Kernel data (duplicate, DPL=0)
-    setEntry(6, 0, 0xFFFFF, 0x92, 0xC0);
+    // 0x28..0x38 unused; TSS lives at 0x40
 
     tss.rsp0 = stack_top;
     tss.iopb_offset = @sizeOf(Tss);

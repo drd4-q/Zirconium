@@ -71,6 +71,17 @@ pub const FileDesc = union(enum) {
     file: *vfs.FileHandle,
     /// A TCP connection created by socket().
     socket: *@import("../net/tcp.zig").Connection,
+    /// An open directory, remembered by path so Linux getdents64 can list it
+    /// (the VFS enumerates directories by path, not by open handle).
+    dir: DirDesc,
+};
+
+/// State of an open directory descriptor.
+pub const DirDesc = struct {
+    path_buf: [160]u8 = undefined,
+    path_len: usize = 0,
+    /// Number of entries already returned by getdents64.
+    cursor: usize = 0,
 };
 
 pub const Task = struct {

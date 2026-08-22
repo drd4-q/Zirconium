@@ -41,6 +41,9 @@ pub fn close(t: *task.Task, fd: usize) bool {
     switch (desc) {
         .file => |h| vfs.close(h),
         .socket => |c| @import("../net/tcp.zig").disconnect(c),
+        // Directory descriptors own no kernel resources besides the inline
+        // path buffer, which dies with the union.
+        .dir => {},
         else => {},
     }
     t.fds[fd] = null;
@@ -79,6 +82,8 @@ pub fn write(t: *task.Task, fd: usize, buf: []const u8) isize {
             tcp.send(c, buf);
             return @intCast(buf.len);
         },
+        // Directories are read via getdents64, not write()/read().
+        .dir => return -21, // EISDIR
     }
 }
 
@@ -137,6 +142,7 @@ pub fn read(t: *task.Task, fd: usize, buf: []u8) isize {
             c.rx_ready = false;
             return @intCast(n);
         },
+        .dir => return -21, // EISDIR
     }
 }
 

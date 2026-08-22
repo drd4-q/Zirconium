@@ -29,7 +29,6 @@ const vfs = @import("fs/vfs.zig");
 const smp = @import("arch/smp.zig");
 const acpi = @import("arch/acpi.zig");
 const usb_prog = @import("programs/usb.zig");
-const usb_drv = @import("drivers/usb.zig");
 const dillo_prog = @import("programs/dillo.zig");
 
 const HISTORY_SIZE: usize = 16;
@@ -39,46 +38,72 @@ var history_len: [HISTORY_SIZE]usize = undefined;
 var history_count: usize = 0;
 var history_pos: i32 = -1;
 
-const ENV_MAX: usize = 32;
-const ENV_KEY_MAX: usize = 32;
-const ENV_VAL_MAX: usize = 64;
-const EnvEntry = struct {
-    key: [ENV_KEY_MAX]u8 = undefined,
-    key_len: usize = 0,
-    value: [ENV_VAL_MAX]u8 = undefined,
-    value_len: usize = 0,
-    used: bool = false,
-};
-var env_store: [ENV_MAX]EnvEntry = undefined;
+const env = @import("system/env.zig");
 
-const commands = [_][]const u8{
-    "help",  "info",    "sysinfo", "mem",  "ps",   "clear", "cls",
-    "halt",  "reboot",  "calc",    "color","clock","fib",   "matrix",
-    "lua",   "user",    "exec",    "save", "ping", "net",  "get",  "wget", "dillo",
-    "set",   "unset",   "env",     "mouse","resolution", "gui",
-    "dhcp",  "arpcache","nslookup",
-    "smp",   "cpuinfo", "usb",     "lsusb",
-    "ls",    "cat",     "touch",   "mkdir","rm",  "write", "cd",
-    "mount", "nano",
+/// A shell command: name plus a uniform handler that receives everything
+/// typed after the name. This table is the single source of truth for both
+/// dispatch and tab completion.
+const CmdEntry = struct {
+    name: []const u8,
+    run: *const fn (args: []const u8) void,
+};
+
+const command_table = [_]CmdEntry{
+    .{ .name = "help",       .run = printHelp },
+    .{ .name = "info",       .run = runInfo },
+    .{ .name = "sysinfo",    .run = runSysinfo },
+    .{ .name = "mem",        .run = runMem },
+    .{ .name = "ps",         .run = showPs },
+    .{ .name = "clear",      .run = cmdClear },
+    .{ .name = "cls",        .run = cmdClear },
+    .{ .name = "halt",       .run = cmdHalt },
+    .{ .name = "reboot",     .run = cmdReboot },
+    .{ .name = "calc",       .run = runCalc },
+    .{ .name = "color",      .run = runColor },
+    .{ .name = "clock",      .run = runClock },
+    .{ .name = "fib",        .run = runFib },
+    .{ .name = "matrix",     .run = cmdMatrix },
+    .{ .name = "lua",        .run = cmdLua },
+    .{ .name = "user",       .run = cmdUser },
+    .{ .name = "exec",       .run = cmdExec },
+    .{ .name = "save",       .run = cmdSave },
+    .{ .name = "ping",       .run = ping_mod.run },
+    .{ .name = "net",        .run = runNet },
+    .{ .name = "get",        .run = web.run },
+    .{ .name = "wget",       .run = web.run },
+    .{ .name = "dillo",      .run = dillo_prog.run },
+    .{ .name = "echo",       .run = cmdEcho },
+    .{ .name = "set",        .run = cmdSet },
+    .{ .name = "unset",      .run = cmdUnset },
+    .{ .name = "env",        .run = cmdEnv },
+    .{ .name = "mouse",      .run = showMouse },
+    .{ .name = "resolution", .run = cmdResolution },
+    .{ .name = "gui",        .run = cmdGui },
+    .{ .name = "dhcp",       .run = runDhcp },
+    .{ .name = "arpcache",   .run = runArpcache },
+    .{ .name = "nslookup",   .run = cmdNslookup },
+    .{ .name = "smp",        .run = showSmp },
+    .{ .name = "cpuinfo",    .run = showSmp },
+    .{ .name = "usb",        .run = runUsb },
+    .{ .name = "lsusb",      .run = runUsb },
+    .{ .name = "acpi",       .run = showAcpi },
+    .{ .name = "ls",         .run = files.cmdLs },
+    .{ .name = "cat",        .run = files.cmdCat },
+    .{ .name = "touch",      .run = files.cmdTouch },
+    .{ .name = "mkdir",      .run = files.cmdMkdir },
+    .{ .name = "rm",         .run = files.cmdRm },
+    .{ .name = "write",      .run = files.cmdWrite },
+    .{ .name = "cd",         .run = files.cmdCd },
+    .{ .name = "mount",      .run = runMount },
+    .{ .name = "nano",       .run = cmdNano },
 };
 
 var cmd_buf: [CMD_MAX]u8 = undefined;
 
 pub fn run() void {
+    root.serial.serialWrite("[SHELL] run: enter\n");
     kb.init();
-
-    pci.scan();
-
-    // Try to init virtio-blk disk
-    @import("drivers/virtio_blk.zig").init();
-
-    // Auto-mount FAT16 if block device available
-    @import("fs/fat16.zig").init();
-
-    // Init USB host controllers and root hubs
-    usb_drv.init();
-
-    mouse.init();
+    root.serial.serialWrite("[SHELL] run: keyboard ready\n");
 
     root.scheduler_ready = true;
 
@@ -123,9 +148,13 @@ fn printBanner() void {
 fn execute(cmd: []const u8) void {
     if (cmd.len == 0) return;
 
-    var cmd_end: usize = cmd.len;
-    var args_start: usize = cmd.len;
-    for (cmd, 0..) |ch, i| {
+    // $KEY references are expanded once for the whole line, so both builtin
+    // arguments and foreign program paths/args see environment values.
+    const line = expandVars(cmd);
+
+    var cmd_end: usize = line.len;
+    var args_start: usize = line.len;
+    for (line, 0..) |ch, i| {
         if (ch == ' ') {
             cmd_end = i;
             args_start = i + 1;
@@ -133,155 +162,178 @@ fn execute(cmd: []const u8) void {
         }
     }
 
-    const cmd_name = cmd[0..cmd_end];
-    const args = if (args_start < cmd.len) cmd[args_start..] else "";
+    const cmd_name = line[0..cmd_end];
+    const args = if (args_start < line.len) line[args_start..] else "";
 
-    if (eql(cmd_name, "help")) {
-        printHelp();
-    } else if (eql(cmd_name, "info")) {
-        info.run();
-    } else if (eql(cmd_name, "calc")) {
-        calc.run();
-    } else if (eql(cmd_name, "color")) {
-        color.run();
-    } else if (eql(cmd_name, "clock")) {
-        clock_mod.run();
-    } else if (eql(cmd_name, "ping")) {
-        ping_mod.run(args);
-    } else if (eql(cmd_name, "get") or eql(cmd_name, "wget")) {
-        web.run(args);
-    } else if (eql(cmd_name, "dillo")) {
-        dillo_prog.run(args);
-    } else if (eql(cmd_name, "net")) {
-        netinfo.run();
-    } else if (eql(cmd_name, "sysinfo")) {
-        sysinfo.run();
-    } else if (eql(cmd_name, "mem")) {
-        mem_mod.run();
-    } else if (eql(cmd_name, "ps")) {
-        showPs();
-    } else if (eql(cmd_name, "fib")) {
-        fib.run();
-    } else if (eql(cmd_name, "lua")) {
-        lua_prog.run();
-        vga.clear();
-        printBanner();
-    } else if (eql(cmd_name, "user")) {
-        const sched = root.scheduler;
-        const user_test_bin = @import("user_test_bin");
-        vga.write("[SHELL] Spawning user-space ELF task...\n");
-        if (sched.spawnProgramImage(&user_test_bin.data, "user_test")) |task_id| {
-            sched.runTask(task_id);
-        } else |err| {
-            vga.write("[SHELL] Error: failed to spawn user task: ");
-            vga.write(@errorName(err));
-            vga.write("\n");
-        }
-    } else if (eql(cmd_name, "exec")) {
-        cmdExec(args);
-    } else if (eql(cmd_name, "save")) {
-        cmdSave(args);
-    } else if (eql(cmd_name, "matrix")) {
-
-        matrix.run();
-        vga.clear();
-        printBanner();
-    } else if (eql(cmd_name, "clear") or eql(cmd_name, "cls")) {
-        vga.clear();
-    } else if (eql(cmd_name, "halt")) {
-        vga.setColor(.light_red, .black);
-        vga.write("\n  System halted.\n");
-        root.serial.serialWrite("\n[BOOT] System halted by user.\n");
-        while (true) {
-            asm volatile ("cli; hlt");
-        }
-    } else if (eql(cmd_name, "reboot")) {
-        vga.setColor(.yellow, .black);
-        vga.write("\n  Rebooting...\n");
-        port_io.outb(0x92, 0x03);
-        while (true) {
-            asm volatile ("cli; hlt");
-        }
-    } else if (eql(cmd_name, "set")) {
-        cmdSet(args);
-    } else if (eql(cmd_name, "unset")) {
-        cmdUnset(args);
-    } else if (eql(cmd_name, "env")) {
-        cmdEnv();
-    } else if (eql(cmd_name, "mouse")) {
-        showMouse();
-    } else if (eql(cmd_name, "resolution")) {
-        cmdResolution(args);
-    } else if (eql(cmd_name, "gui")) {
-        gui.run();
-        vga.clear();
-        printBanner();
-    } else if (eql(cmd_name, "dhcp")) {
-        dhcp_mod.run();
-    } else if (eql(cmd_name, "smp") or eql(cmd_name, "cpuinfo")) {
-        showSmp();
-    } else if (eql(cmd_name, "usb") or eql(cmd_name, "lsusb")) {
-        usb_prog.run();
-    } else if (eql(cmd_name, "acpi")) {
-        showAcpi();
-    } else if (eql(cmd_name, "arpcache")) {
-        arp_cache.printCache();
-    } else if (eql(cmd_name, "nslookup")) {
-        cmdNslookup(args);
-    } else if (eql(cmd_name, "ls")) {
-        files.cmdLs(args);
-    } else if (eql(cmd_name, "cat")) {
-        files.cmdCat(args);
-    } else if (eql(cmd_name, "touch")) {
-        files.cmdTouch(args);
-    } else if (eql(cmd_name, "mkdir")) {
-        files.cmdMkdir(args);
-    } else if (eql(cmd_name, "rm")) {
-        files.cmdRm(args);
-    } else if (eql(cmd_name, "write")) {
-        files.cmdWrite(args);
-    } else if (eql(cmd_name, "cd")) {
-        files.cmdCd(args);
-    } else if (eql(cmd_name, "mount")) {
-        vfs.printMounts();
-    } else if (eql(cmd_name, "nano")) {
-        vga.clear();
-        nano_prog.run(args);
-        vga.clear();
-        printBanner();
-    } else {
-        if (resolveExecutablePath(cmd_name)) |exec_path| {
-            vga.setColor(.light_cyan, .black);
-            vga.write("[SHELL] Executing ");
-            vga.write(exec_path);
-            vga.write("...\n");
-            vga.setColor(.white, .black);
-
-            const sched = root.scheduler;
-            const task_id = sched.spawnProgram(exec_path, cmd) catch |err| {
-                vga.setColor(.light_red, .black);
-                vga.write("[SHELL] Error: failed to spawn '");
-                vga.write(exec_path);
-                vga.write("': ");
-                vga.write(@errorName(err));
-                vga.write("\n");
-                vga.setColor(.white, .black);
-                return;
-            };
-            sched.runTask(task_id);
+    for (command_table) |entry| {
+        if (eql(entry.name, cmd_name)) {
+            entry.run(args);
             return;
         }
+    }
 
-        vga.setColor(.light_red, .black);
-        vga.write("  Unknown command: '");
-        vga.write(cmd_name);
-        vga.write("'\n");
-        vga.setColor(.white, .black);
-        vga.write("  Type 'help' for available commands.\n");
+    // Not a builtin: try to execute it as a program from the filesystem.
+    // The whole line is passed as the arg string so its first token stays
+    // argv[0] for the spawned program.
+    if (execFromPath(cmd_name, line)) return;
+
+    vga.setColor(.light_red, .black);
+    vga.write("  Unknown command: '");
+    vga.write(cmd_name);
+    vga.write("'\n");
+    vga.setColor(.white, .black);
+    vga.write("  Type 'help' for available commands.\n");
+}
+
+// Adapters for zero-argument program entry points.
+fn runInfo(_: []const u8) void {
+    info.run();
+}
+fn runSysinfo(_: []const u8) void {
+    sysinfo.run();
+}
+fn runMem(_: []const u8) void {
+    mem_mod.run();
+}
+fn runCalc(_: []const u8) void {
+    calc.run();
+}
+fn runColor(_: []const u8) void {
+    color.run();
+}
+fn runClock(_: []const u8) void {
+    clock_mod.run();
+}
+fn runFib(_: []const u8) void {
+    fib.run();
+}
+fn runNet(_: []const u8) void {
+    netinfo.run();
+}
+fn runDhcp(_: []const u8) void {
+    dhcp_mod.run();
+}
+fn runArpcache(_: []const u8) void {
+    arp_cache.printCache();
+}
+fn runUsb(_: []const u8) void {
+    usb_prog.run();
+}
+fn runMount(_: []const u8) void {
+    vfs.printMounts();
+}
+
+// Programs that take over the screen and return to a fresh banner on exit.
+fn cmdLua(_: []const u8) void {
+    lua_prog.run();
+    vga.clear();
+    printBanner();
+}
+fn cmdMatrix(_: []const u8) void {
+    matrix.run();
+    vga.clear();
+    printBanner();
+}
+fn cmdGui(_: []const u8) void {
+    gui.run();
+    vga.clear();
+    printBanner();
+}
+fn cmdNano(args: []const u8) void {
+    vga.clear();
+    nano_prog.run(args);
+    vga.clear();
+    printBanner();
+}
+
+// System commands.
+fn cmdClear(_: []const u8) void {
+    vga.clear();
+}
+
+/// echo [-n] text... — print text; $KEY references are already expanded by
+/// the time arguments reach this handler.
+fn cmdEcho(args: []const u8) void {
+    var rest = args;
+    var newline = true;
+    if (rest.len >= 2 and rest[0] == '-' and rest[1] == 'n') {
+        newline = false;
+        rest = rest[2..];
+        while (rest.len > 0 and rest[0] == ' ') : (rest = rest[1..]) {}
+    }
+    vga.write(rest);
+    if (newline) vga.putChar('\n');
+}
+fn cmdHalt(_: []const u8) void {
+    vga.setColor(.light_red, .black);
+    vga.write("\n  System halted.\n");
+    root.serial.serialWrite("\n[BOOT] System halted by user.\n");
+    while (true) {
+        asm volatile ("cli; hlt");
+    }
+}
+fn cmdReboot(_: []const u8) void {
+    vga.setColor(.yellow, .black);
+    vga.write("\n  Rebooting...\n");
+    port_io.outb(0x92, 0x03);
+    while (true) {
+        asm volatile ("cli; hlt");
     }
 }
 
-fn showPs() void {
+/// Spawn the compiled-in ring 3 test ELF and run it to completion.
+fn cmdUser(_: []const u8) void {
+    const sched = root.scheduler;
+    const user_test_bin = @import("user_test_bin");
+    vga.write("[SHELL] Spawning user-space ELF task...\n");
+    if (sched.spawnProgramImage(&user_test_bin.data, "user_test")) |task_id| {
+        sched.runTask(task_id);
+    } else |err| {
+        vga.write("[SHELL] Error: failed to spawn user task: ");
+        vga.write(@errorName(err));
+        vga.write("\n");
+    }
+}
+
+/// Resolve a raw path/name against the VFS search paths and run it.
+/// Returns false if it could not be resolved or spawned.
+fn execFromPath(raw_path: []const u8, args: []const u8) bool {
+    const resolved_path = resolveExecutablePath(raw_path) orelse {
+        vga.setColor(.light_red, .black);
+        vga.write("[SHELL] Error: file not found: ");
+        vga.write(raw_path);
+        vga.write("\n");
+        vga.setColor(.white, .black);
+        return false;
+    };
+    return spawnAndRun(resolved_path, args);
+}
+
+/// Print the "Executing ..." banner, spawn a program image and run it to
+/// completion. Shared by the exec command and bare-name execution.
+fn spawnAndRun(path: []const u8, args: []const u8) bool {
+    vga.setColor(.light_cyan, .black);
+    vga.write("[SHELL] Executing ");
+    vga.write(path);
+    vga.write("...\n");
+    vga.setColor(.white, .black);
+
+    const sched = root.scheduler;
+    const task_id = sched.spawnProgram(path, args) catch |err| {
+        vga.setColor(.light_red, .black);
+        vga.write("[SHELL] Error: failed to spawn '");
+        vga.write(path);
+        vga.write("': ");
+        vga.write(@errorName(err));
+        vga.write("\n");
+        vga.setColor(.white, .black);
+        return false;
+    };
+    sched.runTask(task_id);
+    return true;
+}
+
+fn showPs(_: []const u8) void {
     const sched = root.scheduler;
     vga.setColor(.cyan, .black);
     vga.write("\n=== Tasks ===\n\n");
@@ -322,7 +374,7 @@ fn showPs() void {
     vga.write("\n\n");
 }
 
-fn showSmp() void {
+fn showSmp(_: []const u8) void {
     vga.setColor(.cyan, .black);
     vga.write("\n=== SMP / CPU ===\n\n");
     vga.setColor(.white, .black);
@@ -354,7 +406,7 @@ fn pad(n: usize) void {
     }
 }
 
-fn showAcpi() void {
+fn showAcpi(_: []const u8) void {
     vga.setColor(.cyan, .black);
     vga.write("\n=== ACPI ===\n\n");
     vga.setColor(.white, .black);
@@ -378,7 +430,7 @@ fn showAcpi() void {
     vga.write("\n");
 }
 
-fn showMouse() void {
+fn showMouse(_: []const u8) void {
     vga.setColor(.cyan, .black);
     vga.write("\n  === Mouse Info ===\n\n");
     vga.setColor(.white, .black);
@@ -606,36 +658,7 @@ fn cmdExec(args: []const u8) void {
             break;
         }
     }
-    const raw_path = args[0..path_end];
-
-    const resolved_path = resolveExecutablePath(raw_path) orelse {
-        vga.setColor(.light_red, .black);
-        vga.write("[SHELL] Error: file not found: ");
-        vga.write(raw_path);
-        vga.write("\n");
-        vga.setColor(.white, .black);
-        return;
-    };
-
-    vga.setColor(.light_cyan, .black);
-    vga.write("[SHELL] Executing ");
-    vga.write(resolved_path);
-    vga.write("...\n");
-    vga.setColor(.white, .black);
-
-    const sched = root.scheduler;
-    const task_id = sched.spawnProgram(resolved_path, args) catch |err| {
-        vga.setColor(.light_red, .black);
-        vga.write("[SHELL] Error: failed to spawn '");
-        vga.write(resolved_path);
-        vga.write("': ");
-        vga.write(@errorName(err));
-        vga.write("\n");
-        vga.setColor(.white, .black);
-        return;
-    };
-
-    sched.runTask(task_id);
+    _ = execFromPath(args[0..path_end], args);
 }
 
 fn cmdSave(args: []const u8) void {
@@ -676,7 +699,7 @@ fn cmdSave(args: []const u8) void {
     vga.setColor(.white, .black);
 }
 
-fn printHelp() void {
+fn printHelp(_: []const u8) void {
     vga.setColor(.cyan, .black);
     vga.write("\n  === Commands ===\n\n");
     vga.setColor(.white, .black);
@@ -692,7 +715,8 @@ fn printHelp() void {
     vga.write("  Environment:\n");
     vga.write("    set K=V       Set environment variable\n");
     vga.write("    unset K       Remove environment variable\n");
-    vga.write("    env           List all variables\n\n");
+    vga.write("    env           List all variables\n");
+    vga.write("    echo [-n] t   Print text ($KEY expands to its value)\n\n");
     vga.write("  Programs:\n");
     vga.write("    calc          Calculator (a+b, a-b, a*b, a/b)\n");
     vga.write("    color         VGA color palette demo\n");
@@ -734,7 +758,7 @@ fn printHelp() void {
 
 fn cmdSet(args: []const u8) void {
     if (args.len == 0) {
-        cmdEnv();
+        cmdEnv("");
         return;
     }
     var eq_pos: ?usize = null;
@@ -753,30 +777,11 @@ fn cmdSet(args: []const u8) void {
     const ep = eq_pos.?;
     const key = args[0..ep];
     const val = args[ep + 1 ..];
-
-    for (&env_store) |*entry| {
-        if (entry.used and eql(entry.key[0..entry.key_len], key)) {
-            const vlen = @min(val.len, ENV_VAL_MAX);
-            @memcpy(entry.value[0..vlen], val[0..vlen]);
-            entry.value_len = vlen;
-            return;
-        }
+    if (!env.set(key, val)) {
+        vga.setColor(.light_red, .black);
+        vga.write("  Environment full\n");
+        vga.setColor(.white, .black);
     }
-    for (&env_store) |*entry| {
-        if (!entry.used) {
-            const klen = @min(key.len, ENV_KEY_MAX);
-            const vlen = @min(val.len, ENV_VAL_MAX);
-            @memcpy(entry.key[0..klen], key[0..klen]);
-            entry.key_len = klen;
-            @memcpy(entry.value[0..vlen], val[0..vlen]);
-            entry.value_len = vlen;
-            entry.used = true;
-            return;
-        }
-    }
-    vga.setColor(.light_red, .black);
-    vga.write("  Environment full\n");
-    vga.setColor(.white, .black);
 }
 
 fn cmdUnset(args: []const u8) void {
@@ -786,25 +791,21 @@ fn cmdUnset(args: []const u8) void {
         vga.setColor(.white, .black);
         return;
     }
-    for (&env_store) |*entry| {
-        if (entry.used and eql(entry.key[0..entry.key_len], args)) {
-            entry.used = false;
-            return;
-        }
-    }
+    env.unset(args);
 }
 
-fn cmdEnv() void {
+fn cmdEnv(_: []const u8) void {
     var found = false;
-    for (env_store) |entry| {
-        if (entry.used) {
+    var i: usize = 0;
+    while (i < env.maxEntries()) : (i += 1) {
+        if (env.getAt(i)) |entry| {
             vga.setColor(.light_cyan, .black);
             vga.write("  ");
-            vga.write(entry.key[0..entry.key_len]);
+            vga.write(entry.key);
             vga.setColor(.white, .black);
             vga.write("=");
             vga.setColor(.yellow, .black);
-            vga.write(entry.value[0..entry.value_len]);
+            vga.write(entry.value);
             vga.setColor(.white, .black);
             vga.putChar('\n');
             found = true;
@@ -813,6 +814,40 @@ fn cmdEnv() void {
     if (!found) {
         vga.write("  No environment variables set\n");
     }
+}
+
+var expand_buf: [256]u8 = undefined;
+
+/// Expand $KEY references using the environment table. `$` followed by a
+/// non-name character is literal; unset names expand to nothing (sh rules).
+/// The result lives in a static buffer and is valid until the next call.
+fn expandVars(input: []const u8) []const u8 {
+    var out: usize = 0;
+    var i: usize = 0;
+    while (i < input.len and out < expand_buf.len) {
+        if (input[i] == '$' and i + 1 < input.len and isNameChar(input[i + 1])) {
+            var j = i + 1;
+            while (j < input.len and isNameChar(input[j])) : (j += 1) {}
+            if (env.get(input[i + 1 .. j])) |value| {
+                for (value) |ch| {
+                    if (out >= expand_buf.len) break;
+                    expand_buf[out] = ch;
+                    out += 1;
+                }
+            }
+            i = j;
+        } else {
+            expand_buf[out] = input[i];
+            out += 1;
+            i += 1;
+        }
+    }
+    return expand_buf[0..out];
+}
+
+fn isNameChar(ch: u8) bool {
+    return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or
+        (ch >= '0' and ch <= '9') or ch == '_';
 }
 
 fn eql(a: []const u8, b: []const u8) bool {
@@ -864,7 +899,8 @@ fn tabComplete(buf: []u8, len: usize) usize {
 
     var match_count: usize = 0;
     var last_match: []const u8 = "";
-    for (commands) |cmd| {
+    for (command_table) |entry| {
+        const cmd = entry.name;
         if (cmd.len >= prefix.len and eql(cmd[0..prefix.len], prefix)) {
             match_count += 1;
             last_match = cmd;
@@ -882,7 +918,8 @@ fn tabComplete(buf: []u8, len: usize) usize {
     }
 
     var common_len: usize = last_match.len;
-    for (commands) |cmd| {
+    for (command_table) |entry| {
+        const cmd = entry.name;
         if (cmd.len >= prefix.len and eql(cmd[0..prefix.len], prefix)) {
             var k: usize = prefix.len;
             while (k < common_len and k < cmd.len) : (k += 1) {
@@ -905,7 +942,8 @@ fn tabComplete(buf: []u8, len: usize) usize {
     }
 
     vga.putChar('\n');
-    for (commands) |cmd| {
+    for (command_table) |entry| {
+        const cmd = entry.name;
         if (cmd.len >= prefix.len and eql(cmd[0..prefix.len], prefix)) {
             vga.setColor(.light_cyan, .black);
             vga.write("  ");

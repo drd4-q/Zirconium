@@ -27,6 +27,7 @@ const vmm = @import("vmm.zig");
 const pmm = @import("pmm.zig");
 const timer = @import("../drivers/timer.zig");
 const vfs = @import("../fs/vfs.zig");
+const env = @import("../system/env.zig");
 
 /// Vector used by the thunks. Distinct from 0x80 so the Win32 entry path never
 /// competes with the native/Linux syscall numbering.
@@ -498,12 +499,62 @@ pub fn dispatch(frame: *isr.InterruptFrame) void {
             retBool(frame, true);
         },
         .GetEnvironmentVariableA => {
-            // No environment is exposed to PE programs yet.
-            if (a2 != 0 and a3 > 0) _ = uaccess.writeU8(a2, 0);
-            t.last_error = 203; // ERROR_ENVVAR_NOT_FOUND
-            ret64(frame, 0);
+            // DWORD GetEnvironmentVariableA(name, buffer, size): copies the
+            // value plus NUL into the caller's buffer. Returns the number of
+            // characters copied (excluding NUL); when the buffer is too small
+            // or NULL it returns the required size including NUL and sets
+            // ERROR_INSUFFICIENT_BUFFER, matching Win32 semantics.
+            var name_buf: [env.KEY_MAX + 1]u8 = undefined;
+            const value: ?[]const u8 = if (uaccess.readCStr(a1, &name_buf)) |name|
+                env.get(name)
+            else
+                null;
+            if (value) |val| {
+                const nsize: usize = @intCast(a3);
+                if (a2 == 0 or val.len + 1 > nsize) {
+                    t.last_error = 122; // ERROR_INSUFFICIENT_BUFFER
+                    ret64(frame, val.len + 1);
+                } else {
+                    _ = uaccess.writeBytes(a2, val);
+                    _ = uaccess.writeU8(a2 + val.len, 0);
+                    ret64(frame, val.len);
+                }
+            } else {
+                if (a2 != 0 and a3 > 0) _ = uaccess.writeU8(a2, 0);
+                t.last_error = 203; // ERROR_ENVVAR_NOT_FOUND
+                ret64(frame, 0);
+            }
         },
-        .GetEnvironmentStringsW => ret64(frame, 0),
+        .GetEnvironmentStringsW => {
+            // Build a "KEY=VALUE\0" UTF-16 block, double-NUL terminated, in
+            // fresh anonymous user memory. The program owns it until exit
+            // (FreeEnvironmentStringsW is a no-op, like VirtualFree).
+            var needed: usize = 4; // final double NUL
+            var i: usize = 0;
+            while (i < env.maxEntries()) : (i += 1) {
+                if (env.getAt(i)) |e| needed += (e.key.len + e.value.len + 2) * 2;
+            }
+            const base = process.mmapAnon(t, needed) orelse {
+                t.last_error = ERROR_NOT_ENOUGH_MEMORY;
+                return ret64(frame, 0);
+            };
+            var wpos: u64 = base;
+            var line_buf: [env.KEY_MAX + env.VAL_MAX + 2]u8 = undefined;
+            i = 0;
+            while (i < env.maxEntries()) : (i += 1) {
+                const e = env.getAt(i) orelse continue;
+                @memcpy(line_buf[0..e.key.len], e.key);
+                line_buf[e.key.len] = '=';
+                @memcpy(line_buf[e.key.len + 1 ..][0..e.value.len], e.value);
+                const total = e.key.len + 1 + e.value.len;
+                const chars = uaccess.writeUtf16(wpos, line_buf[0..total], (needed / 2) - 1) orelse 0;
+                wpos += chars * 2;
+                _ = uaccess.writeU16(wpos, 0);
+                wpos += 2;
+            }
+            _ = uaccess.writeU16(wpos, 0); // block terminator
+            ret64(frame, base);
+        },
         .FreeEnvironmentStringsW => retBool(frame, true),
         .GetACP => ret64(frame, 65001), // UTF-8
         .MultiByteToWideChar => {
