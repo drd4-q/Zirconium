@@ -86,6 +86,15 @@ fn irqHandler(_: *isr_mod.InterruptFrame) void {
     }
 }
 
+/// Inject an already-decoded character (USB HID path). The ring carries the
+/// same values pollKey() hands out: ASCII for printable keys, KEY_* specials.
+pub fn injectChar(ch: u8) void {
+    const next = (ring_head + 1) % RING_SIZE;
+    if (next == ring_tail) return; // ring full
+    scancode_ring[ring_head] = ch;
+    ring_head = next;
+}
+
 fn readScancode() ?u8 {
     if (ring_head == ring_tail) return null;
     const sc = scancode_ring[ring_tail];

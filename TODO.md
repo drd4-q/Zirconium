@@ -28,6 +28,8 @@
 - Serial console input: COM1 RX polling drives the shell and program stdin — headless automation via `tools/boot_watch.py <sec> disk cmd:"..."` (QMP screendump → `screen.ppm`, serial → `ser_capture.log`)
 - procfs-lite seeding at boot: /etc/os-release, /etc/hostname, /proc/{cpuinfo,meminfo,uptime,loadavg,version}, /sys/class/dmi/id/* from live kernel state; uname reports "Zirconium"
 - Kernel heap kalloc fixed: free list is address-sorted and mergeBlocks verifies physical adjacency (previously LIFO inserts + blind merges produced fake huge blocks that corrupted large file buffers)
+- ramfs handle ownership fixed: ramfsClose used to kfree() vfs.open_files[] slots (BSS) — every ramfs close corrupted the heap
+- xHCI driver skeleton (`src/drivers/xhci.zig`): PCI detect, MMIO cap/operational parse, stop/reset/run, DCBAA+contexts, command/event rings via RTSOFF, doorbells, port power; QEMU devices attach but root-port CCS stays clear — HID bring-up blocked on qemu-xhci port topology (see TODO below)
 
 ## What needs to be done
 
@@ -116,6 +118,7 @@
 - [x] Real-app matrix (`tools/fetch_apps.py` → samples/apps → disk.img): busybox ✓, uutils coreutils ✓ (`ls --version`, 14 MB Rust ELF), jq.exe loads+starts (crashes late-CRT — needs more UCRT), curl.exe/rg.exe hit remaining unimplemented imports, fastfetch = glibc-dynamic honestly rejected
 - [ ] fork/vfork/clone for the Linux personality (busybox sh needs it — `sh script` hangs at first external command)
 - [ ] Second-spawn race: a spawn right after another task's exit occasionally hangs inside file read (REGS show kernel spin, IF=0, rep-movs-sized RCX); single spawns and some sequences work — needs virtio/kalloc trace
+- [ ] xHCI HID bring-up: qemu-xhci detected+reset+running, PORTSC reads work (PP/PLS), but usb-kbd/usb-tablet never set CCS on any root port even though QEMU lists them on "Port 1/2" — likely internal USB2/USB3 hub topology of qemu-xhci; next step: enumerate via hub descriptors or test with `-device nec-usb-xhci`
 - [ ] Real time-of-day clock feeding gettimeofday/clock_gettime/_time64 (currently PIT ticks since boot)
 - [ ] Math double-args (sin/pow/...) need XMM state in InterruptFrame before UCRT math can bind
 

@@ -94,6 +94,13 @@ const Builder = struct {
 };
 
 pub fn init() void {
+    // Parent directories first: ramfs has no auto-mkdir.
+    _ = vfs.mkdir("/proc");
+    _ = vfs.mkdir("/sys");
+    _ = vfs.mkdir("/sys/class");
+    _ = vfs.mkdir("/sys/class/dmi");
+    _ = vfs.mkdir("/sys/class/dmi/id");
+
     // ---- /etc -------------------------------------------------------------
     writeFile("/etc/os-release",
         \\NAME="Zirconium"

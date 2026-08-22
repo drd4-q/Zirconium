@@ -61,6 +61,7 @@ qemu-system-x86_64 \
     -netdev user,id=net0,hostfwd=tcp::8080-:80 \
     -drive if=none,id=hd0,file=disk.img,format=raw \
     -device virtio-blk,drive=hd0 \
+    -device qemu-xhci -device usb-kbd -device usb-tablet \\
     $DISPLAY_MODE \
     -serial stdio \
     -d int,cpu_reset \

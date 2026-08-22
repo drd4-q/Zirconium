@@ -45,7 +45,8 @@ if ATTACH_DISK:
             f.truncate(64 * 1024 * 1024)
         print("[BOOT WATCH] created blank 64MB disk.img")
     cmd += ["-drive", "if=none,id=hd0,file=disk.img,format=raw",
-            "-device", "virtio-blk,drive=hd0"]
+            "-device", "virtio-blk,drive=hd0",
+            "-device", "qemu-xhci", "-device", "usb-kbd", "-device", "usb-tablet"]
 
 p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

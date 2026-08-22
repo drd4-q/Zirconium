@@ -23,6 +23,9 @@ const RamNode = struct {
 };
 
 var nodes: [MAX_NODES]RamNode = undefined;
+
+/// Scratch returned by open(); vfs.open copies it into its own slot.
+var open_scratch: vfs.FileHandle = undefined;
 var node_count: usize = 0;
 var root_idx: usize = 0;
 
@@ -133,8 +136,7 @@ fn ramfsOpen(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.
             // Can't create root
             return null;
         }
-        const handle = kalloc.kmalloc(@sizeOf(vfs.FileHandle)) orelse return null;
-        const h: *vfs.FileHandle = @ptrFromInt(@intFromPtr(handle));
+        const h = &open_scratch;
         h.fs = fs;
         h.inode = root_idx;
         h.offset = 0;
@@ -155,8 +157,7 @@ fn ramfsOpen(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.
                 nodes[idx].size = 0;
             }
         }
-        const handle = kalloc.kmalloc(@sizeOf(vfs.FileHandle)) orelse return null;
-        const h: *vfs.FileHandle = @ptrFromInt(@intFromPtr(handle));
+        const h = &open_scratch;
         h.fs = fs;
         h.inode = idx;
         h.offset = 0;
@@ -185,8 +186,7 @@ fn ramfsOpen(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.
             nodes[pn.parent].child_count += 1;
         }
 
-        const handle = kalloc.kmalloc(@sizeOf(vfs.FileHandle)) orelse return null;
-        const h: *vfs.FileHandle = @ptrFromInt(@intFromPtr(handle));
+        const h = &open_scratch;
         h.fs = fs;
         h.inode = new_idx;
         h.offset = 0;
@@ -199,8 +199,10 @@ fn ramfsOpen(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.
 }
 
 fn ramfsClose(fs: *vfs.FileSystem, handle: *vfs.FileHandle) void {
+    // Handle storage belongs to vfs.open_files[], not to this filesystem.
+    // Node data is freed by truncate/unlink paths.
     _ = fs;
-    kalloc.kfree(@ptrFromInt(@intFromPtr(handle)));
+    _ = handle;
 }
 
 fn ramfsRead(fs: *vfs.FileSystem, handle: *vfs.FileHandle, buf: []u8) usize {

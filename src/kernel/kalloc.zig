@@ -95,6 +95,14 @@ pub fn kfree(ptr: [*]u8) void {
     if (block.free) {
         serial.serialWrite("[KHEAP] Double free detected at 0x");
         serial.serialWriteHex(addr);
+        serial.serialWrite(" from ra=0x");
+        serial.serialWriteHex(@returnAddress());
+        // Outside any heap page? Then the caller passed a non-kalloc pointer.
+        if (heap_start == null or addr < @intFromPtr(heap_start.?) or
+            (heap_end != null and addr >= @intFromPtr(heap_end.?)))
+        {
+            serial.serialWrite(" [NON-HEAP PTR]");
+        }
         serial.serialWrite("\n");
         return;
     }
@@ -104,11 +112,11 @@ pub fn kfree(ptr: [*]u8) void {
     free_count += 1;
     used_size -= block.size + @sizeOf(BlockHeader);
 
-    // Merge with adjacent free blocks
-    mergeBlocks(block);
-
-    // Add to free list if not already there
+    // Insert FIRST, then merge: mergeBlocks unlinks absorbed neighbours, so
+    // merging before insertion would re-insert a node that prev already
+    // swallowed (classic double-free on the next allocation cycle).
     addToFreeList(block);
+    mergeBlocks(block);
 }
 
 pub fn krealloc(ptr: [*]u8, new_size: usize) ?[*]u8 {
