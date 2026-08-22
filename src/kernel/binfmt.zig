@@ -13,6 +13,7 @@ const serial = @import("../system/serial.zig");
 const vfs = @import("../fs/vfs.zig");
 const kalloc = @import("kalloc.zig");
 const address_space = @import("address_space.zig");
+const pmm = @import("pmm.zig");
 
 pub const Format = enum {
     elf,
@@ -98,6 +99,10 @@ pub fn readFile(path: []const u8) ![]u8 {
 
     const raw = kalloc.kmalloc(size) orelse return error.OutOfMemory;
     const buf = raw[0..size];
+    // Guard this live kernel buffer: any later allocation landing inside it
+    // means a PMM double-allocation that would corrupt the loaded image.
+    pmm.debug_guard_start = @intFromPtr(raw);
+    pmm.debug_guard_end = @intFromPtr(raw) + size;
 
     const handle = vfs.open(path, .{ .read = true }) orelse {
         kalloc.kfree(raw);

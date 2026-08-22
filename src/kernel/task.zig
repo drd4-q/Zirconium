@@ -104,8 +104,13 @@ pub const Task = struct {
     mmap_next: u64 = MMAP_BASE,
     /// Head of the in-arena free list used by HeapAlloc/malloc-style calls.
     heap_free_head: u64 = 0,
-    /// Value of FS_BASE the task expects (Linux TLS via arch_prctl).
-    fs_base: u64 = 0,
+/// Value of FS_BASE the task expects (Linux TLS via arch_prctl).
+fs_base: u64 = 0,
+/// Value of GS_BASE the task expects (Windows TEB for PE personalities).
+gs_base: u64 = 0,
+/// User-memory block holding CRT globals (__p___argc/__p__fmode/...) for PE
+/// tasks; individual offsets are documented in winapi.zig dispatch.
+crt_block: u64 = 0,
     /// Thread-local storage slots for Win32 TlsAlloc/TlsSetValue.
     tls_slots: [32]u64 = [_]u64{0} ** 32,
     tls_used: u32 = 0,

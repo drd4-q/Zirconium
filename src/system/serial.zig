@@ -29,6 +29,14 @@ fn isTransmitEmpty() bool {
     return (inb(COM1 + 5) & 0x20) != 0;
 }
 
+/// Poll the receive side of COM1: returns one byte when data is ready.
+/// Used by the shell and console stdin so the kernel can be driven over a
+/// headless serial link (QEMU -serial stdio).
+pub fn pollRead() ?u8 {
+    if ((inb(COM1 + 5) & 0x01) == 0) return null;
+    return inb(COM1);
+}
+
 fn writeChar(ch: u8) void {
     while (!isTransmitEmpty()) {}
     outb(COM1, ch);

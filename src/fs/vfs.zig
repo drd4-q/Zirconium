@@ -348,8 +348,24 @@ pub fn setCwd(path: []const u8) void {
     }
 }
 
-pub fn printMounts() void {
-    vga.setColor(.cyan, .black);
+/// Remove the mount registered at `mount_point`. Open handles through it
+/// become dangling; callers must ensure nothing is using the filesystem.
+pub fn unmount(mount_point: []const u8) bool {
+    var i: usize = 0;
+    while (i < mount_count) : (i += 1) {
+        const m = mounts[i].mount_point[0..mounts[i].mount_point_len];
+        if (std.mem.eql(u8, m, mount_point)) {
+            while (i + 1 < mount_count) : (i += 1) {
+                mounts[i] = mounts[i + 1];
+            }
+            mount_count -= 1;
+            return true;
+        }
+    }
+    return false;
+}
+
+pub fn printMounts() void {    vga.setColor(.cyan, .black);
     vga.write("\n=== Mounted Filesystems ===\n\n");
     vga.setColor(.white, .black);
 

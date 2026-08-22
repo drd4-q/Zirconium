@@ -310,6 +310,10 @@ fn jumpToUser(t: *task.Task) void {
     if (t.personality == .linux and t.fs_base != 0) {
         @import("../arch/msr.zig").setFsBase(t.fs_base);
     }
+    // Windows tasks get their fake TEB through GS.
+    if (t.personality == .windows and t.gs_base != 0) {
+        @import("../arch/msr.zig").setGsBase(t.gs_base);
+    }
 
     switch_to_user(
         t.saved_state.rsp,

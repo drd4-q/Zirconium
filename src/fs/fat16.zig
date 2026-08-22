@@ -48,6 +48,12 @@ const FileInfo = struct {
     file_size: u32,
     parent_cluster: u16 = 0, // cluster of the directory holding this file (0 = root)
     used: bool = false,
+    // Sequential-read cache: the chain position of the last read. Without it
+    // every read() restarts at first_cluster, making large sequential reads
+    // quadratic (a 1 MB binary took minutes through virtio).
+    cur_valid: bool = false,
+    cur_cluster: u16 = 0,
+    cur_base: u64 = 0, // byte offset of cur_cluster within the file
 };
 
 var boot_sector: Fat16BootSector = undefined;
@@ -643,28 +649,53 @@ fn fat16Read(fs: *vfs.FileSystem, handle: *vfs.FileHandle, buf: []u8) usize {
     const to_read = @min(buf.len, @as(usize, @intCast(remaining)));
     if (to_read == 0) return 0;
 
-    // Read full clusters then copy relevant portion
     var cluster_buf: [4096]u8 = undefined;
-    var current = fi.first_cluster;
-    var offset: u64 = 0;
+    const cluster_size = @as(u64, boot_sector.sectors_per_cluster) * SECTOR_SIZE;
 
-    while (offset < handle.offset + to_read and current != 0) {
-        const cluster_size = @as(u64, boot_sector.sectors_per_cluster) * SECTOR_SIZE;
-        const read = readClusterChain(current, cluster_buf[0..@min(cluster_size, 4096)]);
-
-        if (handle.offset >= offset and handle.offset < offset + read) {
-            const start_in_cluster = handle.offset - offset;
-            const copy_from = start_in_cluster;
-            const copy_len = @min(to_read, read - start_in_cluster);
-            @memcpy(buf[0..copy_len], cluster_buf[copy_from..][0..copy_len]);
-            handle.offset += copy_len;
-            return copy_len;
-        }
-
-        offset += read;
-        current = nextCluster(current) orelse break;
+    // Resume the chain walk from the cached position when reading forward;
+    // rewind to first_cluster after a backwards seek.
+    if (!fi.cur_valid or fi.cur_base > handle.offset) {
+        fi.cur_valid = true;
+        fi.cur_cluster = fi.first_cluster;
+        fi.cur_base = 0;
     }
-    return 0;
+    var current = fi.cur_cluster;
+    var offset = fi.cur_base;
+
+    while (current != 0 and offset + cluster_size <= handle.offset) {
+        offset += cluster_size;
+        current = nextCluster(current) orelse return 0;
+    }
+    if (current == 0) {
+        fi.cur_valid = false;
+        return 0;
+    }
+
+    // Read exactly ONE cluster: readClusterChain follows the FAT chain for as
+    // long as `out` lasts, so handing it the full scratch buffer would consume
+    // several clusters while our cache only advances one hop.
+    const one_cluster = cluster_buf[0..@intCast(cluster_size)];
+    const got = readClusterChain(current, one_cluster);
+    if (got == 0) return 0;
+    const start_in_cluster: usize = @intCast(handle.offset - offset);
+    if (start_in_cluster >= got) {
+        fi.cur_valid = false;
+        return 0;
+    }
+    const copy_len = @min(to_read, got - start_in_cluster);
+    @memcpy(buf[0..copy_len], cluster_buf[start_in_cluster..][0..copy_len]);
+    handle.offset += copy_len;
+
+    // Keep the cache pointing at where the next read continues from.
+    fi.cur_base = offset;
+    fi.cur_cluster = current;
+    if (start_in_cluster + copy_len >= got) {
+        const nxt = nextCluster(current);
+        fi.cur_cluster = nxt orelse 0;
+        fi.cur_base = offset + got;
+        if (nxt == null) fi.cur_valid = false;
+    }
+    return copy_len;
 }
 
 fn fat16Write(fs: *vfs.FileSystem, handle: *vfs.FileHandle, buf: []const u8) usize {
@@ -672,6 +703,7 @@ fn fat16Write(fs: *vfs.FileSystem, handle: *vfs.FileHandle, buf: []const u8) usi
     if (handle.inode >= file_count) return 0;
     const fi = &file_cache[handle.inode];
     if (fi.is_dir or buf.len == 0) return 0;
+    fi.cur_valid = false; // the chain may grow/relink under us
 
     const cluster_size: u64 = @as(u64, boot_sector.sectors_per_cluster) * SECTOR_SIZE;
 
@@ -812,6 +844,7 @@ fn fat16Truncate(fs: *vfs.FileSystem, handle: *vfs.FileHandle, size: u64) bool {
     if (handle.inode >= file_count) return false;
     const fi = &file_cache[handle.inode];
     if (fi.is_dir) return false;
+    fi.cur_valid = false;
 
     if (size == 0) {
         freeChain(fi.first_cluster);
@@ -913,15 +946,13 @@ pub fn init() void {
     };
 
     // Validate
-    if (boot_sector.bytes_per_sector != SECTOR_SIZE) {
-        serial.serialWrite("[FAT16] Invalid bytes per sector: ");
+    if (boot_sector.bytes_per_sector != SECTOR_SIZE or boot_sector.fat_size_sectors == 0) {
+        serial.serialWrite("[FAT16] No FAT16 filesystem found (bytes/sector=");
         serial.serialWriteDec(boot_sector.bytes_per_sector);
-        serial.serialWrite("\n");
-        return;
-    }
-
-    if (boot_sector.fat_size_sectors == 0) {
-        serial.serialWrite("[FAT16] FAT size is 0\n");
+        serial.serialWrite(", fat size=");
+        serial.serialWriteDec(boot_sector.fat_size_sectors);
+        serial.serialWrite(") — formatting blank disk\n");
+        _ = format();
         return;
     }
 
@@ -937,11 +968,214 @@ pub fn init() void {
     serial.serialWriteDec(boot_sector.fat_size_sectors);
     serial.serialWrite(", root entries=");
     serial.serialWriteDec(boot_sector.root_entry_count);
+    const eff_total = if (boot_sector.total_sectors_16 != 0)
+        @as(u64, boot_sector.total_sectors_16)
+    else
+        @as(u64, boot_sector.total_sectors_32);
     serial.serialWrite(", total sectors=");
-    serial.serialWriteDec(boot_sector.total_sectors_16);
+    serial.serialWriteDec(eff_total);
     serial.serialWrite("\n");
 
-    // Mount
+    tryMount();
+}
+
+pub fn isMounted() bool {
+    return fs_mounted;
+}
+
+/// Forget the current mount so a following format() can register a fresh one.
+pub fn resetMountState() void {
+    file_count = 0;
+    fs_mounted = false;
+}
+
+// ---------------------------------------------------------------------------
+// Formatting: build a blank FAT16 filesystem directly on the block device so
+// a raw disk image created by run.bat/test_prog becomes mountable with no
+// host-side mkfs tooling.
+// ---------------------------------------------------------------------------
+
+/// Format the registered block device as a fresh FAT16 volume and mount it.
+/// Destroys any previous contents.
+pub fn format() bool {
+    const dev = blockdev.getDevice(0) orelse {
+        serial.serialWrite("[FAT16] format: no block device\n");
+        return false;
+    };
+    const total_sectors = blockdev.totalSectors(dev);
+    // Practical FAT16 ceiling: 256 MiB (65524 clusters x 8-sector clusters).
+    // The driver reads the size via total_sectors_16 with a total_sectors_32
+    // fallback, so anything above 65535 sectors just uses the 32-bit field.
+    if (total_sectors < 4096 or total_sectors > 524288) {
+        serial.serialWrite("[FAT16] format: unsupported disk size (");
+        serial.serialWriteDec(total_sectors);
+        serial.serialWrite(" sectors, need 2MB..256MB)\n");
+        return false;
+    }
+
+    const reserved: u16 = 1;
+    const nfats: u8 = 2;
+    const root_entries: u16 = 512;
+    const root_dir_sectors = (@as(u64, root_entries) * 32 + SECTOR_SIZE - 1) / SECTOR_SIZE;
+    const spc: u8 = if (total_sectors < 16384) 1 else if (total_sectors < 131072) 4 else 8;
+
+    // Smallest FAT that covers every cluster of the remaining data area.
+    var fat_size: u16 = 1;
+    while (fat_size < 1024) : (fat_size += 1) {
+        const data_sectors = total_sectors - reserved - @as(u64, fat_size) * nfats - root_dir_sectors;
+        const clusters = data_sectors / spc;
+        if (clusters < 4085) break; // below this it would be a FAT12 volume
+        const fat_bytes = (clusters + 2) * 2;
+        if (@as(u64, fat_size) * SECTOR_SIZE >= fat_bytes) break;
+    }
+
+    // Boot sector / BPB.
+    var bs = [_]u8{0} ** SECTOR_SIZE;
+    bs[0] = 0xEB;
+    bs[1] = 0x3C;
+    bs[2] = 0x90;
+    @memcpy(bs[3..11], "ZIRCOS  ");
+    bs[11] = @intCast(SECTOR_SIZE & 0xFF);
+    bs[12] = @intCast((SECTOR_SIZE >> 8) & 0xFF);
+    bs[13] = spc;
+    bs[14] = @intCast(reserved & 0xFF);
+    bs[15] = @intCast((reserved >> 8) & 0xFF);
+    bs[16] = nfats;
+    bs[17] = @intCast(root_entries & 0xFF);
+    bs[18] = @intCast((root_entries >> 8) & 0xFF);
+    if (total_sectors <= 0xFFFF) {
+        bs[19] = @intCast(total_sectors & 0xFF);
+        bs[20] = @intCast((total_sectors >> 8) & 0xFF);
+    } else {
+        // Large volumes carry the size in the 32-bit field instead.
+        bs[19] = 0;
+        bs[20] = 0;
+        bs[32] = @intCast(total_sectors & 0xFF);
+        bs[33] = @intCast((total_sectors >> 8) & 0xFF);
+        bs[34] = @intCast((total_sectors >> 16) & 0xFF);
+        bs[35] = @intCast((total_sectors >> 24) & 0xFF);
+    }
+    bs[21] = 0xF8; // fixed disk media descriptor
+    bs[22] = @intCast(fat_size & 0xFF);
+    bs[23] = @intCast((fat_size >> 8) & 0xFF);
+    bs[24] = 63; // sectors/track (cosmetic)
+    bs[26] = 16; // heads (cosmetic)
+    bs[38] = 0x29; // extended boot signature
+    bs[39] = 0x01; // volume id
+    bs[43] = 'Z'; // 11-byte volume label "ZIRCONIUM"
+    bs[44] = 'I';
+    bs[45] = 'R';
+    bs[46] = 'C';
+    bs[47] = 'O';
+    bs[48] = 'N';
+    bs[49] = 'I';
+    bs[50] = 'U';
+    bs[51] = 'M';
+    bs[54] = 'F';
+    bs[55] = 'A';
+    bs[56] = 'T';
+    bs[57] = '1';
+    bs[58] = '6';
+    bs[59] = ' ';
+    bs[60] = ' ';
+    bs[61] = ' ';
+    bs[510] = 0x55;
+    bs[511] = 0xAA;
+    if (!blockdev.writeSectors(dev, 0, 1, &bs)) return false;
+
+    // Zero the FAT copies and the root directory in bulk.
+    var zeros = [_]u8{0} ** SECTOR_SIZE;
+    const fat_sectors = reserved + @as(u64, fat_size) * nfats;
+    var s: u64 = reserved;
+    while (s < fat_sectors + root_dir_sectors) : (s += 1) {
+        if (!blockdev.writeSectors(dev, s, 1, &zeros)) {
+            serial.serialWrite("[FAT16] format: write failed\n");
+            return false;
+        }
+    }
+
+    // FAT[0]=media, FAT[1]=EOC in every copy; the rest stays zero.
+    var i: u8 = 0;
+    while (i < nfats) : (i += 1) {
+        const base = reserved + @as(u64, i) * fat_size;
+        zeros[0] = 0xF8;
+        zeros[1] = 0xFF;
+        zeros[2] = 0xFF;
+        zeros[3] = 0xFF;
+        if (!blockdev.writeSectors(dev, base, 1, &zeros)) return false;
+        zeros[0] = 0;
+        zeros[1] = 0;
+        zeros[2] = 0;
+        zeros[3] = 0;
+    }
+
+    serial.serialWrite("[FAT16] Formatted ");
+    serial.serialWriteDec(@intCast(total_sectors / 2048)); // MiB
+    serial.serialWrite(" MiB FAT16 (spc=");
+    serial.serialWriteDec(spc);
+    serial.serialWrite(", fat=");
+    serial.serialWriteDec(fat_size);
+    serial.serialWrite(" sectors)\n");
+
+    fat_dev = dev;
+    tryMount();
+    _ = &zeros;
+    return fs_mounted;
+}
+
+/// Count free clusters by walking FAT#0 (one sector read per 256 entries).
+pub fn countFreeClusters() usize {
+    if (!fs_mounted) return 0;
+    var free: usize = 0;
+    var buf: [SECTOR_SIZE]u8 = undefined;
+    var loaded_sector: u64 = std.math.maxInt(u64);
+    const max_cluster = totalClusters();
+    var c: u16 = 2;
+    while (c < @as(u16, @intCast(max_cluster)) + 2) : (c += 1) {
+        const off = @as(u64, c) * 2;
+        const sec = fat_start_sector + off / SECTOR_SIZE;
+        if (sec != loaded_sector) {
+            if (!readSector(sec, &buf)) return free;
+            loaded_sector = sec;
+        }
+        const o: usize = @intCast(off % SECTOR_SIZE);
+        const e = @as(u16, buf[o]) | (@as(u16, buf[o + 1]) << 8);
+        if (e == 0x0000) free += 1;
+    }
+    return free;
+}
+
+/// One-line volume summary for the df command.
+pub fn printInfo() void {
+    if (!fs_mounted) {
+        vga.write("  /mnt/disk: not mounted (try 'mkfs')\n");
+        return;
+    }
+    const dev = fat_dev orelse return;
+    var name_len: usize = 0;
+    while (name_len < dev.name.len and dev.name[name_len] != 0) : (name_len += 1) {}
+    const total_clusters = totalClusters();
+    const free_clusters = countFreeClusters();
+    const used_kb = (total_clusters - free_clusters) * boot_sector.sectors_per_cluster / 2;
+    const total_kb = total_clusters * boot_sector.sectors_per_cluster / 2;
+
+    vga.write("  /mnt/disk on ");
+    vga.write(dev.name[0..name_len]);
+    vga.write(": ");
+    vga.writeDec(total_kb);
+    vga.write(" KiB total, ");
+    vga.writeDec(used_kb);
+    vga.write(" KiB used, ");
+    vga.writeDec(total_kb - used_kb);
+    vga.write(" KiB free (");
+    vga.writeDec(free_clusters);
+    vga.write("/");
+    vga.writeDec(total_clusters);
+    vga.write(" clusters)\n");
+}
+
+fn tryMount() void {
+    if (fs_mounted) return;
     var fs = vfs.FileSystem{
         .name = undefined,
         .mount_point = undefined,
@@ -976,8 +1210,4 @@ pub fn init() void {
         vga.write("  [FAT16] Auto-mounted at /mnt/disk\n");
         vga.setColor(.white, .black);
     }
-}
-
-pub fn isMounted() bool {
-    return fs_mounted;
 }

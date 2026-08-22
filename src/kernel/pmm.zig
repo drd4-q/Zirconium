@@ -134,8 +134,26 @@ pub fn init(kernel_start: usize, kernel_end: usize) void {
     serial.serialWrite("\n");
 }
 
-pub fn allocPage() ?usize {
-    var byte_idx: usize = 0;
+/// Debug guard: while non-zero, any allocation intersecting this physical
+/// range is reported. Set by binfmt.readFile to catch double-allocation bugs
+/// (a user image page landing inside the live kernel file buffer).
+pub var debug_guard_start: usize = 0;
+pub var debug_guard_end: usize = 0;
+
+fn debugGuardCheck(addr: usize) void {
+    if (debug_guard_end == 0) return;
+    if (addr < debug_guard_end and addr + PAGE_SIZE > debug_guard_start) {
+        serial.serialWrite("[PMM] !!! page 0x");
+        serial.serialWriteHex(@truncate(addr));
+        serial.serialWrite(" intersects guarded kernel buffer 0x");
+        serial.serialWriteHex(@truncate(debug_guard_start));
+        serial.serialWrite("..0x");
+        serial.serialWriteHex(@truncate(debug_guard_end));
+        serial.serialWrite("\n");
+    }
+}
+
+pub fn allocPage() ?usize {    var byte_idx: usize = 0;
     while (byte_idx < BITMAP_SIZE) : (byte_idx += 1) {
         if (bitmap[byte_idx] != 0xFF) {
             var bit: u8 = 0;
@@ -145,6 +163,7 @@ pub fn allocPage() ?usize {
                     free_pages -= 1;
                     const p_idx = byte_idx * 8 + bit;
                     ref_counts[p_idx] = 1;
+                    debugGuardCheck(p_idx * PAGE_SIZE);
                     return p_idx * PAGE_SIZE;
                 }
             }
@@ -185,6 +204,7 @@ pub fn allocPages(count: usize) ?usize {
                     ref_counts[p] = 1;
                 }
                 free_pages -= count;
+                debugGuardCheck(start_page * PAGE_SIZE);
                 return start_page * PAGE_SIZE;
             }
         }

@@ -303,7 +303,10 @@ fn resolveImports(
         return;
     }
 
-    var desc_off = rvaToOffset(data, hdr, imp.rva) orelse return error.InvalidPeHeader;
+    var desc_off = rvaToOffset(data, hdr, imp.rva) orelse {
+        serial.serialWrite("[PE] import DESCRIPTOR rva unmapped\n");
+        return error.InvalidPeHeader;
+    };
     var resolved: usize = 0;
     var missing: usize = 0;
 
@@ -320,7 +323,14 @@ fn resolveImports(
         // The lookup table (OriginalFirstThunk) holds the names; FirstThunk is
         // the IAT we overwrite. Bound imports may only have FirstThunk.
         const lookup_rva = if (original_first_thunk != 0) original_first_thunk else first_thunk;
-        var lookup_off = rvaToOffset(data, hdr, lookup_rva) orelse return error.InvalidPeHeader;
+        var lookup_off = rvaToOffset(data, hdr, lookup_rva) orelse {
+            serial.serialWrite("[PE] lookup rva unmapped: dll=");
+            serial.serialWrite(dll);
+            serial.serialWrite(" oft=0x");
+            serial.serialWriteHex(original_first_thunk);
+            serial.serialWrite("\n");
+            return error.InvalidPeHeader;
+        };
         var iat_addr = base + first_thunk;
 
         while (lookup_off + 8 <= data.len) : ({
@@ -380,6 +390,14 @@ fn copyInto(addr_space: address_space.AddressSpace, vaddr: u64, src: []const u8)
         const page = va & ~@as(u64, 0xFFF);
         const in_page: usize = @intCast(va - page);
         const phys = addr_space.translate(page) orelse return error.UnmappedTarget;
+        // TEMP forensics: flag any destination page inside the guarded buffer.
+        if (pmm.debug_guard_end != 0 and phys + 0x1000 > pmm.debug_guard_start and phys < pmm.debug_guard_end) {
+            serial.serialWrite("[PE] !!! copyInto dst page 0x");
+            serial.serialWriteHex(@truncate(page));
+            serial.serialWrite(" -> phys 0x");
+            serial.serialWriteHex(@truncate(phys));
+            serial.serialWrite(" IS INSIDE kernel file buffer!\n");
+        }
         const chunk = @min(src.len - copied, 0x1000 - in_page);
         const dst: [*]u8 = @ptrFromInt(phys + in_page);
         @memcpy(dst[0..chunk], src[copied..][0..chunk]);

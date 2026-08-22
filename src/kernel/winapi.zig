@@ -108,6 +108,136 @@ pub const Func = enum(u32) {
     RaiseException,
     LoadLibraryA,
     FreeLibrary,
+
+    // ---- CRT basics (msvcrt/kernel32 exports every real binary pulls in) ----
+    memcpy,
+    memmove,
+    memset,
+    memcmp,
+    strlen,
+    strcpy,
+    strcat,
+    strcmp,
+    strncmp,
+    strchr,
+    strrchr,
+    strstr,
+    toupper,
+    tolower,
+    malloc,
+    calloc,
+    realloc,
+    free,
+    abort,
+    exit,
+    _exit,
+    atexit,
+    puts,
+    putchar,
+    printf,
+    _snprintf,
+    snprintf,
+    sprintf,
+
+    // ---- WinSock 2 (ws2_32.dll) -------------------------------------------
+    WSAStartup,
+    WSACleanup,
+    WSAGetLastError,
+    WSASetLastError,
+    socket,
+    closesocket,
+    connect,
+    send,
+    recv,
+    shutdown,
+    htons,
+    htonl,
+    ntohs,
+    ntohl,
+    inet_addr,
+    setsockopt,
+    getsockopt,
+    ioctlsocket,
+    select,
+
+    // ---- UCRT startup & runtime (jq/rg/curl class binaries) ----------------
+    _initterm,
+    _initterm_e,
+    _configure_narrow_argv,
+    _configure_wide_argv,
+    _initialize_narrow_environment,
+    _initialize_wide_environment,
+    _set_app_type,
+    _set_new_mode,
+    _set_invalid_parameter_handler,
+    __setusermatherr,
+    _configthreadlocale,
+    _crt_atexit,
+    _cexit,
+    _lock_file,
+    _unlock_file,
+    raise,
+    _assert,
+    _wassert,
+    perror,
+    TryEnterCriticalSection,
+    __p___argc,
+    __p___wargv,
+    __p__environ,
+    __p__wenviron,
+    __p__commode,
+    __p__fmode,
+    _errno,
+    __daylight,
+    __timezone,
+    __tzname,
+    __acrt_iob_func,
+    GetCurrentThread,
+    fwrite,
+    fread,
+    fputs,
+    fputc,
+    getc,
+    fgets,
+    fclose,
+    feof,
+    ferror,
+    fflush,
+    setvbuf,
+    _fileno,
+    _get_osfhandle,
+    _isatty,
+    _open,
+    _close,
+    _read,
+    _write,
+    _setmode,
+    _fdopen,
+    _wfopen,
+    memchr,
+    strnlen,
+    strspn,
+    _strdup,
+    _strnicmp,
+    isalnum,
+    isalpha,
+    isspace,
+    isdigit,
+    isupper,
+    islower,
+    wcslen,
+    wcsnlen,
+    atoi,
+    strtol,
+    __stdio_common_vfprintf,
+    __stdio_common_vsprintf,
+    _time64,
+    _gmtime64,
+    _localtime64_s,
+    _mktime64,
+    _mkgmtime64,
+    _tzset,
+    rand_s,
 };
 
 const FUNC_COUNT: u32 = @typeInfo(Func).@"enum".fields.len;
@@ -225,6 +355,252 @@ const INVALID_HANDLE: u64 = 0xFFFFFFFFFFFFFFFF;
 
 /// Files get handles that encode their fd, so CloseHandle/WriteFile can map back.
 const HANDLE_FILE_BASE: u64 = 0xF0001000;
+const HANDLE_SOCKET_BASE: u64 = 0xF0002000;
+/// Pseudo FILE* handles handed out by __acrt_iob_func: base + raw fd number.
+const STREAM_BASE: u64 = 0xF1000000;
+
+/// Map a UCRT FILE* back to its fd (only stdin/stdout/stderr exist).
+fn streamToFd(stream: u64) ?usize {
+    if (stream >= STREAM_BASE and stream < STREAM_BASE + 3) {
+        return @intCast(stream - STREAM_BASE);
+    }
+    return null;
+}
+const INVALID_SOCKET: u64 = 0xFFFFFFFFFFFFFFFF;
+const INADDR_NONE: u32 = 0xFFFFFFFF;
+
+// WinSock error codes (winsock2.h).
+const WSA_NOT_ENOUGH_MEMORY: u32 = 14;
+const WSAEFAULT: u32 = 10014;
+const WSAENOTSOCK: u32 = 10038;
+const WSAECONNABORTED: u32 = 10053;
+const WSAECONNREFUSED: u32 = 10061;
+
+fn socketToFd(t: *task.Task, handle: u64) ?usize {
+    if (handle < HANDLE_SOCKET_BASE or handle >= HANDLE_SOCKET_BASE + task.MAX_FDS) return null;
+    const fd: usize = @intCast(handle - HANDLE_SOCKET_BASE);
+    const desc = fdtable.get(t, fd) orelse return null;
+    return switch (desc) {
+        .socket => fd,
+        else => null,
+    };
+}
+
+/// Walks Win64 varargs: slot 1 = rdx, 2 = r8, 3 = r9, then the stack above
+/// the shadow space. `next` is the index of the first variadic slot.
+const ArgIter = struct {
+    frame: *isr.InterruptFrame,
+    next: usize,
+
+    fn arg(self: *ArgIter) u64 {
+        const v = switch (self.next) {
+            1 => self.frame.rdx,
+            2 => self.frame.r8,
+            3 => self.frame.r9,
+            else => stackArg(self.frame, self.next),
+        };
+        self.next += 1;
+        return v;
+    }
+};
+
+/// Walks an MSVC va_list: {u32 gp_offset, u32 fp_offset, void* overflow_area,
+/// void* reg_save_area}. Register args come from reg_save_area until
+/// gp_offset reaches 0x28, then from the overflow area.
+const VaListIter = struct {
+    gp_offset: u32,
+    fp_offset: u32,
+    overflow: u64,
+    reg_save: u64,
+
+    fn init(list_ptr: u64) ?VaListIter {
+        if (uaccess.readU32(list_ptr)) |gp| {
+            const fp = uaccess.readU32(list_ptr + 4) orelse return null;
+            const ovf = uaccess.readU64(list_ptr + 8) orelse return null;
+            const rsa = uaccess.readU64(list_ptr + 16) orelse return null;
+            return .{ .gp_offset = gp, .fp_offset = fp, .overflow = ovf, .reg_save = rsa };
+        }
+        return null;
+    }
+
+    fn arg(self: *VaListIter) u64 {
+        var v: u64 = 0;
+        if (self.gp_offset < 0x28) {
+            v = uaccess.readU64(self.reg_save + self.gp_offset) orelse 0;
+            self.gp_offset += 8;
+        } else {
+            v = uaccess.readU64(self.overflow) orelse 0;
+            self.overflow += 8;
+        }
+        return v;
+    }
+};
+
+fn u64ToDigits(buf: []u8, value_in: u64, base: u8, upper: bool) []const u8 {
+    if (value_in == 0) {
+        buf[0] = '0';
+        return buf[0..1];
+    }
+    const digits = "0123456789abcdef";
+    const DIGITS = "0123456789ABCDEF";
+    var tmp: [24]u8 = undefined;
+    var n: usize = 0;
+    var v = value_in;
+    while (v > 0) : (v /= base) {
+        tmp[n] = if (upper) DIGITS[@intCast(v % base)] else digits[@intCast(v % base)];
+        n += 1;
+    }
+    var i: usize = 0;
+    while (i < n) : (i += 1) buf[i] = tmp[n - 1 - i];
+    return buf[0..n];
+}
+
+/// Minimal C printf engine: %s %c %d/%i %u %x/%X %p %% with width/precision,
+/// '-' left-align and '0' zero-pad. Length modifiers are consumed and ignored
+/// (Win64 argument slots are 64-bit regardless). Returns bytes written.
+fn cFormat(out: []u8, fmt: []const u8, iter: anytype) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    var sbuf: [1024]u8 = undefined; // storage for a %s argument
+
+    const putChar = struct {
+        fn f(o: []u8, len: *usize, ch: u8) void {
+            if (len.* < o.len) {
+                o[len.*] = ch;
+                len.* += 1;
+            }
+        }
+    }.f;
+    const putStr = struct {
+        fn f(o: []u8, len: *usize, s: []const u8) void {
+            for (s) |ch| putChar(o, len, ch);
+        }
+    }.f;
+
+    while (i < fmt.len) {
+        if (fmt[i] != '%') {
+            putChar(out, &n, fmt[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if (i >= fmt.len) break;
+        if (fmt[i] == '%') {
+            putChar(out, &n, '%');
+            i += 1;
+            continue;
+        }
+
+        // Flags.
+        var zero_pad = false;
+        var left_align = false;
+        while (i < fmt.len) : (i += 1) {
+            switch (fmt[i]) {
+                '0' => zero_pad = true,
+                '-' => left_align = true,
+                '+', ' ' => {},
+                else => break,
+            }
+        }
+        // Width.
+        var width: usize = 0;
+        while (i < fmt.len and fmt[i] >= '0' and fmt[i] <= '9') : (i += 1) {
+            width = width * 10 + (fmt[i] - '0');
+        }
+        if (i < fmt.len and fmt[i] == '*') {
+            const w: i64 = @bitCast(iter.arg());
+            if (w < 0) left_align = true else width = @intCast(w);
+            if (width > 1024) width = 1024;
+            i += 1;
+        }
+        // Precision.
+        var prec: usize = std.math.maxInt(usize);
+        if (i < fmt.len and fmt[i] == '.') {
+            i += 1;
+            prec = 0;
+            while (i < fmt.len and fmt[i] >= '0' and fmt[i] <= '9') : (i += 1) {
+                prec = prec * 10 + (fmt[i] - '0');
+            }
+            if (i < fmt.len and fmt[i] == '*') {
+                prec = @intCast(@as(u64, @bitCast(iter.arg())));
+                i += 1;
+            }
+        }
+        // Length modifiers: irrelevant on Win64, consume them.
+        while (i < fmt.len) : (i += 1) {
+            switch (fmt[i]) {
+                'h', 'l', 'z', 'j', 't' => {},
+                else => break,
+            }
+        }
+        if (i >= fmt.len) break;
+        const spec = fmt[i];
+        i += 1;
+
+        var num_buf: [40]u8 = undefined;
+        var piece: []const u8 = "";
+        var is_num = false;
+
+        switch (spec) {
+            's' => {
+                const s = uaccess.readCStr(iter.arg(), &sbuf) orelse "(null)";
+                piece = s[0..@min(s.len, prec)];
+            },
+            'c' => {
+                num_buf[0] = @truncate(iter.arg());
+                piece = num_buf[0..1];
+            },
+            'd', 'i' => {
+                const sv: i64 = @bitCast(iter.arg());
+                if (sv < 0) {
+                    num_buf[0] = '-';
+                    const d = u64ToDigits(num_buf[1..], ~@as(u64, @bitCast(sv)) +% 1, 10, false);
+                    piece = num_buf[0 .. d.len + 1];
+                } else {
+                    piece = u64ToDigits(&num_buf, @as(u64, @bitCast(sv)), 10, false);
+                }
+                is_num = true;
+            },
+            'u' => {
+                piece = u64ToDigits(&num_buf, iter.arg(), 10, false);
+                is_num = true;
+            },
+            'x', 'X' => {
+                piece = u64ToDigits(&num_buf, iter.arg(), 16, spec == 'X');
+                is_num = true;
+            },
+            'p' => {
+                const v = iter.arg();
+                if (v == 0) {
+                    piece = "(nil)";
+                } else {
+                    const d = u64ToDigits(num_buf[2..], v, 16, false);
+                    num_buf[0] = '0';
+                    num_buf[1] = 'x';
+                    piece = num_buf[0 .. d.len + 2];
+                }
+                is_num = true;
+            },
+            else => {}, // unknown conversion: emit nothing
+        }
+
+        // Padding for numbers honors '0'; strings pad with spaces only.
+        const pad_ch: u8 = if (zero_pad and is_num and !left_align) '0' else ' ';
+        if (!left_align) {
+            var done: usize = 0;
+            while (done + piece.len < width and n < out.len) : (done += 1) {
+                putChar(out, &n, pad_ch);
+            }
+        }
+        putStr(out, &n, piece);
+        if (left_align) {
+            while (piece.len < width and n < out.len) {
+                putChar(out, &n, ' ');
+            }
+        }
+    }
+    return n;
+}
 
 fn handleToFd(t: *task.Task, handle: u64) ?usize {
     return switch (handle) {
@@ -279,6 +655,8 @@ pub fn dispatch(frame: *isr.InterruptFrame) void {
             vga.setColor(.white, .black);
             serial.serialWrite("[WIN32] Unimplemented import called from RIP 0x");
             serial.serialWriteHex(frame.rip);
+            serial.serialWrite(": ");
+            serial.serialWrite(funcName(f));
             serial.serialWrite("\n");
             process.exitCurrent(-1);
         },
@@ -394,6 +772,625 @@ pub fn dispatch(frame: *isr.InterruptFrame) void {
         .VirtualFree => retBool(frame, true), // reclaimed on exit
         .GetModuleHandleA, .GetModuleHandleW, .LoadLibraryA => ret64(frame, HANDLE_MODULE),
         .FreeLibrary => retBool(frame, true),
+        // ---- CRT: memory ---------------------------------------------------
+        .memcpy, .memmove => {
+            const n: u64 = a3;
+            const src = uaccess.userSliceConst(a2, n) orelse return ret64(frame, 0);
+            const dst = uaccess.userSlice(a1, n) orelse return ret64(frame, 0);
+            if (a1 <= a2 or a1 >= a2 + n) {
+                @memcpy(dst[0..src.len], src);
+            } else {
+                var i: usize = n; // overlapping backwards copy
+                while (i > 0) : (i -= 1) dst[i - 1] = src[i - 1];
+            }
+            ret64(frame, a1);
+        },
+        .memset => {
+            const n: u64 = a3;
+            const dst = uaccess.userSlice(a1, n) orelse return ret64(frame, 0);
+            @memset(dst, @truncate(a2));
+            ret64(frame, a1);
+        },
+        .memcmp => {
+            const n: u64 = a3;
+            const s1 = uaccess.userSliceConst(a1, n) orelse return ret64(frame, 0);
+            const s2 = uaccess.userSliceConst(a2, n) orelse return ret64(frame, 0);
+            for (s1, s2) |x, y| {
+                if (x != y) return ret64(frame, if (x < y) @as(u64, @bitCast(@as(i64, -1))) else 1);
+            }
+            ret64(frame, 0);
+        },
+        // ---- CRT: strings (C strings live in user memory) --------------------
+        .strlen => {
+            var buf: [4096]u8 = undefined;
+            const s = uaccess.readCStr(a1, &buf) orelse return ret64(frame, 0);
+            ret64(frame, s.len);
+        },
+        .strcpy, .strcat => {
+            var src_buf: [4096]u8 = undefined;
+            var dst_buf: [4096]u8 = undefined;
+            const src = uaccess.readCStr(a2, &src_buf) orelse return ret64(frame, a1);
+            var dst_len: usize = 0;
+            if (f == .strcat) {
+                const cur = uaccess.readCStr(a1, &dst_buf) orelse return ret64(frame, a1);
+                dst_len = cur.len;
+            }
+            _ = uaccess.writeBytes(a1 + dst_len, src);
+            _ = uaccess.writeU8(a1 + dst_len + src.len, 0);
+            ret64(frame, a1);
+        },
+        .strcmp, .strncmp => {
+            var b1: [1024]u8 = undefined;
+            var b2: [1024]u8 = undefined;
+            const s1 = uaccess.readCStr(a1, &b1) orelse return ret64(frame, 0);
+            const s2 = uaccess.readCStr(a2, &b2) orelse return ret64(frame, 0);
+            const max: usize = if (f == .strncmp) @intCast(@min(a3, s1.len + 1)) else s1.len + 1;
+            var i: usize = 0;
+            while (i < max) : (i += 1) {
+                const c1: u8 = if (i < s1.len) s1[i] else 0;
+                const c2: u8 = if (i < s2.len) s2[i] else 0;
+                if (c1 != c2) return ret64(frame, if (c1 < c2) @as(u64, @bitCast(@as(i64, -1))) else 1);
+                if (c1 == 0) break;
+            }
+            ret64(frame, 0);
+        },
+        .strchr, .strrchr => {
+            var buf: [4096]u8 = undefined;
+            const s = uaccess.readCStr(a1, &buf) orelse return ret64(frame, 0);
+            const needle: u8 = @truncate(a2);
+            if (needle == 0) return ret64(frame, a1 + s.len);
+            if (f == .strchr) {
+                for (s, 0..) |ch, i| {
+                    if (ch == needle) return ret64(frame, a1 + i);
+                }
+            } else {
+                var i: usize = s.len;
+                while (i > 0) : (i -= 1) {
+                    if (s[i - 1] == needle) return ret64(frame, a1 + i - 1);
+                }
+            }
+            ret64(frame, 0);
+        },
+        .strstr => {
+            var b1: [4096]u8 = undefined;
+            var b2: [1024]u8 = undefined;
+            const hay = uaccess.readCStr(a1, &b1) orelse return ret64(frame, 0);
+            const needle = uaccess.readCStr(a2, &b2) orelse return ret64(frame, 0);
+            if (std.mem.indexOf(u8, hay, needle)) |pos| return ret64(frame, a1 + pos);
+            ret64(frame, 0);
+        },
+        .toupper, .tolower => {
+            const ch: u8 = @truncate(a2);
+            ret64(frame, if (f == .toupper) std.ascii.toUpper(ch) else std.ascii.toLower(ch));
+        },
+        // ---- CRT: heap over the per-task arena -------------------------------
+        .malloc => {
+            const ptr = heapAlloc(t, a1, false) orelse {
+                t.last_error = ERROR_NOT_ENOUGH_MEMORY;
+                return ret64(frame, 0);
+            };
+            ret64(frame, ptr);
+        },
+        .calloc => {
+            const total = a1 *| a2;
+            const ptr = heapAlloc(t, total, true) orelse return ret64(frame, 0);
+            ret64(frame, ptr);
+        },
+        .realloc => {
+            const ptr = heapRealloc(t, a1, a2) orelse return ret64(frame, 0);
+            ret64(frame, ptr);
+        },
+        .free => {
+            // CRT free() may be handed pointers from either the Win32 heap or
+            // VirtualAlloc; our heapFree only understands its own blocks.
+            heapFree(t, a1);
+            ret64(frame, 0);
+        },
+        .abort, .exit, ._exit => process.exitCurrent(if (f == .abort) -1 else @intCast(@as(u32, @truncate(a1)))),
+        .atexit => ret64(frame, 0),
+        // ---- CRT: console output ---------------------------------------------
+        .puts => {
+            var buf: [4096]u8 = undefined;
+            const s = uaccess.readCStr(a1, &buf) orelse return ret64(frame, @as(u64, @bitCast(@as(i64, -1))));
+            _ = fdtable.write(t, fdtable.STDOUT, s);
+            _ = fdtable.write(t, fdtable.STDOUT, "\n");
+            ret64(frame, 1);
+        },
+        .putchar => {
+            const ch: u8 = @truncate(a1);
+            _ = fdtable.write(t, fdtable.STDOUT, &[1]u8{ch});
+            ret64(frame, @as(u8, ch));
+        },
+        .printf => {
+            var buf: [4096]u8 = undefined;
+            var fb: [1024]u8 = undefined;
+            const fmt = uaccess.readCStr(a1, &fb) orelse return ret64(frame, @as(u64, @bitCast(@as(i64, -1))));
+            var iter = ArgIter{ .frame = frame, .next = 1 };
+            const n = cFormat(&buf, fmt, &iter);
+            _ = fdtable.write(t, fdtable.STDOUT, buf[0..n]);
+            ret64(frame, n);
+        },
+        .sprintf, ._snprintf, .snprintf => {
+            const dst = a1;
+            const cap: u64 = if (f == .sprintf) 4096 else a2;
+            var fb: [1024]u8 = undefined;
+            const fmt = uaccess.readCStr(if (f == .sprintf) a2 else a3, &fb) orelse return ret64(frame, 0);
+            var out: [4096]u8 = undefined;
+            var iter = ArgIter{
+                .frame = frame,
+                .next = if (f == .sprintf) 2 else 3,
+            };
+            const n = cFormat(&out, fmt, &iter);
+            const copy = @min(n, @min(cap -| 1, out.len));
+            _ = uaccess.writeBytes(dst, out[0..copy]);
+            _ = uaccess.writeU8(dst + copy, 0);
+            ret64(frame, n);
+        },
+        // ---- WinSock 2 -------------------------------------------------------
+        .WSAStartup => {
+            // Fill the WSADATA fields programs actually read: version pair and
+            // the description string. Everything else stays zero.
+            if (a2 != 0) {
+                _ = uaccess.writeU16(a2, 0x0202); // wVersion 2.2
+                _ = uaccess.writeU16(a2 + 2, 0x0202); // wHighVersion
+                _ = uaccess.writeBytes(a2 + 4, "Zirconium WinSock 2.2");
+                _ = uaccess.writeU8(a2 + 4 + 21, 0);
+            }
+            ret64(frame, 0);
+        },
+        .WSACleanup => ret64(frame, 0),
+        .WSAGetLastError => ret64(frame, t.last_error),
+        .WSASetLastError => {
+            t.last_error = @truncate(a1);
+            ret64(frame, 0);
+        },
+        .socket => {
+            const tcp = @import("../net/tcp.zig");
+            const conn = tcp.allocConnection() orelse {
+                t.last_error = WSA_NOT_ENOUGH_MEMORY;
+                return ret64(frame, INVALID_SOCKET);
+            };
+            const fd = fdtable.alloc(t, .{ .socket = conn }) orelse {
+                tcp.disconnect(conn);
+                t.last_error = WSA_NOT_ENOUGH_MEMORY;
+                return ret64(frame, INVALID_SOCKET);
+            };
+            ret64(frame, HANDLE_SOCKET_BASE + fd);
+        },
+        .closesocket => {
+            const fd = socketToFd(t, a1) orelse {
+                t.last_error = WSAENOTSOCK;
+                return ret64(frame, INVALID_SOCKET);
+            };
+            _ = fdtable.close(t, fd);
+            ret64(frame, 0);
+        },
+        .shutdown => ret64(frame, 0),
+        .connect => {
+            const fd = socketToFd(t, a1) orelse {
+                t.last_error = WSAENOTSOCK;
+                return ret64(frame, INVALID_SOCKET);
+            };
+            const desc = fdtable.get(t, fd) orelse return ret64(frame, INVALID_SOCKET);
+            const conn = switch (desc) {
+                .socket => |c| c,
+                else => return ret64(frame, INVALID_SOCKET),
+            };
+            // struct sockaddr_in { u16 family; u16 port_be; u32 addr_be; }
+            const port_be = uaccess.readU16(a2 + 2) orelse {
+                t.last_error = WSAEFAULT;
+                return ret64(frame, INVALID_SOCKET);
+            };
+            const port: u16 = @byteSwap(port_be);
+            var ip: [4]u8 = undefined;
+            var i: usize = 0;
+            while (i < 4) : (i += 1) {
+                ip[i] = uaccess.readU8(a2 + 4 + i) orelse {
+                    t.last_error = WSAEFAULT;
+                    return ret64(frame, INVALID_SOCKET);
+                };
+            }
+            const tcp = @import("../net/tcp.zig");
+            tcp.openConn(conn, ip, port);
+            if (!tcp.waitEstablished(conn, 500)) {
+                t.last_error = WSAECONNREFUSED;
+                return ret64(frame, INVALID_SOCKET);
+            }
+            ret64(frame, 0);
+        },
+        .send => {
+            const fd = socketToFd(t, a1) orelse {
+                t.last_error = WSAENOTSOCK;
+                return ret64(frame, INVALID_SOCKET);
+            };
+            const len: u64 = a3;
+            const buf = uaccess.userSliceConst(a2, len) orelse {
+                t.last_error = WSAEFAULT;
+                return ret64(frame, INVALID_SOCKET);
+            };
+            const n = fdtable.write(t, fd, buf);
+            if (n < 0) {
+                t.last_error = WSAECONNABORTED;
+                return ret64(frame, INVALID_SOCKET);
+            }
+            ret64(frame, @intCast(n));
+        },
+        .recv => {
+            const fd = socketToFd(t, a1) orelse {
+                t.last_error = WSAENOTSOCK;
+                return ret64(frame, INVALID_SOCKET);
+            };
+            const len: u64 = a3;
+            const buf = uaccess.userSlice(a2, len) orelse {
+                t.last_error = WSAEFAULT;
+                return ret64(frame, INVALID_SOCKET);
+            };
+            const n = fdtable.read(t, fd, buf);
+            if (n < 0) {
+                t.last_error = WSAECONNABORTED;
+                return ret64(frame, INVALID_SOCKET);
+            }
+            ret64(frame, @intCast(n));
+        },
+        .htons => ret64(frame, @as(u16, @byteSwap(@as(u16, @truncate(a1))))),
+        .htonl => ret64(frame, @as(u32, @byteSwap(@as(u32, @truncate(a1))))),
+        .ntohs => ret64(frame, @as(u16, @byteSwap(@as(u16, @truncate(a1))))),
+        .ntohl => ret64(frame, @as(u32, @byteSwap(@as(u32, @truncate(a1))))),
+        .inet_addr => {
+            var buf: [64]u8 = undefined;
+            const s = uaccess.readCStr(a1, &buf) orelse return ret64(frame, INADDR_NONE);
+            var ip: [4]u8 = undefined;
+            var part: u32 = 0;
+            var count: usize = 0;
+            var any_digit = false;
+            for (s) |ch| {
+                if (ch >= '0' and ch <= '9') {
+                    part = part * 10 + (ch - '0');
+                    if (part > 255) return ret64(frame, INADDR_NONE);
+                    any_digit = true;
+                } else if (ch == '.') {
+                    if (!any_digit or count >= 4) return ret64(frame, INADDR_NONE);
+                    ip[count] = @intCast(part);
+                    count += 1;
+                    part = 0;
+                    any_digit = false;
+                } else return ret64(frame, INADDR_NONE);
+            }
+            if (!any_digit or count != 3) return ret64(frame, INADDR_NONE);
+            ip[3] = @intCast(part);
+            const packed_ip: u32 = (@as(u32, ip[0]) << 24) | (@as(u32, ip[1]) << 16) |
+                (@as(u32, ip[2]) << 8) | ip[3];
+            ret64(frame, packed_ip); // network byte order
+        },
+        .setsockopt, .ioctlsocket => ret64(frame, 0),
+        .getsockopt => ret64(frame, 0),
+        // Every descriptor is reported ready: our blocking reads poll anyway.
+        .select => ret64(frame, a1),
+
+        // ---- UCRT startup: table walkers and config setters are no-ops ----
+        ._initterm, ._initterm_e, ._configure_narrow_argv, ._configure_wide_argv,
+        ._initialize_narrow_environment, ._initialize_wide_environment,
+        ._set_app_type, .__setusermatherr, ._configthreadlocale,
+        ._lock_file, ._unlock_file, .raise, .setvbuf, .fflush, .fclose,
+        .feof, .ferror, ._tzset, ._cexit => ret64(frame, 0),
+        ._crt_atexit, ._set_invalid_parameter_handler, ._set_new_mode => {
+            // "previous handler/mode" — none existed.
+            ret64(frame, 0);
+        },
+
+        // ---- CRT data globals: pointers into the task's user block ----------
+        .__p___argc => ret64(frame, t.crt_block),
+        .__p___wargv => ret64(frame, t.crt_block + 8),
+        .__p__environ => ret64(frame, t.crt_block + 16),
+        .__p__wenviron => ret64(frame, t.crt_block + 24),
+        .__p__commode => ret64(frame, t.crt_block + 32),
+        .__p__fmode => ret64(frame, t.crt_block + 40),
+        .__daylight => ret64(frame, t.crt_block + 48),
+        .__timezone => ret64(frame, t.crt_block + 56),
+        .__tzname => ret64(frame, t.crt_block + 64),
+        ._errno => {
+            if (t.crt_block != 0) _ = uaccess.writeU64(t.crt_block + 72, 0);
+            ret64(frame, t.crt_block + 72);
+        },
+
+        .__acrt_iob_func => ret64(frame, STREAM_BASE + @min(a1, 2)),
+        .GetCurrentThread => ret64(frame, HANDLE_PROCESS),
+        .TryEnterCriticalSection => retBool(frame, true),
+
+        ._assert, ._wassert => {
+            var mb: [256]u8 = undefined;
+            const msg: []const u8 = if (f == ._assert)
+                (uaccess.readCStr(a1, &mb) orelse "assert")
+            else
+                "wide assertion";
+            serial.serialWrite("[CRT] assertion failed: ");
+            serial.serialWrite(msg);
+            serial.serialWrite("\n");
+            process.exitCurrent(-1);
+        },
+        .perror => {
+            var mb: [256]u8 = undefined;
+            const msg = uaccess.readCStr(a1, &mb) orelse "";
+            _ = fdtable.write(t, fdtable.STDERR, msg);
+            _ = fdtable.write(t, fdtable.STDERR, ": error\n");
+            ret64(frame, 0);
+        },
+
+        // ---- stdio over pseudo FILE* and raw fds ----------------------------
+        .fwrite => {
+            const total = a2 *| a3;
+            const fd = streamToFd(a4) orelse return ret64(frame, 0);
+            const buf = uaccess.userSliceConst(a1, total) orelse return ret64(frame, 0);
+            const n = fdtable.write(t, fd, buf);
+            if (n <= 0) return ret64(frame, 0);
+            ret64(frame, @as(u64, @intCast(n)) / @max(a2, 1));
+        },
+        .fread => {
+            const total = a2 *| a3;
+            const buf = uaccess.userSlice(a1, total) orelse return ret64(frame, 0);
+            const fd = streamToFd(a4) orelse return ret64(frame, 0);
+            const n = fdtable.read(t, fd, buf[0..@intCast(total)]);
+            if (n <= 0) return ret64(frame, 0);
+            ret64(frame, @as(u64, @intCast(n)) / @max(a2, 1));
+        },
+        .fputs => {
+            var b: [4096]u8 = undefined;
+            const s = uaccess.readCStr(a1, &b) orelse return ret64(frame, @bitCast(@as(i64, -1)));
+            const fd = streamToFd(a2) orelse return ret64(frame, @bitCast(@as(i64, -1)));
+            _ = fdtable.write(t, fd, s);
+            ret64(frame, 1);
+        },
+        .fputc => {
+            const fd = streamToFd(a2) orelse return ret64(frame, @bitCast(@as(i64, -1)));
+            _ = fdtable.write(t, fd, &[1]u8{@truncate(a1)});
+            ret64(frame, a1 & 0xFF);
+        },
+        .getc => {
+            const fd = streamToFd(a1) orelse return ret64(frame, @bitCast(@as(i64, -1)));
+            var one: [1]u8 = undefined;
+            const n = fdtable.read(t, fd, &one);
+            ret64(frame, if (n <= 0) @as(u64, @bitCast(@as(i64, -1))) else one[0]);
+        },
+        .fgets => {
+            const fd = streamToFd(a3) orelse return ret64(frame, 0);
+            const cap: usize = @intCast(@min(a2, 4096));
+            var ln: usize = 0;
+            while (ln + 1 < cap) : (ln += 1) {
+                var one: [1]u8 = undefined;
+                const n = fdtable.read(t, fd, &one);
+                if (n <= 0) break;
+                _ = uaccess.writeU8(a1 + ln, one[0]);
+                if (one[0] == '\n') {
+                    ln += 1;
+                    break;
+                }
+            }
+            if (ln == 0) return ret64(frame, 0);
+            _ = uaccess.writeU8(a1 + ln, 0);
+            ret64(frame, a1);
+        },
+        ._fileno => {
+            if (streamToFd(a1)) |fd| return ret64(frame, fd);
+            if (handleToFd(t, a1)) |fd| return ret64(frame, fd);
+            ret64(frame, @bitCast(@as(i64, -1)));
+        },
+        ._get_osfhandle => {
+            const fd: usize = @intCast(@min(a1, task.MAX_FDS - 1));
+            if (t.fds[fd] != null) return ret64(frame, HANDLE_FILE_BASE + fd);
+            ret64(frame, INVALID_HANDLE);
+        },
+        ._isatty => ret64(frame, if (a1 <= 2) 1 else 0),
+        ._open => {
+            // MSVC flags: _O_WRONLY=1 _O_RDWR=2 _O_CREAT=0x100 _O_TRUNC=0x200.
+            var pb: [256]u8 = undefined;
+            const path = uaccess.readCStr(a1, &pb) orelse return ret64(frame, @bitCast(@as(i64, -1)));
+            const want_write = (a2 & 3) != 0;
+            const handle = vfs.open(path, .{
+                .read = !want_write or (a2 & 2) != 0,
+                .write = want_write,
+                .create = (a2 & 0x100) != 0,
+                .truncate = (a2 & 0x200) != 0,
+            }) orelse return ret64(frame, @bitCast(@as(i64, -1)));
+            const fd = fdtable.alloc(t, .{ .file = handle }) orelse {
+                vfs.close(handle);
+                return ret64(frame, @bitCast(@as(i64, -1)));
+            };
+            ret64(frame, fd);
+        },
+        ._close => {
+            const fd: usize = @intCast(@min(a1, task.MAX_FDS - 1));
+            if (t.fds[fd] == null) return ret64(frame, @bitCast(@as(i64, -1)));
+            _ = fdtable.close(t, fd);
+            ret64(frame, 0);
+        },
+        ._read => {
+            const fd: usize = @intCast(@min(a1, task.MAX_FDS - 1));
+            const cnt: u64 = @truncate(a3);
+            const buf = uaccess.userSlice(a2, cnt) orelse return ret64(frame, @bitCast(@as(i64, -1)));
+            const n = fdtable.read(t, fd, buf);
+            ret64(frame, @bitCast(n));
+        },
+        ._write => {
+            const fd: usize = @intCast(@min(a1, task.MAX_FDS - 1));
+            const cnt: u64 = @truncate(a3);
+            const buf = uaccess.userSliceConst(a2, cnt) orelse return ret64(frame, @bitCast(@as(i64, -1)));
+            const n = fdtable.write(t, fd, buf);
+            ret64(frame, @bitCast(n));
+        },
+        ._setmode => ret64(frame, 0x8000), // prev mode O_BINARY
+        ._fdopen, ._wfopen => ret64(frame, 0), // FILE streams for files unsupported
+
+        // ---- string extras ---------------------------------------------------
+        .memchr => {
+            const n: u64 = a3;
+            const s = uaccess.userSliceConst(a1, n) orelse return ret64(frame, 0);
+            for (s, 0..) |ch, i| {
+                if (ch == @as(u8, @truncate(a2))) return ret64(frame, a1 + i);
+            }
+            ret64(frame, 0);
+        },
+        .strnlen => {
+            var b: [4096]u8 = undefined;
+            const full = uaccess.readCStr(a1, &b) orelse return ret64(frame, 0);
+            ret64(frame, @min(full.len, a2));
+        },
+        .strspn => {
+            var sb: [256]u8 = undefined;
+            var ab: [128]u8 = undefined;
+            const s = uaccess.readCStr(a1, &sb) orelse return ret64(frame, 0);
+            const acc = uaccess.readCStr(a2, &ab) orelse return ret64(frame, 0);
+            var k: usize = 0;
+            while (k < s.len) : (k += 1) {
+                var hit = false;
+                for (acc) |c| {
+                    if (c == s[k]) {
+                        hit = true;
+                        break;
+                    }
+                }
+                if (!hit) break;
+            }
+            ret64(frame, k);
+        },
+        ._strdup => {
+            var b: [1024]u8 = undefined;
+            const s = uaccess.readCStr(a1, &b) orelse return ret64(frame, 0);
+            const p = heapAlloc(t, s.len + 1, false) orelse return ret64(frame, 0);
+            _ = uaccess.writeBytes(p, s);
+            _ = uaccess.writeU8(p + s.len, 0);
+            ret64(frame, p);
+        },
+        ._strnicmp => {
+            var b1: [512]u8 = undefined;
+            var b2: [512]u8 = undefined;
+            const s1 = uaccess.readCStr(a1, &b1) orelse return ret64(frame, 0);
+            const s2 = uaccess.readCStr(a2, &b2) orelse return ret64(frame, 0);
+            const max: usize = @intCast(@min(a3, @max(s1.len, s2.len)));
+            var i: usize = 0;
+            while (i < max) : (i += 1) {
+                const c1: u8 = std.ascii.toUpper(if (i < s1.len) s1[i] else 0);
+                const c2: u8 = std.ascii.toUpper(if (i < s2.len) s2[i] else 0);
+                if (c1 != c2) return ret64(frame, if (c1 < c2) @as(u64, @bitCast(@as(i64, -1))) else 1);
+                if (c1 == 0) break;
+            }
+            ret64(frame, 0);
+        },
+        .isalnum, .isalpha, .isdigit, .isspace, .isupper, .islower => {
+            const ch: u8 = @truncate(a1);
+            const r = switch (f) {
+                .isalnum => std.ascii.isAlphanumeric(ch),
+                .isalpha => std.ascii.isAlphabetic(ch),
+                .isdigit => std.ascii.isDigit(ch),
+                .isspace => std.ascii.isWhitespace(ch),
+                .isupper => std.ascii.isUpper(ch),
+                .islower => std.ascii.isLower(ch),
+                else => false,
+            };
+            ret64(frame, @intFromBool(r));
+        },
+        .wcslen => {
+            var k: u64 = 0;
+            while (k < 8192) : (k += 1) {
+                const unit = uaccess.readU16(a1 + k * 2) orelse break;
+                if (unit == 0) break;
+            }
+            ret64(frame, k);
+        },
+        .wcsnlen => {
+            var k: u64 = 0;
+            while (k < a2) : (k += 1) {
+                const unit = uaccess.readU16(a1 + k * 2) orelse break;
+                if (unit == 0) break;
+            }
+            ret64(frame, k);
+        },
+
+        .atoi, .strtol => {
+            var b: [128]u8 = undefined;
+            const s = uaccess.readCStr(a1, &b) orelse return ret64(frame, 0);
+            var i: usize = 0;
+            while (i < s.len and (s[i] == ' ' or s[i] == '\t')) : (i += 1) {}
+            var neg = false;
+            if (i < s.len and (s[i] == '-' or s[i] == '+')) {
+                neg = s[i] == '-';
+                i += 1;
+            }
+            var base: u64 = if (f == .atoi) 10 else a3;
+            if (base == 0) {
+                if (i + 1 < s.len and s[i] == '0' and (s[i + 1] == 'x' or s[i + 1] == 'X')) {
+                    base = 16;
+                    i += 2;
+                } else base = 10;
+            } else if (base == 16 and i + 1 < s.len and s[i] == '0' and (s[i + 1] == 'x' or s[i + 1] == 'X')) {
+                i += 2;
+            }
+            var v: i64 = 0;
+            while (i < s.len) : (i += 1) {
+                const d: u8 = switch (s[i]) {
+                    '0'...'9' => s[i] - '0',
+                    'a'...'f' => s[i] - 'a' + 10,
+                    'A'...'F' => s[i] - 'A' + 10,
+                    else => 255,
+                };
+                if (d >= base) break;
+                v = v *% @as(i64, @intCast(base)) +% d;
+            }
+            if (neg) v = -v;
+            if (f == .strtol and a2 != 0) _ = uaccess.writeU64(a2, a1 + i);
+            ret64(frame, @bitCast(v));
+        },
+
+        // ---- UCRT printf core -----------------------------------------------
+        .__stdio_common_vfprintf => {
+            // (options, stream, format, locale, va_list)
+            var fb: [1024]u8 = undefined;
+            const fmtv = uaccess.readCStr(a3, &fb) orelse return ret64(frame, @bitCast(@as(i64, -1)));
+            var it = VaListIter.init(stackArg(frame, 4)) orelse return ret64(frame, @bitCast(@as(i64, -1)));
+            var out: [4096]u8 = undefined;
+            const n = cFormat(&out, fmtv, &it);
+            const fd = streamToFd(a2) orelse fdtable.STDOUT;
+            _ = fdtable.write(t, fd, out[0..n]);
+            ret64(frame, n);
+        },
+        .__stdio_common_vsprintf => {
+            // (options, buffer, count, format, locale, va_list)
+            const dst = a2;
+            const cap: u64 = a3;
+            var fb: [1024]u8 = undefined;
+            const fmtv = uaccess.readCStr(a4, &fb) orelse return ret64(frame, @bitCast(@as(i64, -1)));
+            var it = VaListIter.init(stackArg(frame, 5)) orelse return ret64(frame, @bitCast(@as(i64, -1)));
+            var out: [4096]u8 = undefined;
+            const n = cFormat(&out, fmtv, &it);
+            const copy = @min(n, cap -| 1);
+            _ = uaccess.writeBytes(dst, out[0..copy]);
+            _ = uaccess.writeU8(dst + copy, 0);
+            ret64(frame, n);
+        },
+
+        // ---- time: monotonic since boot mapped onto a 2026 epoch ------------
+        ._time64 => {
+            const v: u64 = 1787385600 + timer.ticks / 100;
+            if (a1 != 0) _ = uaccess.writeU64(a1, v);
+            ret64(frame, v);
+        },
+        ._gmtime64 => {
+            // Return pointer to a zeroed tm inside the CRT block.
+            if (t.crt_block != 0) {
+                var k: u64 = 0;
+                while (k < 56) : (k += 8) _ = uaccess.writeU64(t.crt_block + 128 + k, 0);
+                ret64(frame, t.crt_block + 128);
+            } else ret64(frame, 0);
+        },
+        ._localtime64_s => {
+            if (a1 != 0) _ = uaccess.writeU32(a1, 0); // errno_t success
+            ret64(frame, 0);
+        },
+        ._mktime64, ._mkgmtime64 => ret64(frame, 1787385600 + timer.ticks / 100),
+        .rand_s => {
+            const v: u32 = @truncate(timer.ticks *% 2654435761 ^ a1);
+            if (a1 != 0) _ = uaccess.writeU32(a1, v);
+            ret64(frame, 0);
+        },
         .GetProcAddress => {
             // Resolve by name against the same table the loader uses.
             var name_buf: [128]u8 = undefined;

@@ -39,6 +39,8 @@ var history_count: usize = 0;
 var history_pos: i32 = -1;
 
 const env = @import("system/env.zig");
+const fat16 = @import("fs/fat16.zig");
+const timer = @import("drivers/timer.zig");
 
 /// A shell command: name plus a uniform handler that receives everything
 /// typed after the name. This table is the single source of truth for both
@@ -94,6 +96,11 @@ const command_table = [_]CmdEntry{
     .{ .name = "rm",         .run = files.cmdRm },
     .{ .name = "write",      .run = files.cmdWrite },
     .{ .name = "cd",         .run = files.cmdCd },
+    .{ .name = "cp",         .run = files.cmdCopy },
+    .{ .name = "hexdump",    .run = files.cmdHexdump },
+    .{ .name = "mkfs",       .run = runMkfs },
+    .{ .name = "df",         .run = runDf },
+    .{ .name = "uptime",     .run = runUptime },
     .{ .name = "mount",      .run = runMount },
     .{ .name = "nano",       .run = cmdNano },
 };
@@ -124,6 +131,9 @@ pub fn run() void {
         vga.setColor(.light_green, .black);
         vga.write("zig> ");
         vga.setColor(.white, .black);
+        // Mirror the prompt over serial: it is the handshake marker for
+        // headless automation driving the console through QEMU stdio.
+        root.serial.serialWrite("\n[SERIAL] zirc> ");
 
         const len = readLineEnhanced(&cmd_buf, CMD_MAX);
         if (len == 0) continue;
@@ -223,6 +233,55 @@ fn runMount(_: []const u8) void {
     vfs.printMounts();
 }
 
+/// mkfs — reformat /mnt/disk as a blank FAT16 volume (destroys contents).
+fn runMkfs(_: []const u8) void {
+    vga.write("  Formatting /mnt/disk as FAT16...\n");
+    if (fat16.isMounted()) {
+        vga.write("  Unmounting existing filesystem\n");
+        _ = @import("fs/vfs.zig").unmount("/mnt/disk");
+        fat16.resetMountState();
+    }
+    if (fat16.format()) {
+        vga.write("  Done. Disk is mounted and empty.\n");
+    } else {
+        vga.setColor(.light_red, .black);
+        vga.write("  mkfs failed\n");
+        vga.setColor(.white, .black);
+    }
+}
+
+/// df — disk usage summary for the FAT16 volume.
+fn runDf(_: []const u8) void {
+    fat16.printInfo();
+}
+
+/// uptime — time since kernel boot from PIT ticks.
+fn runUptime(_: []const u8) void {
+    const ticks = timer.ticks;
+    const total_secs = ticks / 100;
+    const days = total_secs / 86400;
+    const hours = (total_secs % 86400) / 3600;
+    const mins = (total_secs % 3600) / 60;
+    const secs = total_secs % 60;
+
+    vga.write("  up ");
+    if (days > 0) {
+        vga.writeDec(days);
+        vga.write(" days, ");
+    }
+    if (hours < 10) vga.putChar('0');
+    vga.writeDec(hours);
+    vga.putChar(':');
+    if (mins < 10) vga.putChar('0');
+    vga.writeDec(mins);
+    vga.putChar(':');
+    if (secs < 10) vga.putChar('0');
+    vga.writeDec(secs);
+    vga.write("  (");
+    vga.writeDec(ticks);
+    vga.write(" ticks)\n");
+}
+
 // Programs that take over the screen and return to a fresh banner on exit.
 fn cmdLua(_: []const u8) void {
     lua_prog.run();
@@ -304,6 +363,9 @@ fn execFromPath(raw_path: []const u8, args: []const u8) bool {
         vga.write(raw_path);
         vga.write("\n");
         vga.setColor(.white, .black);
+        root.serial.serialWrite("[SHELL] file not found: ");
+        root.serial.serialWrite(raw_path);
+        root.serial.serialWrite("\n");
         return false;
     };
     return spawnAndRun(resolved_path, args);
@@ -327,6 +389,11 @@ fn spawnAndRun(path: []const u8, args: []const u8) bool {
         vga.write(@errorName(err));
         vga.write("\n");
         vga.setColor(.white, .black);
+        root.serial.serialWrite("[SHELL] spawn failed: ");
+        root.serial.serialWrite(path);
+        root.serial.serialWrite(": ");
+        root.serial.serialWrite(@errorName(err));
+        root.serial.serialWrite("\n");
         return false;
     };
     sched.runTask(task_id);
@@ -584,8 +651,8 @@ fn resolveExecutablePath(raw: []const u8) ?[]const u8 {
         if (st.file_type != .directory) return raw;
     }
 
-    // 2. If it starts with "/" but not found, don't search search-paths
-    if (raw[0] == '/') return null;
+    // 2. Absolute paths skip the search-path prefixes below, but still get
+    //    the ".exe" fallback in step 5 (e.g. /mnt/disk/jq -> jq.exe).
 
     // 3. Try /bin/<raw>
     const bin_prefix = "/bin/";
@@ -711,7 +778,8 @@ fn printHelp(_: []const u8) void {
     vga.write("    ps            Process/task list\n");
     vga.write("    clear/cls     Clear screen\n");
     vga.write("    halt          Halt system\n");
-    vga.write("    reboot        Reboot\n\n");
+    vga.write("    reboot        Reboot\n");
+    vga.write("    uptime        Time since boot\n\n");
     vga.write("  Environment:\n");
     vga.write("    set K=V       Set environment variable\n");
     vga.write("    unset K       Remove environment variable\n");
@@ -745,9 +813,13 @@ fn printHelp(_: []const u8) void {
     vga.write("    touch <file>  Create empty file\n");
     vga.write("    mkdir <dir>   Create directory\n");
     vga.write("    rm <file>     Remove file\n");
+    vga.write("    cp <s> <d>    Copy file\n");
     vga.write("    write <f> <t> Write text to file\n");
+    vga.write("    hexdump <f>   Hex+ASCII file viewer\n");
     vga.write("    cd [path]     Change directory\n");
     vga.write("    nano <file>   Nano-style text editor\n");
+    vga.write("    df            Disk usage (FAT16)\n");
+    vga.write("    mkfs          Reformat /mnt/disk as blank FAT16\n");
     vga.write("    mount         List mounted filesystems\n\n");
     vga.write("  Input:\n");
     vga.write("    mouse         Show mouse info\n");
@@ -964,7 +1036,12 @@ fn readLineEnhanced(buf: []u8, max_len: usize) usize {
     var pos: usize = 0;
     history_pos = -1;
     while (pos < max_len) {
-        if (kb.pollKey()) |ch| {
+        // Keyboard first, serial console second: the latter lets tests and
+        // remote users drive the shell through QEMU -serial stdio.
+        const ch = kb.pollKey() orelse serialPollKey() orelse {
+            asm volatile ("hlt");
+            continue;
+        };
             if (ch == '\n' or ch == '\r') {
                 vga.putChar('\n');
                 return pos;
@@ -1023,11 +1100,19 @@ fn readLineEnhanced(buf: []u8, max_len: usize) usize {
                 pos += 1;
                 vga.putChar(ch);
             }
-        } else {
-            asm volatile ("hlt");
-        }
     }
     return pos;
+}
+
+/// Serial counterpart of kb.pollKey(): translates CR to LF and DEL to
+/// backspace so terminal clients behave like the PS/2 keyboard.
+fn serialPollKey() ?u8 {
+    const raw = @import("system/serial.zig").pollRead() orelse return null;
+    return switch (raw) {
+        '\r' => '\n',
+        0x7F => 0x08,
+        else => raw,
+    };
 }
 
 const port_io = @import("arch/port.zig");

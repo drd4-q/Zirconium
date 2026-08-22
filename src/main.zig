@@ -79,6 +79,7 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     vfs.init();
     ramfs.init();
     ramfs.registerMount();
+    @import("kernel/seedfs.zig").init();
     vga.write("[BOOT] Filesystem initialized\n");
 
     vga.write("[BOOT] Initializing Kernel modules...\n");

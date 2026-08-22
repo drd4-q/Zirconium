@@ -167,37 +167,60 @@ fn splitBlock(block: *BlockHeader, needed: usize) void {
     block.size = needed;
 }
 
-fn mergeBlocks(block: *BlockHeader) void {
-    // Merge with next
-    if (block.next) |next| {
-        if (next.free) {
-            block.size += @sizeOf(BlockHeader) + next.size;
-            block.next = next.next;
-            if (next.next) |nn| {
-                nn.prev = block;
-            }
-        }
+/// Insert into the free list ordered by ADDRESS. mergeBlocks assumes that
+/// list neighbours are memory-adjacent, so an unordered (LIFO) insert here
+/// used to create fake "merged" blocks spanning unrelated memory — any large
+/// allocation then overlapped live data and corrupted it.
+fn addToFreeList(block: *BlockHeader) void {
+    const addr = @intFromPtr(block);
+
+    if (free_list == null or addr < @intFromPtr(free_list.?)) {
+        block.next = free_list;
+        block.prev = null;
+        if (free_list) |head| head.prev = block;
+        free_list = block;
+        return;
     }
 
-    // Merge with previous
-    if (block.prev) |prev| {
-        if (prev.free) {
-            prev.size += @sizeOf(BlockHeader) + block.size;
-            prev.next = block.next;
-            if (block.next) |nn| {
-                nn.prev = prev;
-            }
-        }
+    var cur = free_list.?;
+    while (cur.next) |n| {
+        if (@intFromPtr(n) > addr) break;
+        cur = n;
     }
+    block.next = cur.next;
+    block.prev = cur;
+    if (cur.next) |n| n.prev = block;
+    cur.next = block;
 }
 
-fn addToFreeList(block: *BlockHeader) void {
-    block.next = free_list;
-    block.prev = null;
-    if (free_list) |head| {
-        head.prev = block;
+fn mergeBlocks(block: *BlockHeader) void {
+    // Merge with the NEXT block only when it is physically adjacent.
+    if (block.next) |next| {
+        if (next.free) {
+            const end = @intFromPtr(block) + @sizeOf(BlockHeader) + block.size;
+            if (@intFromPtr(next) == end) {
+                block.size += @sizeOf(BlockHeader) + next.size;
+                block.next = next.next;
+                if (next.next) |nn| {
+                    nn.prev = block;
+                }
+            }
+        }
     }
-    free_list = block;
+
+    // Merge with the PREVIOUS block only when this one directly follows it.
+    if (block.prev) |prev| {
+        if (prev.free) {
+            const prev_end = @intFromPtr(prev) + @sizeOf(BlockHeader) + prev.size;
+            if (prev_end == @intFromPtr(block)) {
+                prev.size += @sizeOf(BlockHeader) + block.size;
+                prev.next = block.next;
+                if (block.next) |nn| {
+                    nn.prev = prev;
+                }
+            }
+        }
+    }
 }
 
 fn removeBlock(block: *BlockHeader) void {
@@ -221,30 +244,14 @@ fn expandHeap(min_needed: usize) bool {
     heap_pages += pages_needed;
     heap_size += new_size;
 
-    // Create a free block in the new region
+    // Create a free block in the new region and insert it address-sorted;
+    // mergeBlocks then fuses it with a physically adjacent neighbour.
     const new_block: *BlockHeader = @ptrFromInt(new_pages);
     new_block.size = new_size - @sizeOf(BlockHeader);
     new_block.free = true;
-    new_block.prev = null;
-    new_block.next = null;
-
-    // Try to merge with last block
-    if (free_list) |head| {
-        var last = head;
-        while (last.next) |n| {
-            last = n;
-        }
-
-        // Check if this block is contiguous with the last block
-        const last_end = @intFromPtr(last) + @sizeOf(BlockHeader) + last.size;
-        if (last_end == new_pages and last.free) {
-            // Merge
-            last.size += @sizeOf(BlockHeader) + new_block.size;
-            return true;
-        }
-    }
 
     addToFreeList(new_block);
+    mergeBlocks(new_block);
     return true;
 }
 

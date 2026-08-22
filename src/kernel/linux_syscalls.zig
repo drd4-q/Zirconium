@@ -564,8 +564,16 @@ fn sysArchPrctl(t: *task.Task, code: u64, addr: u64) isize {
 }
 
 fn sysUname(buf_ptr: u64) isize {
-    // struct utsname: 6 fields of 65 bytes each.
-    const fields = [_][]const u8{ "Linux", "zirconium", "6.0.0-zirconium", "#1 Zirconium", "x86_64", "(none)" };
+    // struct utsname: 6 fields of 65 bytes each. We brand ourselves honestly:
+    // programs see Zirconium, not a fake Linux version.
+    const fields = [_][]const u8{
+        "Zirconium",
+        "zirconium",
+        "1.0.0-zirconium",
+        "#1 Zirconium Kernel SMP",
+        "x86_64",
+        "(none)",
+    };
     var off: u64 = 0;
     for (fields) |f| {
         var i: usize = 0;
