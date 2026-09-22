@@ -176,6 +176,13 @@ pub fn putChar(ch: u8) void {
 }
 
 pub fn write(str: []const u8) void {
+    if (fb.active) {
+        fb.setColorFromVga(@intFromEnum(fg_color), @intFromEnum(bg_color));
+        fb.write(str);
+        cursor_row = fb.cursor_row;
+        cursor_col = fb.cursor_col;
+        return;
+    }
     for (str) |ch| {
         putChar(ch);
     }

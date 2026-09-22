@@ -120,6 +120,26 @@ export fn isr_handler(frame: *InterruptFrame) callconv(.c) void {
             serial.serialWrite("\n");
         }
 
+        // If the exception originated in user space (Ring 3), isolate the fault
+        // and terminate the user task instead of panicking the kernel.
+        if ((frame.cs & 3) == 3) {
+            serial.serialWrite("[USER] Ring 3 fault (exception ");
+            serial.serialWriteDec(int_num);
+            serial.serialWrite("), terminating task\n");
+            vga.setColor(.light_red, .black);
+            vga.write("\n[USER] Process killed by exception: ");
+            if (int_num < exception_names.len) {
+                vga.write(exception_names[int_num]);
+            } else {
+                vga.write("Unknown");
+            }
+            vga.write("\n");
+            vga.setColor(.white, .black);
+
+            const proc = @import("../kernel/process.zig");
+            proc.exitCurrent(-11);
+        }
+
         vga.setColor(.light_red, .black);
         vga.write("\n=== KERNEL PANIC ===\n");
         vga.write("Exception: ");
@@ -129,6 +149,22 @@ export fn isr_handler(frame: *InterruptFrame) callconv(.c) void {
             vga.write("Unknown");
         }
         vga.putChar('\n');
+
+        vga.write("Error: 0x");
+        vga.writeHex(frame.error_code);
+        vga.write(" RIP: 0x");
+        vga.writeHex(frame.rip);
+        vga.write(" CS: 0x");
+        vga.writeHex(frame.cs);
+        vga.putChar('\n');
+
+        if (int_num == 14) {
+            var fault_addr: u64 = 0;
+            asm volatile ("movq %%cr2, %[addr]" : [addr] "=r" (fault_addr));
+            vga.write("CR2 (fault addr): 0x");
+            vga.writeHex(fault_addr);
+            vga.putChar('\n');
+        }
 
         @import("../system/panic.zig").printBacktrace(frame.rbp);
 

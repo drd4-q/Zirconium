@@ -18,6 +18,12 @@ var has_dirty: bool = false;
 // Covers every resolution up to 4K (3840x2160)
 const MAX_SHADOW_PIXELS: usize = 3840 * 2160;
 
+// Static preallocated early shadow buffer for boot/init (1024x768x32bpp).
+// Guarantees instant zero-lag drawing during early kernel initialization before PMM is online.
+const EARLY_SHADOW_MAX: usize = 1024 * 768;
+var early_shadow: [EARLY_SHADOW_MAX]u32 align(4096) = [_]u32{0} ** EARLY_SHADOW_MAX;
+var using_early_shadow: bool = false;
+
 // Static page tables for mapping framebuffer when fb_addr is above identity-mapped range
 var early_page_tables: [16][512]u64 align(4096) = [_][512]u64{[_]u64{0} ** 512} ** 16;
 var early_pt_used: usize = 0;
@@ -63,18 +69,38 @@ fn mapFbRange(paddr: u64, size: u64) void {
 }
 
 fn ensureShadow() bool {
-    if (shadow_pixels != 0) return true;
-    // PMM isn't ready until after system_init; retry lazily on first draw.
-    // (free_pages stays 0 until pmm.init runs — allocating before then would
-    //  corrupt the uninitialized PMM bitmap.)
-    if (root.pmm.free_pages == 0) return false;
+    if (shadow_pixels != 0) {
+        const needed_pixels = @as(u64, fb_width) * fb_height;
+        if (using_early_shadow and needed_pixels > EARLY_SHADOW_MAX and root.pmm.free_pages > 0) {
+            const bytes = (needed_pixels * 4 + 4095) & ~@as(u64, 4095);
+            const pages = @as(usize, @intCast(bytes / 4096));
+            if (root.pmm.allocPages(pages)) |phys| {
+                shadow = @ptrFromInt(phys);
+                shadow_pixels = @intCast(needed_pixels);
+                using_early_shadow = false;
+                @memset(shadow[0..shadow_pixels], 0);
+            }
+        }
+        return true;
+    }
+    // If resolution fits inside early static shadow buffer, activate it immediately
     const pixels = @as(u64, fb_width) * fb_height;
+    if (pixels > 0 and pixels <= EARLY_SHADOW_MAX) {
+        shadow = &early_shadow;
+        shadow_pixels = @intCast(pixels);
+        using_early_shadow = true;
+        @memset(shadow[0..shadow_pixels], 0);
+        return true;
+    }
+
+    if (root.pmm.free_pages == 0) return false;
     if (pixels == 0 or pixels > MAX_SHADOW_PIXELS) return false;
     const bytes = (pixels * 4 + 4095) & ~@as(u64, 4095);
     const pages = @as(usize, @intCast(bytes / 4096));
     const phys = root.pmm.allocPages(pages) orelse return false;
     shadow = @ptrFromInt(phys);
     shadow_pixels = @intCast(pixels);
+    using_early_shadow = false;
     @memset(shadow[0..shadow_pixels], 0);
     return true;
 }
@@ -200,11 +226,20 @@ pub fn setResolution(new_w: u32, new_h: u32) void {
 
 pub fn clear() void {
     if (!active) return;
-    var y: u32 = 0;
-    while (y < fb_height) : (y += 1) {
-        var x: u32 = 0;
-        while (x < fb_width) : (x += 1) {
-            putPixel(x, y, bg_r, bg_g, bg_b);
+    const bg_col: u32 = (@as(u32, bg_r) << 16) | (@as(u32, bg_g) << 8) | @as(u32, bg_b);
+    if (ensureShadow() and shadow_pixels != 0) {
+        @memset(shadow[0..shadow_pixels], bg_col);
+        markDirtyRect(0, 0, fb_width, fb_height);
+    } else {
+        const bg_val64: u64 = (@as(u64, bg_col) << 32) | bg_col;
+        var y: u32 = 0;
+        while (y < fb_height) : (y += 1) {
+            const row_ptr: [*]volatile u64 = @ptrFromInt(fb_addr + @as(u64, y) * fb_pitch);
+            const count64 = (fb_width * 4) / 8;
+            var i: usize = 0;
+            while (i < count64) : (i += 1) {
+                row_ptr[i] = bg_val64;
+            }
         }
     }
     clearMirror();
@@ -359,9 +394,17 @@ pub fn flush() void {
             const src: [*]const u32 = shadow + row_off;
             const dst_off: u64 = @as(u64, y) * fb_pitch + @as(u64, x0) * 4;
             const dst: [*]volatile u32 = @ptrFromInt(fb_addr + dst_off);
+
+            // Copy 64-bit qwords (2 pixels per store) to minimize MMIO wait states
+            const src64: [*]const u64 = @ptrCast(@alignCast(src));
+            const dst64: [*]volatile u64 = @ptrCast(@alignCast(dst));
+            const w64 = w / 2;
             var x: u32 = 0;
-            while (x < w) : (x += 1) {
-                dst[x] = src[x];
+            while (x < w64) : (x += 1) {
+                dst64[x] = src64[x];
+            }
+            if ((w & 1) != 0) {
+                dst[w - 1] = src[w - 1];
             }
         }
     }
@@ -530,6 +573,26 @@ fn drawCharAt(col: usize, row: usize, ch: u8) void {
     const py = @as(u32, @intCast(row * char_h));
 
     const glyph = getGlyph(ch);
+    const fg_col: u32 = (@as(u32, fg_r) << 16) | (@as(u32, fg_g) << 8) | @as(u32, fg_b);
+    const bg_col: u32 = (@as(u32, bg_r) << 16) | (@as(u32, bg_g) << 8) | @as(u32, bg_b);
+
+    if (ensureShadow() and shadow_pixels != 0 and px + char_w <= fb_width and py + char_h <= fb_height) {
+        var gy: usize = 0;
+        while (gy < char_h) : (gy += 1) {
+            const bits = glyph[gy];
+            const row_ptr = shadow + @as(u64, py + @as(u32, @intCast(gy))) * fb_width + px;
+            row_ptr[0] = if ((bits & 0x80) != 0) fg_col else bg_col;
+            row_ptr[1] = if ((bits & 0x40) != 0) fg_col else bg_col;
+            row_ptr[2] = if ((bits & 0x20) != 0) fg_col else bg_col;
+            row_ptr[3] = if ((bits & 0x10) != 0) fg_col else bg_col;
+            row_ptr[4] = if ((bits & 0x08) != 0) fg_col else bg_col;
+            row_ptr[5] = if ((bits & 0x04) != 0) fg_col else bg_col;
+            row_ptr[6] = if ((bits & 0x02) != 0) fg_col else bg_col;
+            row_ptr[7] = if ((bits & 0x01) != 0) fg_col else bg_col;
+        }
+        markDirtyRect(px, py, char_w, char_h);
+        return;
+    }
 
     var gy: usize = 0;
     while (gy < char_h) : (gy += 1) {
@@ -586,12 +649,6 @@ pub fn scrollUp() void {
         }
     }
 
-    // Physically shift the LFB + shadow text region up by one 16px row
-    // instead of repainting every row: the bulk of the screen never gets
-    // rewritten, so scrolling only flushes the newly exposed bottom row
-    // (avoids a full-screen rewrite per newline = constant flicker).
-    // When there is no shadow buffer (oversized fb), fall back to repainting
-    // every row straight from the mirror.
     const text_w = cols * char_w;
     const row_px = char_h;
     if (rows > 1 and shadow_pixels != 0) {
@@ -603,23 +660,29 @@ pub fn scrollUp() void {
 
             if (fb_bpp == 24) {
                 const dst_lfb: [*]volatile u8 = @ptrFromInt(fb_addr + @as(u64, py - row_px) * fb_pitch);
-                const src_lfb: [*]volatile u8 = @ptrFromInt(fb_addr + @as(u64, py) * fb_pitch);
                 var x: usize = 0;
-                while (x < text_w * 3) : (x += 1) {
-                    dst_lfb[x] = src_lfb[x];
+                while (x < text_w) : (x += 1) {
+                    const px = src_sh[x];
+                    dst_lfb[x * 3 + 0] = @intCast(px & 0xFF);
+                    dst_lfb[x * 3 + 1] = @intCast((px >> 8) & 0xFF);
+                    dst_lfb[x * 3 + 2] = @intCast((px >> 16) & 0xFF);
                 }
             } else {
                 const dst_lfb: [*]volatile u32 = @ptrFromInt(fb_addr + @as(u64, py - row_px) * fb_pitch);
-                const src_lfb: [*]volatile u32 = @ptrFromInt(fb_addr + @as(u64, py) * fb_pitch);
+                const src64: [*]const u64 = @ptrCast(@alignCast(src_sh));
+                const dst64: [*]volatile u64 = @ptrCast(@alignCast(dst_lfb));
+                const count64 = text_w / 2;
                 var x: usize = 0;
-                while (x < text_w) : (x += 1) {
-                    dst_lfb[x] = src_lfb[x];
+                while (x < count64) : (x += 1) {
+                    dst64[x] = src64[x];
+                }
+                if ((text_w & 1) != 0) {
+                    dst_lfb[text_w - 1] = src_sh[text_w - 1];
                 }
             }
         }
 
-        // Repaint the newly exposed bottom text row (goes through putPixel →
-        // shadow, so only this row becomes dirty and gets flushed).
+        // Repaint the newly exposed bottom text row in shadow and flush it
         const bottom_y0: u32 = @intCast((rows - 1) * char_h);
         fillRect(0, bottom_y0, @intCast(text_w), @intCast(char_h), bg_r, bg_g, bg_b);
         flush();
@@ -631,10 +694,9 @@ pub fn scrollUp() void {
     }
 }
 
-pub fn putChar(ch: u8) void {
+fn putCharInternal(ch: u8) void {
     if (!active) return;
 
-    // Exit scroll view on any input
     if (scroll_view) {
         exitScrollView();
     }
@@ -667,7 +729,6 @@ pub fn putChar(ch: u8) void {
         return;
     }
 
-    // Update screen mirror
     if (cursor_row < rows and cursor_col < cols) {
         screen_mirror[cursor_row][cursor_col] = makeEntry(ch);
     }
@@ -681,13 +742,18 @@ pub fn putChar(ch: u8) void {
             cursor_row = rows - 1;
         }
     }
+}
+
+pub fn putChar(ch: u8) void {
+    putCharInternal(ch);
     flush();
 }
 
 pub fn write(str: []const u8) void {
     for (str) |ch| {
-        putChar(ch);
+        putCharInternal(ch);
     }
+    flush();
 }
 
 pub fn writeDec(value: u64) void {

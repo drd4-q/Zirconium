@@ -142,7 +142,7 @@ pub fn request(target_ip: [4]u8) void {
     arp_tx_buf[38] = target_ip[0]; arp_tx_buf[39] = target_ip[1];
     arp_tx_buf[40] = target_ip[2]; arp_tx_buf[41] = target_ip[3];
 
-    e1000.transmit(arp_tx_buf[0..42]);
+    net.sendFrame(arp_tx_buf[0..42]);
 }
 
 var reply_tx_buf: [42]u8 align(16) = undefined;
@@ -169,5 +169,5 @@ fn sendReply(dst_mac: []const u8, target_ip: []const u8) void {
     @memcpy(reply_tx_buf[32..38], dst_mac);
     @memcpy(reply_tx_buf[38..42], target_ip);
 
-    e1000.transmit(reply_tx_buf[0..42]);
+    net.sendFrame(reply_tx_buf[0..42]);
 }

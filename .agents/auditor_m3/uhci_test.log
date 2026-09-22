@@ -1,0 +1,152 @@
+c[?7l[2J[0mSeaBIOS (version 1.16.3-debian-1.16.3-2)
+
+
+iPXE (https://ipxe.org) 00:03.0 CA00 PCI2.10 PnP PMM+1EFC6F10+1EF06F10 CA00
+Press Ctrl-B to configure iPXE (PCI 00:03.0)...                                                                               
+
+
+Booting from Hard Disk...
+Boot failed: could not read the boot disk
+
+Booting from Floppy...
+Boot failed: could not read the boot disk
+
+Booting from DVD/CD...
+[0;30;47mWelcome to GRUB!
+
+[01;01H[0m[2J[02;25HGNU GRUB  version 2.12-9+deb13u2[04;02H┌────────────────────────────────────────────────────────────────────────────┐[05;02H│[05;79H│[06;02H│[06;79H│[07;02H│[07;79H│[08;02H│[08;79H│[09;02H│[09;79H│[10;02H│[10;79H│[11;02H│[11;79H│[12;02H│[12;79H│[13;02H│[13;79H│[14;02H│[14;79H│[15;02H│[15;79H│[16;02H│[16;79H│[17;02H│[17;79H│[18;02H└────────────────────────────────────────────────────────────────────────────┘[20;02H     Use the ↑ and ↓ keys to select which entry is highlighted.          
+      Press enter to boot the selected OS, `e' to edit the commands       
+      before booting or `c' for a command-line.                           [05;80H [05;03H[0;30;47m*Zirconium OS (Graphics Mode)                                               [06;03H[0m Zirconium OS (Text Mode Fallback)                                          [07;03H                                                                            [08;03H                                                                            [09;03H                                                                            [10;03H                                                                            [11;03H                                                                            [12;03H                                                                            [13;03H                                                                            [14;03H                                                                            [15;03H                                                                            [16;03H                                                                            [17;03H                                                                            [17;80H 
+
+
+
+
+
+   The highlighted entry w[23;26H[23;27Hill be executed automatically in 2s.                 [05;78H
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   The highlighted entry will be executed automatically in 1s.                 [05;78H
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+   The highlighted entry will be executed automatically in 0s.                 [01;01H[2J[2J  Booting `Zirconium OS (Graphics Mode)'
+
+[BOOT] Kernel loaded
+[BOOT] GDT initialized with ring 3 segments
+[BOOT] Framebuffer active
+[SYSTEM] Initializing...
+[SYSTEM] Multiboot verified OK
+[SYSTEM] PIC initialized
+[IDT] Zeroing entries...
+[IDT] Setting ISR entries 0-31...
+[IDT] Setting IRQ entries 32-47...
+[IDT] Setting syscall gate 0x80...
+[IDT] Loading IDT register...
+[IDT] IDT loaded OK
+[SYSTEM] IDT loaded (256 entries)
+[SYSTEM] Enabling interrupts...
+[SYSTEM] Interrupts enabled
+[SYSTEM] System init complete
+[BOOT] System init done
+[SYSCALL64] syscall/sysret enabled, LSTAR=0x0000000000101315
+[MEM] Physical memory manager initialized
+[MEM] Total pages: 131038, free: 125325
+[VMM] Virtual memory manager initialized
+[VMM] CR3=0x0000000000400000
+[KHEAP] Initialized at 0x0000000001951000 size=131072 bytes
+[VFS] Initialized
+[RAMFS] Initialized with root, /dev, /tmp, /etc
+[VFS] Mounted ramfs at /
+[KERNEL] Initializing kernel...
+[SCHED] Scheduler initialized
+[APIC] Local APIC timer initialized at 0x00000000FEE00000 (Vector 32, Periodic 100 Hz)
+[SCHED] Kernel task 0 registered, entry=0x00000000001830D0
+[SCHED] Kernel task 1 registered, entry=0x0000000000182B50
+[ADDRSPACE] Created address space, PML4=0x0000000001971000
+[ADDRSPACE] kernel_start = 0x0000000000100000, kernel_end = 0x0000000001650110
+[ELF] Loaded: entry=0x0000000002001380 phdr=0x0000000002000040 end=0x0000000002002868
+[SCHED] User ELF task 2 registered, entry=0x0000000002001380
+[KERNEL] Kernel init done, 0000000000000003 tasks loaded
+[BOOT] Kernel init done
+[E1000] MMIO base: 0x00000000FEBC0000
+[E1000] Reset complete
+[E1000] MAC from EEPROM
+[E1000] MAC: 52:54:52:54:52:54
+[E1000] Setting up RX
+[E1000] RX ring at 0x0000000001485600
+[E1000] Setting up TX
+[E1000] TX ring at 0x000000000149A810
+[E1000] Init complete, link up
+[NET] IP: 10.0.2.15 GW: 10.0.2.2
+[ARP] Reply: 10.0.2.2 -> 0000000000000052:0000000000000055:000000000000000A:0000000000000000:0000000000000002:0000000000000002
+[ARP] Reply: 10.0.2.2 -> 0000000000000052:0000000000000055:000000000000000A:0000000000000000:0000000000000002:0000000000000002
+[ARP] Reply: 10.0.2.2 -> 0000000000000052:0000000000000055:000000000000000A:0000000000000000:0000000000000002:0000000000000002
+[NET] Gateway MAC resolved
+[BOOT] Network init done
+[SMP] Detecting CPUs via ACPI...
+[ACPI] RSDP at 0x00000000000F52A0, revision 0, LAPIC base 0x00000000FEE00000
+[ACPI] CPU 4 LAPIC ID: 0, 1, 2, 3
+[SMP] BSP LAPIC ID 0, starting APs...
+[SMP] Booting AP 1 (LAPIC ID 1)...
+[SMP] AP CPU 1 online, LAPIC ID 0000000000000001
+[SMP] AP 1 confirmed online (online=1)
+[SMP] Booting AP 2 (LAPIC ID 2)...
+[SMP] AP CPU 2 online, LAPIC ID 0000000000000002
+[SMP] AP 2 confirmed online (online=2)
+[SMP] Booting AP 3 (LAPIC ID 3)...
+[SMP] AP CPU 3 online, LAPIC ID 0000000000000003
+[SMP] AP 3 confirmed online (online=3)
+[SMP] SMP online: 3 AP(s), 4 CPU(s) total
+[SCHED] Running all tasks...
+[TASK] Idle task is running
+[TASK] Hello from kernel task!
+[USER] Hello from Ring 3 (user space)!
+[USER-SERIAL] Hello from Ring 3!
+[USER-NET] Created socket via sys_socket
+[TCP] Connecting to 10.0.2.2:80...
+[TCP] RST received
+[USER-NET] Connected to 10.0.2.2:80 via sys_connect
+[USER-NET] Sent HTTP GET request via sys_send
+[USER-HEAP] malloc(64)+malloc(128) via SYS_BRK OK
+[USER-HEAP] free + reuse OK
+
+[USER] Process exited with code 42
+[VIRTIO-BLK] No virtio-blk device found
+[AHCI] No AHCI controller found
+[FAT16] No FAT16 filesystem found on any block device
+[USB] Scanning PCI for USB host controllers...
+[USB] Found UHCI (USB 1.1) Controller at PCI 0:4 (Vendor=0x0000000000008086 Device=0x0000000000002934)
+[USB] Detected 2.4GHz Wireless Receiver: MosArt 2.4GHz Wireless Keyboard/Mouse Combo
+[USB] Registered USB Keyboard (HID Boot) at Addr 1 (Vendor=0x0000000000000627 Product=0x0000000000000001 EP_IN=1)
+[USB] Detected 2.4GHz Wireless Receiver: MosArt 2.4GHz Wireless Keyboard/Mouse Combo
+[USB] Registered USB Mouse (HID Boot) at Addr 2 (Vendor=0x0000000000000627 Product=0x0000000000000001 EP_IN=1)
+[USB] Subsystem initialized with 1 controller(s), 2 active USB device(s).

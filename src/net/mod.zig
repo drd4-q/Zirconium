@@ -3,12 +3,13 @@ const vga = root.vga;
 const port = root.serial;
 const e1000 = @import("../drivers/e1000.zig");
 const rtl8169 = @import("../drivers/rtl8169.zig");
+const rtl8188eu = @import("../drivers/usb/rtl8188eu.zig");
 const arp = @import("arp.zig");
 const arp_cache = @import("arp_cache.zig");
 const ip_mod = @import("ip.zig");
 const dhcp_mod = @import("dhcp.zig");
 
-pub const NicType = enum { none, e1000, rtl8169 };
+pub const NicType = enum { none, e1000, rtl8169, usb_wifi };
 pub var active_nic: NicType = .none;
 
 pub var gateway_ip: [4]u8 = .{ 10, 0, 2, 2 };
@@ -32,6 +33,9 @@ pub fn init() void {
     } else if (rtl8169.initialized) {
         active_nic = .rtl8169;
         @memcpy(&our_mac, &rtl8169.mac);
+    } else if (rtl8188eu.initialized) {
+        active_nic = .usb_wifi;
+        @memcpy(&our_mac, &rtl8188eu.mac);
     } else {
         active_nic = .none;
         our_mac = [_]u8{ 0, 0, 0, 0, 0, 0 };
@@ -76,15 +80,10 @@ pub fn poll() void {
     // batch) and the handshake appeared to time out.
     var drained: usize = 0;
     while (drained < 32) : (drained += 1) {
-        const len = switch (active_nic) {
-            .e1000 => e1000.receive(&rx_buf),
-            .rtl8169 => rtl8169.receive(&rx_buf),
-            .none => return,
-        } orelse return;
+        const len = receiveFrame(&rx_buf) orelse return;
         handleFrame(rx_buf[0..len]);
     }
 }
-
 
 var polling: bool = false;
 
@@ -170,9 +169,32 @@ pub fn resolveGateway() bool {
     return ensureArp(gateway_ip);
 }
 
-pub fn sendFrame(dst: [6]u8, eth_type_val: u16, payload: []const u8) void {
+/// Transmit a raw Ethernet frame via the currently active NIC driver.
+pub fn sendFrame(packet: []const u8) void {
+    if (!hasNic()) return;
+    switch (active_nic) {
+        .e1000 => e1000.transmit(packet),
+        .rtl8169 => rtl8169.transmit(packet),
+        .usb_wifi => rtl8188eu.transmit(packet),
+        .none => {},
+    }
+}
+
+/// Receive a raw Ethernet frame from the currently active NIC driver.
+pub fn receiveFrame(buf: []u8) ?usize {
+    return switch (active_nic) {
+        .e1000 => e1000.receive(buf),
+        .rtl8169 => rtl8169.receive(buf),
+        .usb_wifi => rtl8188eu.receive(buf),
+        .none => null,
+    };
+}
+
+/// Helper to format and transmit an Ethernet packet given dst MAC, ethertype, and payload.
+pub fn sendPacket(dst: [6]u8, eth_type_val: u16, payload: []const u8) void {
     if (!hasNic()) return;
     const total = 14 + payload.len;
+    if (total > send_buf.len) return;
 
     send_buf[0] = dst[0]; send_buf[1] = dst[1]; send_buf[2] = dst[2];
     send_buf[3] = dst[3]; send_buf[4] = dst[4]; send_buf[5] = dst[5];
@@ -181,16 +203,9 @@ pub fn sendFrame(dst: [6]u8, eth_type_val: u16, payload: []const u8) void {
     send_buf[10] = our_mac[4]; send_buf[11] = our_mac[5];
     send_buf[12] = @intCast(eth_type_val >> 8);
     send_buf[13] = @intCast(eth_type_val & 0xFF);
-    var i: usize = 0;
-    while (i < payload.len) : (i += 1) {
-        send_buf[14 + i] = payload[i];
-    }
+    @memcpy(send_buf[14 .. 14 + payload.len], payload);
 
-    switch (active_nic) {
-        .e1000 => e1000.transmit(send_buf[0..total]),
-        .rtl8169 => rtl8169.transmit(send_buf[0..total]),
-        .none => {},
-    }
+    sendFrame(send_buf[0..total]);
 }
 
 

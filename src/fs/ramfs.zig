@@ -200,6 +200,7 @@ fn ramfsOpen(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.
 
 fn ramfsClose(fs: *vfs.FileSystem, handle: *vfs.FileHandle) void {
     _ = fs;
+    if (vfs.isStaticHandle(handle)) return;
     kalloc.kfree(@ptrFromInt(@intFromPtr(handle)));
 }
 

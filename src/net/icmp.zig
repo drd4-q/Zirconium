@@ -69,7 +69,7 @@ fn sendReply(request_frame: []const u8, ihl: usize) void {
     reply_buf[36] = @intCast(cs >> 8);
     reply_buf[37] = @intCast(cs & 0xFF);
 
-    e1000.transmit(reply_buf[0..frame_len]);
+    net.sendFrame(reply_buf[0..frame_len]);
 }
 
 pub fn ping(target: [4]u8, count: u32) void {
@@ -121,7 +121,7 @@ pub fn ping(target: [4]u8, count: u32) void {
         ping_buf[37] = @intCast(cs & 0xFF);
 
         ping_send_tick = timer.ticks;
-        e1000.transmit(ping_buf[0..frame_len]);
+        net.sendFrame(ping_buf[0..frame_len]);
 
         vga.write("  Pinging ");
         net.printIp(target);

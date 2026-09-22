@@ -82,6 +82,7 @@ var dma_buffer: [8192]u8 align(4096) = undefined;
 
 pub const AhciDrive = struct {
     port_no: u32,
+    slot_idx: usize,
     sector_count: u64,
     block_dev: blockdev.BlockDevice,
 };
@@ -159,16 +160,41 @@ pub fn init() bool {
 
     pci.enableBusMaster(dev.bus, dev.dev, dev.func);
 
-    const bar5 = pci.readBar(dev.bus, dev.dev, dev.func, 5);
-    if (bar5 == 0 or (bar5 & 1) != 0) {
+    // BAR5 holds ABAR; it can be a 64-bit BAR on real hardware placed above
+    // 4GB. Truncating to 32 bits would alias RAM and corrupt memory on MMIO
+    // access, so combine with BAR6 when 64-bit.
+    const bar5_lo = pci.readBar(dev.bus, dev.dev, dev.func, 5);
+    if (bar5_lo == 0 or bar5_lo == 0xFFFFFFFF or (bar5_lo & 1) != 0) {
         port.serialWrite("[AHCI] Error: invalid ABAR (BAR5)\n");
         return false;
     }
-
-    abar = @as(u64, bar5 & 0xFFFFFFF0);
+    if ((bar5_lo & 0x06) == 0x04) {
+        const bar5_hi = pci.readConfig(dev.bus, dev.dev, dev.func, 0x28);
+        abar = (@as(u64, bar5_hi) << 32) | (@as(u64, bar5_lo) & 0xFFFFFFF0);
+    } else {
+        abar = @as(u64, bar5_lo & 0xFFFFFFF0);
+    }
+    if (abar == 0) {
+        port.serialWrite("[AHCI] Error: ABAR is 0\n");
+        return false;
+    }
+    if (abar >= 0x1000000000) {
+        port.serialWrite("[AHCI] Error: ABAR above identity map, skipping\n");
+        abar = 0;
+        return false;
+    }
     port.serialWrite("[AHCI] ABAR base: 0x");
     port.serialWriteHex(abar);
     port.serialWrite("\n");
+
+    // Sanity: unmapped MMIO reads as all-ones. Bail instead of programming
+    // a dead controller (writes would land in RAM aliases on truncated BARs).
+    const cap_probe = readReg(HOST_CAP);
+    if (cap_probe == 0 or cap_probe == 0xFFFFFFFF) {
+        port.serialWrite("[AHCI] Error: ABAR not responding, skipping\n");
+        abar = 0;
+        return false;
+    }
 
     // Enable AHCI Mode
     writeReg(HOST_CTL, readReg(HOST_CTL) | HOST_CTL_AHCI_EN);
@@ -242,6 +268,7 @@ fn probePort(port_no: u32) void {
 
     const d = &drives[drive_count];
     d.port_no = port_no;
+    d.slot_idx = drive_count;
     d.sector_count = if (sectors > 0) sectors else 2097152; // Fallback 1GB
 
     @memset(d.block_dev.name[0..], 0);
@@ -410,12 +437,12 @@ fn getDriveFromDev(dev: *blockdev.BlockDevice) ?*AhciDrive {
 
 fn readSectorWrapper(dev: *blockdev.BlockDevice, sector: u64, buf: []u8) bool {
     const d = getDriveFromDev(dev) orelse return false;
-    return readSector(d.port_no, @intCast(d.port_no), sector, buf);
+    return readSector(d.port_no, d.slot_idx, sector, buf);
 }
 
 fn writeSectorWrapper(dev: *blockdev.BlockDevice, sector: u64, buf: []const u8) bool {
     const d = getDriveFromDev(dev) orelse return false;
-    return writeSector(d.port_no, @intCast(d.port_no), sector, buf);
+    return writeSector(d.port_no, d.slot_idx, sector, buf);
 }
 
 fn totalSectorsWrapper(dev: *blockdev.BlockDevice) u64 {

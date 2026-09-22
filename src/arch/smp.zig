@@ -105,8 +105,11 @@ fn prepareAp(index: u64, stack_top: u64) void {
     const dst: [*]volatile u8 = @ptrFromInt(AP_BASE);
     for (blob.data, 0..) |b, i| dst[i] = b;
 
+    // Initialize dedicated per-CPU GDT and TSS for this AP
+    gdt.initCpu(@intCast(index), stack_top);
+
     var gdt_desc: [10]u8 = undefined;
-    fillDescBytes(&gdt_desc, gdt.gdtLimit(), @intFromPtr(gdt.gdtAddr()));
+    fillDescBytes(&gdt_desc, gdt.gdtLimit(), @intFromPtr(gdt.gdtAddrForCpu(@intCast(index))));
     writeBytesCell(CELL_GDT_DESC, gdt_desc);
 
     var idt_desc: [10]u8 = undefined;
@@ -155,6 +158,9 @@ fn waitCpuOnline(expected: u32) void {
 }
 
 pub export fn ap_entry(cpu_index: u64) callconv(.c) noreturn {
+    // Load per-CPU Task Register for this AP core
+    asm volatile ("ltr %[sel]" : : [sel] "r" (@as(u16, gdt.TSS_SEL)));
+
     while (!tryLock()) {
         asm volatile ("pause");
     }

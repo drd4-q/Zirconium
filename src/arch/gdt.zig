@@ -46,11 +46,14 @@ pub const USER_CODE_SEL: u16 = 0x18 | 3; // RPL=3
 pub const USER_DATA_SEL: u16 = 0x20 | 3; // RPL=3
 pub const TSS_SEL: u16 = 0x40;
 
-var gdt: [128]u8 align(16) = [_]u8{0} ** 128;
+pub const MAX_CPUS: usize = 64;
+
+var gdt_per_cpu: [MAX_CPUS][128]u8 align(16) = [_][128]u8{[_]u8{0} ** 128} ** MAX_CPUS;
+pub var tss_per_cpu: [MAX_CPUS]Tss align(16) = [_]Tss{.{}} ** MAX_CPUS;
 pub var tss: Tss align(16) = undefined;
 
-fn setEntry(idx: usize, base: u32, limit: u32, access: u8, granularity: u8) void {
-    const entry: *GdtEntry = @ptrFromInt(@intFromPtr(&gdt) + idx * @sizeOf(GdtEntry));
+fn setEntryForCpu(cpu: usize, idx: usize, base: u32, limit: u32, access: u8, granularity: u8) void {
+    const entry: *GdtEntry = @ptrFromInt(@intFromPtr(&gdt_per_cpu[cpu]) + idx * @sizeOf(GdtEntry));
     entry.base_low = @intCast(base & 0xFFFF);
     entry.base_mid = @intCast((base >> 16) & 0xFF);
     entry.base_high = @intCast((base >> 24) & 0xFF);
@@ -59,8 +62,8 @@ fn setEntry(idx: usize, base: u32, limit: u32, access: u8, granularity: u8) void
     entry.granularity = granularity | @as(u8, @intCast((limit >> 16) & 0x0F));
 }
 
-fn setTssEntry(idx: usize, base: u64, limit: u32) void {
-    const entry: *TssEntry = @ptrFromInt(@intFromPtr(&gdt) + idx * @sizeOf(GdtEntry));
+fn setTssEntryForCpu(cpu: usize, idx: usize, base: u64, limit: u32) void {
+    const entry: *TssEntry = @ptrFromInt(@intFromPtr(&gdt_per_cpu[cpu]) + idx * @sizeOf(GdtEntry));
     entry.base_low = @intCast(base & 0xFFFF);
     entry.base_mid = @intCast((base >> 16) & 0xFF);
     entry.base_high = @intCast((base >> 24) & 0xFF);
@@ -71,37 +74,47 @@ fn setTssEntry(idx: usize, base: u64, limit: u32) void {
     entry.reserved = 0;
 }
 
-pub fn init(stack_top: u64) void {
-    // Zero GDT without SSE (compiler's @memset uses xorps/movaps)
-    const gdt_bytes: *[128]u8 = &gdt;
+pub fn initCpu(cpu_index: usize, stack_top: u64) void {
+    if (cpu_index >= MAX_CPUS) return;
+
+    const gdt_bytes: *[128]u8 = &gdt_per_cpu[cpu_index];
     for (gdt_bytes) |*b| {
         b.* = 0;
     }
 
     // 0x00: Null
-    setEntry(0, 0, 0, 0, 0);
+    setEntryForCpu(cpu_index, 0, 0, 0, 0, 0);
     // 0x08: Kernel code (64-bit, DPL=0)
-    setEntry(1, 0, 0xFFFFF, 0x9A, 0xA0);
+    setEntryForCpu(cpu_index, 1, 0, 0xFFFFF, 0x9A, 0xA0);
     // 0x10: Kernel data (64-bit, DPL=0)
-    setEntry(2, 0, 0xFFFFF, 0x92, 0xC0);
+    setEntryForCpu(cpu_index, 2, 0, 0xFFFFF, 0x92, 0xC0);
     // 0x18: User code (64-bit, DPL=3)
-    setEntry(3, 0, 0xFFFFF, 0xFA, 0xA0);
+    setEntryForCpu(cpu_index, 3, 0, 0xFFFFF, 0xFA, 0xA0);
     // 0x20: User data (64-bit, DPL=3)
-    setEntry(4, 0, 0xFFFFF, 0xF2, 0xC0);
+    setEntryForCpu(cpu_index, 4, 0, 0xFFFFF, 0xF2, 0xC0);
     // 0x28: Kernel code (duplicate, DPL=0)
-    setEntry(5, 0, 0xFFFFF, 0x9A, 0xA0);
+    setEntryForCpu(cpu_index, 5, 0, 0xFFFFF, 0x9A, 0xA0);
     // 0x30: Kernel data (duplicate, DPL=0)
-    setEntry(6, 0, 0xFFFFF, 0x92, 0xC0);
+    setEntryForCpu(cpu_index, 6, 0, 0xFFFFF, 0x92, 0xC0);
 
-    tss.rsp0 = stack_top;
-    tss.iopb_offset = @sizeOf(Tss);
+    tss_per_cpu[cpu_index] = .{};
+    tss_per_cpu[cpu_index].rsp0 = stack_top;
+    tss_per_cpu[cpu_index].iopb_offset = @sizeOf(Tss);
 
-    const tss_addr = @intFromPtr(&tss);
-    setTssEntry(8, tss_addr, @sizeOf(Tss) - 1);
+    const tss_addr = @intFromPtr(&tss_per_cpu[cpu_index]);
+    setTssEntryForCpu(cpu_index, 8, tss_addr, @sizeOf(Tss) - 1);
+
+    if (cpu_index == 0) {
+        tss = tss_per_cpu[0];
+    }
+}
+
+pub fn init(stack_top: u64) void {
+    initCpu(0, stack_top);
 
     // Build LGDT descriptor manually (10 bytes: u16 limit + u64 base)
-    const limit_val: u16 = @intCast(@sizeOf(GdtEntry) * 8 + @sizeOf(TssEntry) - 1);
-    const base_val: u64 = @intFromPtr(&gdt);
+    const limit_val: u16 = gdtLimit();
+    const base_val: u64 = @intFromPtr(gdtAddrForCpu(0));
 
     var lgdt_desc: [10]u8 align(16) = undefined;
     lgdt_desc[0] = @intCast(limit_val & 0xFF);
@@ -118,12 +131,25 @@ pub fn init(stack_top: u64) void {
     load_gdt(@intFromPtr(&lgdt_desc));
 }
 
+pub fn setRsp0ForCpu(cpu_index: usize, rsp: u64) void {
+    if (cpu_index < MAX_CPUS) {
+        tss_per_cpu[cpu_index].rsp0 = rsp;
+        if (cpu_index == 0) {
+            tss.rsp0 = rsp;
+        }
+    }
+}
+
 pub fn setRsp0(rsp: u64) void {
-    tss.rsp0 = rsp;
+    setRsp0ForCpu(0, rsp);
+}
+
+pub fn gdtAddrForCpu(cpu_index: usize) *align(16) [128]u8 {
+    return &gdt_per_cpu[cpu_index];
 }
 
 pub fn gdtAddr() *align(16) [128]u8 {
-    return &gdt;
+    return gdtAddrForCpu(0);
 }
 
 pub fn gdtLimit() u16 {

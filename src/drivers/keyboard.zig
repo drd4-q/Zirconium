@@ -31,6 +31,12 @@ fn waitOutput() bool {
 }
 
 pub fn init() void {
+    const init_st = port_io.inb(KB_STATUS);
+    if (init_st == 0xFF) {
+        // No physical 8042 PS/2 controller present on motherboard
+        return;
+    }
+
     // Flush any pending data from previous BIOS/SMM operations
     var flush_cnt: u32 = 0;
     while ((port_io.inb(KB_STATUS) & 1) != 0 and flush_cnt < 1000) : (flush_cnt += 1) {
@@ -75,14 +81,22 @@ fn irqHandler(_: *isr_mod.InterruptFrame) void {
     while (true) {
         const status = port_io.inb(KB_STATUS);
         if ((status & 0x01) == 0) break; // output buffer empty
-        if ((status & 0x20) != 0) break; // mouse data (bit 5 = 1), skip
+        if ((status & 0x20) != 0) {
+            // Mouse data arrived on 8042: drain it so 8042 buffer is never stuck!
+            _ = port_io.inb(KB_DATA);
+            break;
+        }
 
         const scancode = port_io.inb(KB_DATA);
-        const next = (ring_head + 1) % RING_SIZE;
-        if (next != ring_tail) {
-            scancode_ring[ring_head] = scancode;
-            ring_head = next;
-        }
+        pushScancode(scancode);
+    }
+}
+
+pub fn pushScancode(scancode: u8) void {
+    const next = (ring_head + 1) % RING_SIZE;
+    if (next != ring_tail) {
+        scancode_ring[ring_head] = scancode;
+        ring_head = next;
     }
 }
 
@@ -330,4 +344,26 @@ pub fn readLine(buf: []u8, max_len: usize) usize {
         }
     }
     return pos;
+}
+
+pub fn hasKey() bool {
+    return (direct_key_head != direct_key_tail) or (ring_head != ring_tail);
+}
+
+pub fn setLeds(num_lock_on: bool, caps_lock_on: bool, scroll_lock_on: bool) void {
+    const init_st = port_io.inb(KB_STATUS);
+    if (init_st == 0xFF) return;
+
+    var led_byte: u8 = 0;
+    if (scroll_lock_on) led_byte |= 0x01;
+    if (num_lock_on) led_byte |= 0x02;
+    if (caps_lock_on) led_byte |= 0x04;
+
+    waitInput();
+    port_io.outb(KB_DATA, 0xED);
+    if (waitOutput()) _ = port_io.inb(KB_DATA);
+
+    waitInput();
+    port_io.outb(KB_DATA, led_byte);
+    if (waitOutput()) _ = port_io.inb(KB_DATA);
 }

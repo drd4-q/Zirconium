@@ -71,7 +71,15 @@ const MAX_OPEN_FILES: usize = 32;
 var mounts: [MAX_MOUNTS]FileSystem = undefined;
 var mount_count: usize = 0;
 var open_files: [MAX_OPEN_FILES]FileHandle = undefined;
+var underlying_handles: [MAX_OPEN_FILES]?*FileHandle = [_]?*FileHandle{null} ** MAX_OPEN_FILES;
 var file_used: [MAX_OPEN_FILES]bool = [_]bool{false} ** MAX_OPEN_FILES;
+
+pub fn isStaticHandle(handle: *const FileHandle) bool {
+    const addr = @intFromPtr(handle);
+    const start = @intFromPtr(&open_files[0]);
+    const end = @intFromPtr(&open_files[MAX_OPEN_FILES - 1]) + @sizeOf(FileHandle);
+    return addr >= start and addr < end;
+}
 
 // Current working directory
 var cwd: [256]u8 = undefined;
@@ -81,6 +89,8 @@ pub fn init() void {
     mount_count = 0;
     cwd[0] = '/';
     cwd_len = 1;
+    for (&file_used) |*u| u.* = false;
+    for (&underlying_handles) |*h| h.* = null;
     serial.serialWrite("[VFS] Initialized\n");
 }
 
@@ -264,6 +274,7 @@ pub fn open(path: []const u8, flags: OpenFlags) ?*FileHandle {
     while (i < MAX_OPEN_FILES) : (i += 1) {
         if (!file_used[i]) {
             open_files[i] = handle.*;
+            underlying_handles[i] = handle;
             file_used[i] = true;
             return &open_files[i];
         }
@@ -275,16 +286,23 @@ pub fn open(path: []const u8, flags: OpenFlags) ?*FileHandle {
 }
 
 pub fn close(handle: *FileHandle) void {
-    handle.fs.closeFn(handle.fs, handle);
-
-    // Mark slot as free
+    // Find slot in open_files
     var i: usize = 0;
     while (i < MAX_OPEN_FILES) : (i += 1) {
         if (&open_files[i] == handle) {
             file_used[i] = false;
+            const target = underlying_handles[i] orelse handle;
+            underlying_handles[i] = null;
+            if (target != handle) {
+                target.* = handle.*;
+            }
+            target.fs.closeFn(target.fs, target);
             return;
         }
     }
+
+    // Direct filesystem handle not managed by open_files
+    handle.fs.closeFn(handle.fs, handle);
 }
 
 pub fn read(handle: *FileHandle, buf: []u8) usize {

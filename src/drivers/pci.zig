@@ -19,7 +19,7 @@ pub const PciDevice = struct {
     irq: u8,
 };
 
-pub var devices: [128]PciDevice = undefined;
+pub var devices: [512]PciDevice = undefined;
 pub var device_count: usize = 0;
 
 fn outb(p: u16, v: u8) void {
@@ -38,7 +38,7 @@ fn inl(p: u16) u32 {
     return asm volatile ("inl %%dx, %%eax" : [result] "={eax}" (-> u32), : [port] "{dx}" (p));
 }
 
-fn readConfig(bus: u8, dev: u8, func: u8, reg: u8) u32 {
+pub fn readConfig(bus: u8, dev: u8, func: u8, reg: u8) u32 {
     const addr: u32 = 0x80000000 |
         (@as(u32, bus) << 16) |
         (@as(u32, dev) << 11) |
@@ -48,7 +48,7 @@ fn readConfig(bus: u8, dev: u8, func: u8, reg: u8) u32 {
     return inl(CONFIG_DATA);
 }
 
-fn writeConfig(bus: u8, dev: u8, func: u8, reg: u8, val: u32) void {
+pub fn writeConfig(bus: u8, dev: u8, func: u8, reg: u8, val: u32) void {
     const addr: u32 = 0x80000000 |
         (@as(u32, bus) << 16) |
         (@as(u32, dev) << 11) |

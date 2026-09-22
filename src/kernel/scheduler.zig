@@ -322,6 +322,8 @@ fn jumpToUser(t: *task.Task) void {
 
 pub fn scheduleTick() void {
     tick_count += 1;
+    // Poll USB input devices periodically
+    @import("../drivers/usb.zig").poll();
     // Call net tick every 100 ticks (~1 second at 100Hz)
     if (tick_count % 100 == 0) {
         @import("../net/mod.zig").tick();

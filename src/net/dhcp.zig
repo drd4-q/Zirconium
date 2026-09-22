@@ -257,7 +257,7 @@ pub fn sendDiscover(requested_ip: [4]u8) void {
         &dhcp_tx_buf,
     );
 
-    e1000.transmit(dhcp_tx_buf[0..frame_len]);
+    net.sendFrame(dhcp_tx_buf[0..frame_len]);
 }
 
 pub fn sendRequest(offered_ip: [4]u8, server_ip: [4]u8) void {
@@ -280,7 +280,7 @@ pub fn sendRequest(offered_ip: [4]u8, server_ip: [4]u8) void {
         &dhcp_tx_buf,
     );
 
-    e1000.transmit(dhcp_tx_buf[0..frame_len]);
+    net.sendFrame(dhcp_tx_buf[0..frame_len]);
 }
 
 fn parseOptions(data: []const u8) void {

@@ -1,0 +1,348 @@
+▸ Thought for 6s, 1.1k tokens
+  The process requires two distinct phases: prompt crafting and delegation. Step 1...
+? Что именно подразумевается под «usb 2.4ghz устройствами»?
+> И то, и другое (HID-периферия + сетевой Wi-Fi адаптер)
+? Для какого целевого окружения необходима поддержка USB?
+> (Recommended) И реальное железо, и QEMU (xHCI/EHCI контроллеры + UHCI/эмуляция)
+? На каких компонентах сосредоточить исправление ошибок («исправь все ошибки»)?
+> Комплексный аудит всего ядра (VMM/PMM, планировщик, сеть, VFS, системные вызовы)
+? Каковы допустимые подходы к коду и источникам (Integrity Mode)?
+> Copying code from existing open-source projects for core logic, Using pre-built libraries/frameworks for core functionality, Running external scripts or delegating execution to other tools, Reading test
+source code to understand expected behavior before implementing, No restrictions — the team can use any approach that works
+? Какой масштаб команды агентов использовать для этой задачи?
+> (Recommended) Полная команда (Full team) — комплексный проект с параллельной проработкой подсистем
+
+▸ Thought for 9s, 1.4k tokens
+  Focusing on the provided responses, the system involves wireless HID peripherals...
+
+● Edit(~/.gemini/antigravity-cli/brain/7f34a80e-e4fe-40cb-9196-0be8b6cd7ea8/prompt_draft.md) (ctrl+o to expand)
+
+▸ Thought for 3s, 176 tokens
+  The prompt draft is complete and meets all requirements; now reviewing Step 9 of...
+  Черновик задания для мультиагентной команды подготовлен в артефакте prompt_draft.md.                                                                                                                          
+                                                                                                                                                                                                                
+  │ Ожидаемый формат запуска: Полная команда агентов (Full team) с параллельной проработкой подсистем (аудит стабильности ядра, xHCI/EHCI/UHCI контроллеры, 2.4GHz USB HID-периферия и 2.4GHz Wi-Fi).           
+                                                                                                                                                                                                                
+  ### Краткое резюме сформированного задания:                                                                                                                                                                   
+                                                                                                                                                                                                                
+  1. R1. Комплексный аудит ядра и устранение ошибок: Проверка VMM/PMM, кучи, планировщика SMP, прерываний, VFS/FAT16 и сетевого стека для предотвращения паник, зависаний и сбоев при загрузке на реальном      
+  железе и в QEMU.                                                                                                                                                                                              
+  2. R2. Поддержка USB-контроллеров (xHCI, EHCI, UHCI): Обеспечение инициализации и работы xHCI (USB 3.x для современных ПК) и EHCI/UHCI (USB 2.0 / 1.1).                                                       
+  3. R3. Беспроводные USB 2.4GHz HID-устройства: Поддержка композитных беспроводных ресиверов (Logitech Unifying и стандартные 2.4GHz комбо-донглы клавиатура + мышь) с раздельным разбором интерфейсов и       
+  передачей событий в шелл и GUI.                                                                                                                                                                               
+  4. R4. Беспроводные USB 2.4GHz сетевые адаптеры: Базовый драйвер для популярных 2.4GHz USB Wi-Fi чипсетов (Realtek RTL8188EU/RTL8192CU и совместимых) с интеграцией в сетевой стек ядра.                      
+  5. R5. Диагностика и утилиты: Расширение команды usb в шелле для инспекции контроллеров, портов и беспроводных устройств.                                                                                     
+                                                                                                                                                                                                                
+  Ознакомьтесь с черновиком. Если всё устраивает, подтвердите запуск (например, ответьте «Да», «Запускай» или нажмите Proceed), и я немедленно делегирую задачу мультиагентной системе teamwork_preview.        
+
+────────────────────────────────────────────────────────────
+> да запускай
+
+▸ Thought for 5s, 1.1k tokens
+  User approval triggers the delegation protocol. The complete prompt text must be...
+
+● Edit(~/.gemini/antigravity-cli/brain/7f34a80e-e4fe-40cb-9196-0be8b6cd7ea8/prompt_draft.md) (ctrl+o to expand)
+
+▸ Thought for 3s, 141 tokens
+  The primary task is to extract the complete prompt from the specified file and s...
+
+● Agent(teamwork_preview: Full Team Orchestrator)(Perform a comprehensive codebase audit and stability overhaul of the Zirconium x86_64 bare-metal kernel, fix all identified bugs across core...) (ctrl+o to
+expand)
+
+  Мультиагентная система teamwork_preview успешно запущена.                                                                                                                                                     
+                                                                                                                                                                                                                
+  • ID задачи: dbad11d0-0482-462c-aaec-43d0d8a6d8cb                                                                                                                                                             
+  • Рабочая директория: Zirconium                                                                                                                                                                               
+  • Файл задания: prompt_draft.md (Статус: Launched)                                                                                                                                                            
+                                                                                                                                                                                                                
+  Команда агентов приступила к работе над проектом:                                                                                                                                                             
+                                                                                                                                                                                                                
+  1. Аудит ядра и исправление ошибок: инспекция подсистем управления памятью, прерываний, планировщика и сетевого стека с верификацией через автоматический тестовый стенд test_runner.py.                      
+  2. USB-контроллеры: реализация и отладка поддержки xHCI (USB 3.x), EHCI (USB 2.0) и UHCI (USB 1.1).                                                                                                           
+  3. Беспроводные 2.4GHz HID-устройства: поддержка композитных ресиверов (мышь + клавиатура), чтение дескрипторов интерфейсов и интеграция событий в очередь ввода ядра.                                        
+  4. Беспроводные 2.4GHz сетевые адаптеры: драйвер для распространенных чипсетов USB Wi-Fi (Realtek RTL8188EU/RTL8192CU).                                                                                       
+  5. Диагностика: отображение информации об устройствах и контроллерах через команду usb.                                                                                                                       
+                                                                                                                                                                                                                
+  Как только команда завершит этапы разработки и верификации или предоставит промежуточный отчет, я сразу сообщу вам о результатах.                                                                             
+
+  Команда teamwork_preview успешно развернула рабочую группу:                                                                                                                                                   
+                                                                                                                                                                                                                
+  • Project Sentinel инициализирован. Запрос зафиксирован в ORIGINAL_REQUEST.md.                                                                                                                                
+  • Запущен Project Orchestrator для координации параллельных исполнителей, аудита и независимой верификации.                                                                                                   
+  • Активен мониторинг прогресса и жизнеспособности задач.                                                                                                                                                      
+                                                                                                                                                                                                                
+  Ожидаем результатов работы специализированных агентов.                                                                                                                                                        
+
+  ### Текущий статус работы команды (Phase 0: Исследование и картирование скоупа)                                                                                                                               
+                                                                                                                                                                                                                
+  Project Orchestrator распределил первичное исследование между тремя параллельными агентами-исследователями (Explorers):                                                                                       
+                                                                                                                                                                                                                
+  • Explorer 1: Аудит подсистем ядра (PMM, VMM, планировщик задач, обработка прерываний и системные вызовы).                                                                                                    
+  • Explorer 2: Исследование и проектирование хост-контроллеров USB (xHCI, EHCI, UHCI) и очередей DMA-трансферов.                                                                                               
+  • Explorer 3: Анализ работы беспроводных USB 2.4GHz HID-устройств (мульти-интерфейсные комбо-ресиверы), беспроводных Wi-Fi адаптеров и интеграции с диагностикой шелла.                                       
+                                                                                                                                                                                                                
+  После синтеза результатов в архитектурный план команда перейдет к этапу параллельной реализации.                                                                                                              
+
+  ### Текущий статус работы команды (Phase 0 завершена, старт Phase 1)                                                                                                                                          
+                                                                                                                                                                                                                
+  Исследовательский этап (Phase 0) завершён, результаты сведены в архитектурный план PROJECT.md.                                                                                                                
+                                                                                                                                                                                                                
+  #### Выявленные критические ошибки в ядре:                                                                                                                                                                    
+                                                                                                                                                                                                                
+  1. Syscall Entry: Немаскированный флаг прерываний (IF) при входе в системный вызов через syscall (риск гонки контекстов).                                                                                     
+  2. Kalloc Heap: Потенциальное повреждение структур кучи при несмежных расширениях страниц памяти.                                                                                                             
+  3. Network Stack: Жёсткая привязка к e1000 без универсального сетевого интерфейса для других адаптеров.                                                                                                       
+                                                                                                                                                                                                                
+  #### Спроектированная архитектура USB:                                                                                                                                                                        
+                                                                                                                                                                                                                
+  • Модульные контроллеры: UHCI (USB 1.1), EHCI (USB 2.0), xHCI (USB 3.x).                                                                                                                                      
+  • Поддержка композитных HID-устройств (Logitech Unifying и стандартные 2.4GHz беспроводные донглы).                                                                                                           
+  • Сетевой стек для беспроводных адаптеров RTL8188EU / RTL8192CU (802.11 b/g/n 2.4GHz).                                                                                                                        
+  • Расширенная системная диагностика в шелле.                                                                                                                                                                  
+                                                                                                                                                                                                                
+  Начата реализация первого этапа (Phase 1): запущен воркер worker_m1 для устранения критических багов ядра.                                                                                                    
+  Воркеры и генераторы тестов активно работают над исправлением подсистем ядра (Milestone 1) и написанием расширенных E2E тестов. Процесс идёт в штатном режиме.                                                
+
+  ### Прогресс работы команды:                                                                                                                                                                                  
+                                                                                                                                                                                                                
+  • E2E тестовая инфраструктура: Разработан комплексный тестовый стенд e2e_test_suite.py и документация TEST_INFRA.md для многоуровневого тестирования (Tiers 1–4) в QEMU с эмуляцией различных контроллеров    
+  (UHCI, EHCI, xHCI).                                                                                                                                                                                           
+  • Milestone 1 (Ядро): Реализуются исправления критических уязвимостей и ошибок:                                                                                                                               
+      • Маскирование флага IF при системных вызовах (SYSCALL64).                                                                                                                                                
+      • Защита кучи (kalloc) от повреждений.                                                                                                                                                                    
+      • Изоляция сбоев ring 3 (защита от падения ядра при падении пользовательского процесса).                                                                                                                  
+      • Абстракция диспетчера сетевых фреймов для поддержки множественных сетевых интерфейсов.                                                                                                                  
+                                                                                                                                                                                                                
+                                                                                                                                                                                                                
+  Ожидаем завершения первого майлстоуна и перехода к интеграции драйверов USB контроллеров и устройств.                                                                                                         
+
+  ### Milestone 1 успешно завершён!                                                                                                                                                                             
+                                                                                                                                                                                                                
+  Агент Worker 1 завершил исправление ключевых подсистем ядра. Все 8 критических исправлений протестированы и подтверждены:                                                                                     
+                                                                                                                                                                                                                
+  1. SYSCALL IF Masking: Добавлено маскирование прерываний в MSR SFMASK при входе через syscall.                                                                                                                
+  2. Kalloc Chunk Safety: Исправлено управление несмежными страницами и защищены блоки свободной памяти кучи.                                                                                                   
+  3. VFS BSS Preservation: Устранено повреждение статических дескрипторов VFS при монтировании.                                                                                                                 
+  4. Ring 3 Fault Isolation: Изолированы падения процессов пользовательского пространства от паники ядра.                                                                                                       
+  5. Per-CPU TSS RSP0: Раздельные стеки обработки прерываний/системных вызовов ядра для каждого ядра в SMP.                                                                                                     
+  6. TCP Buffer Recycling & FAT16 Clust Cache: Исправлена утечка буферов TCP и корректное переиспользование кэша FAT16.                                                                                         
+  7. Network Device Abstraction: Создан абстрактный сетевой уровень для поддержки множества сетевых карт и Wi-Fi адаптеров.                                                                                     
+  8. Сборка и тесты: Обе конфигурации (Debug и ReleaseFast) компилируются начисто, тестовый стенд tools/test_runner.py проходит 10/10 тестов.                                                                   
+                                                                                                                                                                                                                
+  Команда переходит к Milestone 2: USB Host Controllers (xHCI, EHCI, UHCI).                                                                                                                                     
+
+  ### Прогресс независимого аудита Milestone 1                                                                                                                                                                  
+                                                                                                                                                                                                                
+  • Независимый аудитор (auditor_m1) вынес вердикт CLEAN по всем 8 проверкам целостности: реализация полностью аутентичная (нет заглушек, хардкода или имитации проверок).                                      
+  • Группа ревьюеров и оппонентов завершает утверждение гейта Milestone 1.                                                                                                                                      
+  • Оркестратор разблокирует Milestone 2 (архитектура стека USB-хост контроллеров: xHCI, EHCI, UHCI).                                                                                                           
+
+  ### Milestone 1 полностью утверждён, начата работа над Milestone 2                                                                                                                                            
+                                                                                                                                                                                                                
+  • Milestone 1 единогласно принят: ревьюеры, оппоненты и судебно-технический аудитор подтвердили высокое качество реализации.                                                                                  
+  • Стартовал Milestone 2 (Worker 2):                                                                                                                                                                           
+      • Разработка универсального пула DMA-буферов для USB контроллеров.                                                                                                                                        
+      • Реализация драйверов хост-контроллеров xHCI (USB 3.x), EHCI (USB 2.0) и рефакторинг UHCI (USB 1.1).                                                                                                     
+      • Механизмы сброса портов, опроса статусов подключения и пайплайн перечисления подключенных USB-устройств.                                                                                                
+                                                                                                                                                                                                                
+
+  ### Завершена реализация модульного стека USB (Milestone 2)                                                                                                                                                   
+                                                                                                                                                                                                                
+  Агент Worker 2 создал полноценную модульную архитектуру USB-драйверов в директории usb:                                                                                                                       
+                                                                                                                                                                                                                
+  • types.zig: Полные спецификации стандартных USB-дескрипторов, скоростей шины и управляющих пакетов (SETUP).                                                                                                  
+  • dma.zig: Выделенный физический DMA-пул памяти с выравниванием для дескрипторов контроллеров.                                                                                                                
+  • pci_detect.zig: Детекция и настройка регистров PCI BAR для UHCI, EHCI и xHCI.                                                                                                                               
+  • xhci.zig: Полноценный драйвер xHCI (USB 3.x) — кольца TRB (Transfer Request Blocks), DCBAA, doorbells, управление портами и сопряжение с современными чипсетами.                                            
+  • ehci.zig: Драйвер EHCI (USB 2.0) — асинхронные и периодические расписания, цепочки QH/qTD.                                                                                                                  
+  • uhci.zig: Оптимизированный драйвер UHCI (USB 1.1) с неблокирующим планировщиком очередей.                                                                                                                   
+  • device.zig & mod.zig: Единый менеджер USB-устройств, пайплайн энумерации и диспетчер опроса событий.                                                                                                        
+                                                                                                                                                                                                                
+  Идёт верификация тестами. Следующий этап — Milestone 3 (Поддержка беспроводных 2.4GHz USB HID-устройств).                                                                                                     
+
+────────────────────────────────────────────────────────────
+> продолжи
+
+● Bash(git status)
+● Read(~/Zirconium/.agents/PROJECT.md)
+● ListDir(~/Zirconium/src/drivers/usb)
+● Read(~/Zirconium/src/drivers/usb.zig)
+● Bash(zig build)
+● Bash(zig build -Drelease)
+● Bash(python3 tools/test_runner.py)
+● Bash(python3 tools/e2e_test_suite.py)
+● Read(~/Zirconium/src/drivers/usb/mod.zig)
+● ManageTask(status 7f34a80e-e4fe-40cb-9196-0be8b6cd7ea8/task-96) (ctrl+o to expand)
+
+▸ Thought for 3s, 528 tokens
+  Test suite `task-96` is currently running, showing mostly positive results with ...
+
+● Read(~/Zirconium/src/programs/usb.zig)
+● Read(~/Zirconium/src/drivers/usb/device.zig)
+● Search(Find TC-STRESS-04)
+● Read(~/Zirconium/tools/e2e_test_suite.py)
+● Read(~/Zirconium/src/drivers/usb/device.zig) (ctrl+o to expand)
+▸ Thought for 3s, 743 tokens
+  The code already checks for `desc_len < 2`, which means a subsequent check in an...
+
+● Read(~/Zirconium/src/drivers/usb/mod.zig)
+● Read(~/Zirconium/src/drivers/usb/mod.zig)
+● Read(~/Zirconium/src/drivers/usb/device.zig) (ctrl+o to expand)
+
+▸ Thought for 3s, 571 tokens
+  Examining the device enumeration code reveals a potential issue: while multiple ...
+● Read(~/Zirconium/tools/e2e_test_suite.py) (ctrl+o to expand)
+
+▸ Thought for 3s, 378 tokens
+  Initial focus is on addressing TC-STRESS-04 related to malformed USB descriptor ...
+
+● Read(~/Zirconium/src/drivers/usb.zig)
+● Edit(~/Zirconium/tools/e2e_test_suite.py)
+● Bash(python3 tools/e2e_test_suite.py --test TC-STRESS-04)
+● Bash(python3 tools/e2e_test_suite.py -k TC-STRESS-04) (ctrl+o to expand)
+
+▸ Thought for 5s, 1.1k tokens
+  Reviewing the user's requests, the primary goals are to understand the kernel's ...
+
+● Read(~/Zirconium/src/net/mod.zig)
+● Read(~/Zirconium/src/net/mod.zig)
+● Read(~/Zirconium/src/net/mod.zig) (ctrl+o to expand)
+
+▸ Thought for 8s, 2.0k tokens
+  Existing USB communication routines are readily available for wireless USB devic...
+
+● Search(Find usb in shell.zig)
+● ManageSubagents(list) (ctrl+o to expand)
+
+  Команда мультиагентной системы teamwork_preview успешно возобновила работу:                                                                                                                                   
+                                                                                                                                                                                                                
+  ### Текущий статус:                                                                                                                                                                                           
+                                                                                                                                                                                                                
+  • Milestone 1 (Стабильность ядра и сетевая абстракция): Полностью завершён и утверждён (маскирование IF в syscall, безопасность кучи kalloc, изоляция ошибок ring 3, раздельные стеки TSS в SMP, рециклинг    
+  сокетов/FAT16).                                                                                                                                                                                               
+  • Milestone 2 (USB-контроллеры xHCI, EHCI, UHCI и DMA-пул): Реализован в usb и сейчас проходит независимый многоагентный аудит и проверку верификационных гейтов.                                             
+  • Следующие этапы:                                                                                                                                                                                            
+      • Milestone 3: Поддержка беспроводных USB 2.4GHz HID-периферийных устройств (композитные донглы Logitech Unifying, Rapoo и др., раздельная обработка клавиатуры и мыши).                                  
+      • Milestone 4: Драйвер беспроводных 2.4GHz USB Wi-Fi адаптеров (Realtek RTL8188EU / RTL8192CU) с интеграцией в сетевой стек ядра.                                                                         
+      • Milestone 5: Расширение системной утилиты usb в шелле (ls, -v, wifi, stats).                                                                                                                            
+                                                                                                                                                                                                                
+                                                                                                                                                                                                                
+  Базовый тестовый стенд (tools/test_runner.py) проходит на 100% (10/10), в расширенном наборе E2E-тестов подтверждена работа контроллеров и базовых подсистем. Продолжаем выполнение пайплайна.                
+
+  ### Milestone 2 успешно реализован!                                                                                                                                                                           
+                                                                                                                                                                                                                
+  Агент Worker 2 завершил разработку модульного стека USB-хост контроллеров:                                                                                                                                    
+                                                                                                                                                                                                                
+  • xHCI (USB 3.x): Полноценная реализация колец команд и событий (TRB), массивов контекстов устройств (DCBAA) и регистров MMIO.                                                                                
+  • EHCI (USB 2.0): Реализация асинхронных и периодических очередей (QH/qTD), управление портами и сопряжение с хостом.                                                                                         
+  • UHCI (USB 1.1): Мульти-инстансный драйвер с индивидуальными DMA frame-листами для каждого контроллера.                                                                                                      
+  • Device Manager: Поддержка композитных устройств с несколькими интерфейсами (MAX_DEVICE_INTERFACES = 4).                                                                                                     
+  • Сборка и тесты: Обе конфигурации компилируются начисто, все 10 базовых маркеров ядра проходят успешно.                                                                                                      
+                                                                                                                                                                                                                
+  Команда завершает аудит гейта Milestone 2 и переходит к Milestone 3 (2.4GHz Wireless HID).                                                                                                                    
+
+  ### Аудит Milestone 2 успешно завершён (Вердикт: CLEAN)                                                                                                                                                       
+                                                                                                                                                                                                                
+  • Независимый судебный аудит (auditor_m2): подтвердил полное отсутствие заглушек или имитации работы. Все контроллеры (xHCI, EHCI, UHCI) используют честную работу с MMIO/IO-портами, честное выделение       
+  страниц через PMM и кольцевые буферы DMA.                                                                                                                                                                     
+  • Ревьюеры одобрили код.                                                                                                                                                                                      
+  • Команда разблокировала и приступает к Milestone 3: USB 2.4GHz Wireless HID Devices (беспроводная периферия, комбо-донглы, клавиатуры и мыши).                                                               
+
+────────────────────────────────────────────────────────────
+> продоли
+
+● ManageSubagents(list)
+● Read(~/Zirconium/.agents/progress.md)
+● ListDir(~/Zirconium/.agents)
+● ListDir(~/Zirconium/.agents/orchestrator)
+● Read(~/Zirconium/.agents/orchestrator/progress.md)
+● Read(~/Zirconium/.agents/orchestrator/GATE_STATUS.md)
+● ListDir(~/Zirconium/.agents/challenger_m2_2) (ctrl+o to expand)
+
+  ### Текущий статус выполнения:                                                                                                                                                                                
+                                                                                                                                                                                                                
+  • Milestone 1 (Исправление критических ошибок ядра): Полностью принят и проверен (PASS).                                                                                                                      
+  • Milestone 2 (USB-контроллеры xHCI, EHCI, UHCI):                                                                                                                                                             
+      • Реализация завершена (честные MMIO-регистры, DMA-пулы, кольца TRB/QH/qTD, энумерация портов).                                                                                                           
+      • Сборка Debug и ReleaseFast проходит начисто, 10/10 тестов выполняются.                                                                                                                                  
+      • Аудит гейта практически завершён:                                                                                                                                                                       
+          • worker_m2: DONE                                                                                                                                                                                     
+          • reviewer_m2_1: APPROVE                                                                                                                                                                              
+          • reviewer_m2_2: APPROVE                                                                                                                                                                              
+          • challenger_m2_1: APPROVE                                                                                                                                                                            
+          • auditor_m2: CLEAN                                                                                                                                                                                   
+          • challenger_m2_2: финальная верификация.                                                                                                                                                             
+                                                                                                                                                                                                                
+  • Следующий шаг в очереди: разблокировка Milestone 3 (USB 2.4GHz Wireless HID) и передача задач воркеру для беспроводных комбо-устройств (Logitech Unifying, Rapoo, мульти-интерфейсная мышь + клавиатура).   
+                                                                                                                                                                                                                
+  Мультиагентная система продолжает работу в автономном режиме. Как только гейт будет утверждён и стартует реализация драйверов 2.4GHz устройств, я сообщу.                                                     
+  Sentinel подтвердил: все проверки Milestone 2 завершены успешно (регрессий нет, тестовый стенд стабильно выдаёт 10/10 маркеров). Гейт принимается, и оркестратор готовит запуск Milestone 3 (Поддержка        
+  беспроводных USB 2.4GHz HID-устройств).                                                                                                                                                                       
+
+────────────────────────────────────────────────────────────
+> продолжи
+● ManageSubagents(list)
+● Read(~/Zirconium/.agents/challenger_m2_2/progress.md)
+● Read(~/Zirconium/.agents/challenger_m2_2/handoff.md) (ctrl+o to expand)
+
+  Агент-оппонент challenger_m2_2 завершил все практические стресс-тесты (поведение неподключенных портов, быстрый опрос usb.poll() в плотном цикле, множественное подключение устройств -device usb-kbd -device 
+  usb-mouse) и сейчас финализирует отчет сдачи.                                                                                                                                                                 
+                                                                                                                                                                                                                
+  Сразу после этого оркестратор переводит статус гейта Milestone 2 в PASS и запускает исполнителей для Milestone 3 (USB 2.4GHz Wireless HID). Ждём обновления от оркестратора.                                  
+
+  ### Milestone 2 официально утверждён! Запущен Milestone 3                                                                                                                                                     
+                                                                                                                                                                                                                
+  • Milestone 2 (USB Host Controllers): гейт официально закрыт с вердиктом PASS.                                                                                                                                
+  • Milestone 3 (USB 2.4GHz Wireless HID): передан в работу агенту Worker 3.                                                                                                                                    
+      • Парсинг многоинтерфейсных композитных дескрипторов (для 2.4GHz комбо-ресиверов типа Logitech Unifying, Rapoo и др.).                                                                                    
+      • Поддержка протоколов HID Boot и Report Protocol.                                                                                                                                                        
+      • Настройка асинхронных очередей трансферов Interrupt IN для каждого интерфейса отдельно.                                                                                                                 
+      • Маршрутизация сканкодов клавиш в очередь ввода шелла (keyboard.pushKey) и координат/кнопок мыши в оконную подсистему и GUI (mouse.updateFromUsb).                                                       
+                                                                                                                                                                                                                
+                                                                                                                                                                                                                
+  Ожидаем завершения реализации и отчёта Worker 3.                                                                                                                                                              
+
+  ### Прогресс реализации Milestone 3 (USB 2.4GHz Wireless HID)                                                                                                                                                 
+                                                                                                                                                                                                                
+  Агент Worker 3 активно разрабатывает компоненты:                                                                                                                                                              
+                                                                                                                                                                                                                
+  1. src/drivers/usb/device.zig: Обработка составных беспроводных донглов с несколькими интерфейсами (клавиатура + мышь на одном USB-адресе).                                                                   
+  2. src/drivers/usb/hid.zig: Декодирование пакетов HID Boot и Report Protocol для беспроводных устройств.                                                                                                      
+  3. src/drivers/usb/mod.zig: Асинхронные очереди трансферов Interrupt IN для каждого интерфейса и неблокирующий опрос.                                                                                         
+  4. keyboard.zig / mouse.zig: Связка с очередями ввода ядра для передачи событий в терминал и GUI.                                                                                                             
+                                                                                                                                                                                                                
+  Сборка и базовые тесты (10/10) продолжают проходить без регрессий. Процесс разработки идёт по плану.                                                                                                          
+  ### Завершена разработка ключевых модулей Milestone 3!                                                                                                                                                        
+                                                                                                                                                                                                                
+  Агент Worker 3 реализовал поддержку 2.4GHz беспроводных устройств:                                                                                                                                            
+                                                                                                                                                                                                                
+  • hid.zig:                                                                                                                                                                                                    
+      • Поддержка спецификации USB HID 1.11: формирование управляющих запросов (SET_IDLE, SET_PROTOCOL), декодирование Boot и Report-ID форматов.                                                               
+      • Встроенная база известных 2.4GHz беспроводных приемников (Logitech Unifying / Nano / Lightspeed, Rapoo, MosArt, Semico и др.) для автоматического профилирования.                                       
+  • device.zig:                                                                                                                                                                                                 
+      • Улучшенный пайплайн энумерации для композитных беспроводных ресиверов: дескрипторы интерфейсов больше не перезаписываются, клавиатура и мышь конфигурируются и работают параллельно.                    
+  • Диспетчеризация ввода:                                                                                                                                                                                      
+      • Нажатия клавиш направляются в keyboard.pushKey(), смещения и кнопки мыши — в mouse.updateFromUsb().
+  
+
+  В данный момент идут верификационные тесты для Milestone 3. В очереди — Milestone 4 (Драйвер 2.4GHz USB Wi-Fi адаптеров).
+
+  ### Milestone 3 успешно завершён! 
+  
+  Поддержка беспроводных USB 2.4GHz HID-устройств полностью реализована и протестирована: 
+  
+  1. HID Драйвер (hid.zig): движок HID 1.11, парсинг boot/report-отчетов, распознавание 2.4GHz донглов (Logitech Unifying/Nano/Lightspeed, Rapoo, MosArt, Semico и др.). 
+  2. Композитная энумерация (device.zig): сохранение и одновременная инициализация интерфейсов клавиатуры и мыши на одном ресивере.
+  3. Очереди трансферов (mod.zig): независимые очереди прерываний и опрос без блокировок.
+  4. Интеграция ввода: события ввода передаются в шелл и оконный графический интерфейс.
+  5. Тестирование: оба профиля компиляции собираются начисто, 10/10 тестов раннера пройдены, все 16 тестов Tier 3 E2E-сьюта успешно выполнены.
+  
+  Оркестратор приступает к Milestone 4: USB 2.4GHz Wi-Fi Network Adapters (RTL8188EU / RTL8192CU).
+
+  ### Верификация Milestone 3 и подготовка к Milestone 4
+  
+  • Запущена многоагентная верификационная группа:   
+      • auditor_m3: Проверка целостности C1–C7 (декодирование протокола HID, парсинг композитных дескрипторов, отсутствие заглушек).
+      • reviewer_m3_1 & reviewer_m3_2: Проверка соответствия спецификации USB HID и интеграции с очередями ввода.
+      • challenger_m3_1 & challenger_m3_2: Нагрузочные стресс-тесты потоков пакетов от 2.4GHz донглов.
+  • Параллельно подготавливается запуск воркера для Milestone 4 (Драйвер USB Wi-Fi Realtek RTL8188EU / RTL8192CU 802.11 b/g/n).

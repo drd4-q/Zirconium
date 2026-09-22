@@ -2,11 +2,11 @@
 
 ## Current state
 - Kernel boots via Multiboot/GRUB, identity-mapped 2MB pages
-- VGA + serial output, keyboard driver (IRQ1), timer (PIT 100Hz), PCI, e1000 NIC, virtio-blk disk
+- VGA + serial output, keyboard driver (IRQ1), timer (PIT 100Hz), PCI, e1000 NIC, RTL8169 NIC, USB Wi-Fi (RTL8188EU), virtio-blk disk
 - PMM (bitmap page allocator) + VMM (page tables) + kernel heap (kmalloc/kfree/krealloc)
 - TCP/IP stack (ARP, IP, ICMP, TCP, HTTP), DNS resolver, UDP, DHCP, ARP cache
 - VFS layer + ramfs (ls, cat, touch, mkdir, rm, write, cd, mount)
-- Shell with commands: help, clear, calc, clock, ping, get, net, ps, mem, reboot, matrix, fib, lua, user, exec, save, mouse, set/unset/env, dhcp, arpcache, nslookup, resolution, ls, cat, touch, mkdir, rm, write, cd, mount
+- Shell with commands: help, clear, calc, clock, ping, get, net, ps, mem, reboot, matrix, fib, lua, user, exec, save, mouse, set/unset/env, dhcp, arpcache, nslookup, resolution, usb, usb wifi, lsusb, ls, cat, touch, mkdir, rm, write, cd, mount, nano
 - GDT with ring 0+3 segments, IDT (256 entries + INT 0x80 DPL3), PIC, TSS
 - Syscall interface (INT 0x80): write, read, sleep, time, exit, exec, waitpid, fork (COW), socket/connect/send/recv (70–73)
 - ELF loader, ring 3 context switch via iretq, address spaces per process
@@ -75,6 +75,7 @@
 - [x] TCP: retransmission timer (500ms, exponential backoff, max 10 retries)
 - [x] ICMP RTT measurement (ping shows round-trip time in ms)
 - [x] Socket API for user-space programs (syscalls 70–73, 8 per-task TCP slots)
+- [x] USB 2.4GHz Wi-Fi adapter support (Realtek RTL8188EU/RTL8192CU, `usb wifi` command)
 - [ ] TCP improvements (window scaling, congestion control)
 
 ### Memory management
@@ -99,6 +100,10 @@
 ### Driver improvements
 - [x] PS/2 mouse driver
 - [x] Virtio-blk disk driver (PCI discovery, MMIO, single virtqueue, read/write sectors, blockdev registration)
+- [x] USB host controller stack (UHCI 1.1, EHCI 2.0, xHCI 3.0) — `src/drivers/usb/`
+- [x] USB HID keyboard/mouse (Boot Protocol, composite wireless dongles)
+- [x] USB 2.4GHz Wi-Fi adapter driver (Realtek RTL8188EU/RTL8192CU, 802.11 ↔ 802.3 conversion)
+- [x] Shell diagnostic commands (`usb`, `usb wifi`, `lsusb`)
 - [ ] AHCI/virtio-blk improvements (multi-queue, interrupt-driven I/O)
 - [ ] PCI enumeration improvements
 
@@ -121,5 +126,5 @@
 - [x] SMP (multi-core) support
 - [x] APIC timer (initialized for IPIs/EOI; LAPIC timer masked, PIT drives the 100 Hz tick + sleep)
 - [x] ACPI support
-- [ ] USB driver
+- [x] USB driver (xHCI/EHCI/UHCI host controllers, HID, Wi-Fi adapter)
 - [x] GUI / window manager (framebuffer desktop, XOR mouse cursor, draggable/focusable windows, `gui` command)

@@ -94,5 +94,5 @@ fn sendPacketInner(dst_mac: [6]u8, dst_ip: [4]u8, dst_port_val: u16, src_port_va
     udp_tx_buf[udp_off + 6] = @intCast(cs_final >> 8);
     udp_tx_buf[udp_off + 7] = @intCast(cs_final & 0xFF);
 
-    e1000.transmit(udp_tx_buf[0..frame_len]);
+    net.sendFrame(udp_tx_buf[0..frame_len]);
 }

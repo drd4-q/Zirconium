@@ -42,70 +42,118 @@ var packet_buf: [3]u8 = undefined;
 var packet_pos: u8 = 0;
 pub var ready: bool = false;
 
-fn waitInput() void {
+fn waitInput() bool {
     var timeout: u32 = 0;
     while (timeout < 100000) : (timeout += 1) {
-        if ((port_io.inb(KB_STATUS) & 0x02) == 0) return;
+        if ((port_io.inb(KB_STATUS) & 0x02) == 0) return true;
     }
+    return false;
 }
 
-fn waitOutput() void {
+fn waitOutput() bool {
     var timeout: u32 = 0;
     while (timeout < 100000) : (timeout += 1) {
-        if ((port_io.inb(KB_STATUS) & 0x01) != 0) return;
+        if ((port_io.inb(KB_STATUS) & 0x01) != 0) return true;
     }
+    return false;
 }
 
 fn readData() u8 {
-    waitOutput();
+    _ = waitOutput();
     return port_io.inb(KB_DATA);
 }
 
 pub fn init() void {
+    const init_st = port_io.inb(KB_STATUS);
+    if (init_st == 0xFF) {
+        // No physical 8042 controller present
+        return;
+    }
+
     asm volatile ("cli");
+    defer asm volatile ("sti");
 
     // Flush any pending data from port 0x60
-    while ((port_io.inb(KB_STATUS) & 0x01) != 0) {
+    var flush_timeout: u32 = 0;
+    while ((port_io.inb(KB_STATUS) & 0x01) != 0 and flush_timeout < 1000) : (flush_timeout += 1) {
         _ = port_io.inb(KB_DATA);
     }
 
-    // Enable auxiliary device (mouse)
-    waitInput();
+    // Test second PS/2 port (command 0xA9)
+    if (!waitInput()) return;
+    port_io.outb(KB_STATUS, 0xA9);
+    if (!waitOutput()) return;
+    const test_res = port_io.inb(KB_DATA);
+    if (test_res != 0x00) {
+        serial.serialWrite("[MOUSE] PS/2 port 2 test failed, no mouse present\n");
+        return;
+    }
+
+    // Enable auxiliary device (mouse port)
+    if (!waitInput()) return;
     port_io.outb(KB_STATUS, 0xA8);
 
-    // Enable auxiliary interrupts via config
-    waitInput();
-    port_io.outb(KB_STATUS, 0x20); // Read config
-    waitOutput();
+    // Read controller configuration byte
+    if (!waitInput()) return;
+    port_io.outb(KB_STATUS, 0x20);
+    if (!waitOutput()) return;
     const cfg = port_io.inb(KB_DATA);
-    waitInput();
-    port_io.outb(KB_STATUS, 0x60); // Write config
-    waitInput();
-    port_io.outb(KB_DATA, cfg | 0x02); // Enable IRQ12
 
-    // Flush again after config change
-    while ((port_io.inb(KB_STATUS) & 0x01) != 0) {
-        _ = port_io.inb(KB_DATA);
+    // Disable clock disable for mouse (bit 5 = 0)
+    if (!waitInput()) return;
+    port_io.outb(KB_STATUS, 0x60);
+    if (!waitInput()) return;
+    port_io.outb(KB_DATA, cfg & ~@as(u8, 0x20));
+
+    // Reset mouse to check if a device is actually attached
+    if (!waitInput()) return;
+    port_io.outb(KB_STATUS, 0xD4);
+    if (!waitInput()) return;
+    port_io.outb(KB_DATA, 0xFF); // Reset command
+
+    // Wait for ACK (0xFA)
+    if (!waitOutput()) {
+        serial.serialWrite("[MOUSE] No PS/2 mouse ACK on reset\n");
+        return;
+    }
+    const ack = port_io.inb(KB_DATA);
+    if (ack != 0xFA) {
+        serial.serialWrite("[MOUSE] No PS/2 mouse detected\n");
+        return;
     }
 
-    // Set defaults
-    waitInput();
-    port_io.outb(KB_STATUS, 0xD4); // Send to mouse
-    waitInput();
+    // Read self-test pass (0xAA) and device ID (0x00)
+    if (waitOutput()) _ = port_io.inb(KB_DATA);
+    if (waitOutput()) _ = port_io.inb(KB_DATA);
+
+    // Enable auxiliary interrupts (IRQ12) now that mouse presence is confirmed
+    if (!waitInput()) return;
+    port_io.outb(KB_STATUS, 0x20);
+    if (!waitOutput()) return;
+    const cfg2 = port_io.inb(KB_DATA);
+
+    if (!waitInput()) return;
+    port_io.outb(KB_STATUS, 0x60);
+    if (!waitInput()) return;
+    port_io.outb(KB_DATA, cfg2 | 0x02); // Enable IRQ12
+
+    // Set defaults (0xF6)
+    if (!waitInput()) return;
+    port_io.outb(KB_STATUS, 0xD4);
+    if (!waitInput()) return;
     port_io.outb(KB_DATA, 0xF6);
-    waitOutput();
-    _ = port_io.inb(KB_DATA);
+    if (waitOutput()) _ = port_io.inb(KB_DATA);
 
-    // Enable data reporting
-    waitInput();
-    port_io.outb(KB_STATUS, 0xD4); // Send to mouse
-    waitInput();
+    // Enable data reporting (0xF4)
+    if (!waitInput()) return;
+    port_io.outb(KB_STATUS, 0xD4);
+    if (!waitInput()) return;
     port_io.outb(KB_DATA, 0xF4);
-    waitOutput();
-    _ = port_io.inb(KB_DATA);
+    if (waitOutput()) _ = port_io.inb(KB_DATA);
 
-    // Final flush — discard any controller response bytes that keyboard IRQ might have missed
-    while ((port_io.inb(KB_STATUS) & 0x01) != 0) {
+    // Final flush
+    flush_timeout = 0;
+    while ((port_io.inb(KB_STATUS) & 0x01) != 0 and flush_timeout < 1000) : (flush_timeout += 1) {
         _ = port_io.inb(KB_DATA);
     }
 
@@ -115,18 +163,21 @@ pub fn init() void {
     // Flush keyboard ring buffer to remove any garbage read during init
     @import("../drivers/keyboard.zig").flush();
 
-    asm volatile ("sti");
     vga.write("[MOUSE] PS/2 mouse initialized\n");
 }
 
 fn irqHandler(_: *isr_mod.InterruptFrame) void {
     // Process at most one complete mouse packet (3 bytes) per IRQ.
-    // Checking status bit 5 ensures we only read mouse data, not keyboard.
     var count: u8 = 0;
     while (count < 3) : (count += 1) {
         const status = port_io.inb(KB_STATUS);
         if ((status & 0x01) == 0) break;
-        if ((status & 0x20) == 0) break;
+        if ((status & 0x20) == 0) {
+            // Unhandled keyboard data in buffer - forward to keyboard driver to avoid hanging 8042
+            const kb_byte = port_io.inb(KB_DATA);
+            @import("../drivers/keyboard.zig").pushScancode(kb_byte);
+            break;
+        }
 
         const byte = port_io.inb(KB_DATA);
 
@@ -210,6 +261,15 @@ pub fn updateFromUsb(buttons: u8, delta_x: i32, delta_y: i32) void {
         }
         last_dbg_buttons = buttons;
     }
+}
+
+pub var wheel: i32 = 0;
+pub var dwheel: i32 = 0;
+
+pub fn updateFromUsbWithWheel(buttons: u8, delta_x: i32, delta_y: i32, delta_wheel: i32) void {
+    dwheel = delta_wheel;
+    wheel += delta_wheel;
+    updateFromUsb(buttons, delta_x, delta_y);
 }
 
 pub fn poll() void {

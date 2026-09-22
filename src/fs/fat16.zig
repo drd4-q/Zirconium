@@ -48,6 +48,7 @@ const FileInfo = struct {
     file_size: u32,
     parent_cluster: u16 = 0, // cluster of the directory holding this file (0 = root)
     used: bool = false,
+    ref_count: usize = 0,
 };
 
 var boot_sector: Fat16BootSector = undefined;
@@ -602,19 +603,47 @@ fn fat16Open(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.
         entry = findInDir(resolved.dir_cluster, name_buf[0..resolved.name_len]) orelse return null;
     }
 
-    const idx = file_count;
-    if (idx >= MAX_FAT16_FILES) return null;
+    // Check if file is already cached or find a free slot
+    var existing_idx: ?usize = null;
+    var free_idx: ?usize = null;
 
-    file_cache[idx] = .{
-        .name = undefined,
-        .name_len = buildFullName(&entry.?, &file_cache[idx].name),
-        .is_dir = entry.?.attributes & 0x10 != 0,
-        .first_cluster = entry.?.first_cluster_low,
-        .file_size = entry.?.file_size,
-        .parent_cluster = resolved.dir_cluster,
-        .used = true,
-    };
-    file_count += 1;
+    var full_name_buf: [MAX_PATH_LEN]u8 = undefined;
+    const full_name_len = buildFullName(&entry.?, &full_name_buf);
+
+    for (&file_cache, 0..) |*fi, i| {
+        if (fi.used) {
+            if (fi.parent_cluster == resolved.dir_cluster and
+                fi.name_len == full_name_len and
+                std.mem.eql(u8, fi.name[0..fi.name_len], full_name_buf[0..full_name_len]))
+            {
+                existing_idx = i;
+                break;
+            }
+        } else if (free_idx == null) {
+            free_idx = i;
+        }
+    }
+
+    const idx = existing_idx orelse (free_idx orelse return null);
+
+    if (existing_idx) |_| {
+        // Refresh metadata and increment reference count
+        file_cache[idx].first_cluster = entry.?.first_cluster_low;
+        file_cache[idx].file_size = entry.?.file_size;
+        file_cache[idx].ref_count += 1;
+    } else {
+        @memcpy(file_cache[idx].name[0..full_name_len], full_name_buf[0..full_name_len]);
+        file_cache[idx].name_len = full_name_len;
+        file_cache[idx].is_dir = entry.?.attributes & 0x10 != 0;
+        file_cache[idx].first_cluster = entry.?.first_cluster_low;
+        file_cache[idx].file_size = entry.?.file_size;
+        file_cache[idx].parent_cluster = resolved.dir_cluster;
+        file_cache[idx].used = true;
+        file_cache[idx].ref_count = 1;
+        if (idx >= file_count) {
+            file_count = idx + 1;
+        }
+    }
 
     // Find free handle slot
     var h: usize = 0;
@@ -625,19 +654,44 @@ fn fat16Open(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.
             return &open_handles[h];
         }
     }
+
+    // Roll back ref_count if no open handle slot was found
+    file_cache[idx].ref_count -= 1;
+    if (file_cache[idx].ref_count == 0) {
+        file_cache[idx].used = false;
+    }
     return null;
 }
 
 fn fat16Close(fs: *vfs.FileSystem, handle: *vfs.FileHandle) void {
     _ = fs;
-    _ = handle;
+    if (handle == &root_handle) return;
+    var h: usize = 0;
+    while (h < 32) : (h += 1) {
+        if (&open_handles[h] == handle) {
+            if (open_handle_used[h]) {
+                open_handle_used[h] = false;
+                const idx = open_handles[h].inode;
+                if (idx < MAX_FAT16_FILES and file_cache[idx].used) {
+                    if (file_cache[idx].ref_count > 0) {
+                        file_cache[idx].ref_count -= 1;
+                    }
+                    if (file_cache[idx].ref_count == 0) {
+                        file_cache[idx].used = false;
+                    }
+                }
+            }
+            return;
+        }
+    }
 }
 
 fn fat16Read(fs: *vfs.FileSystem, handle: *vfs.FileHandle, buf: []u8) usize {
     _ = fs;
     if (handle.inode >= file_count) return 0;
     const fi = &file_cache[handle.inode];
-    if (fi.is_dir or fi.file_size == 0) return 0;
+    if (!fi.used or fi.is_dir or fi.file_size == 0) return 0;
+    if (handle.offset >= fi.file_size) return 0;
 
     const remaining = fi.file_size - @as(u32, @intCast(handle.offset));
     const to_read = @min(buf.len, @as(usize, @intCast(remaining)));

@@ -83,6 +83,25 @@ fn mmioWrite(offset: u32, val: u32) void {
     ptr.* = val;
 }
 
+fn readMmioBar(dev: *pci.PciDevice, bar_num: u8) u64 {
+    const reg: u8 = @intCast(0x10 + @as(u16, bar_num) * 4);
+    const lo = pci.readConfig(dev.bus, dev.dev, dev.func, reg);
+    if (lo == 0 or lo == 0xFFFFFFFF) return 0;
+    if ((lo & 1) != 0) return 0;
+    const IDENTITY_LIMIT: u64 = 0x1000000000; // 64GB boot map
+    if ((lo & 0x06) == 0x04) {
+        const hi = pci.readConfig(dev.bus, dev.dev, dev.func, reg + 4);
+        const full = (@as(u64, hi) << 32) | (@as(u64, lo) & 0xFFFFFFF0);
+        if (full == 0 or full == 0xFFFFFFFFFFFFFFFF) return 0;
+        if (full >= IDENTITY_LIMIT) return 0;
+        return full;
+    }
+    const base = lo & 0xFFFFFFF0;
+    if (base == 0) return 0;
+    if (@as(u64, base) >= IDENTITY_LIMIT) return 0;
+    return @as(u64, base);
+}
+
 fn delay() void {
     var i: u32 = 0;
     while (i < 100000) : (i += 1) {
@@ -127,12 +146,28 @@ pub fn init(dev: *pci.PciDevice) bool {
         },
     }
 
-    mmio_base = @as(u64, dev.bar0 & 0xFFFFFFF0);
+    mmio_base = readMmioBar(dev, 0);
+    if (mmio_base == 0) {
+        port.serialWrite("[E1000] Error: no usable MMIO BAR0\n");
+        return false;
+    }
+    if (mmio_base >= 0x1000000000) {
+        port.serialWrite("[E1000] Error: MMIO above identity map, skipping\n");
+        mmio_base = 0;
+        return false;
+    }
     port.serialWrite("[E1000] MMIO base: 0x");
     port.serialWriteHex(mmio_base);
     port.serialWrite("\n");
 
     pci.enableBusMaster(dev.bus, dev.dev, dev.func);
+
+    // Sanity: dead/unmapped BAR reads back all-ones.
+    if (mmioRead(STATUS) == 0xFFFFFFFF) {
+        port.serialWrite("[E1000] Error: MMIO not responding, skipping\n");
+        mmio_base = 0;
+        return false;
+    }
 
     // Mask all interrupts first
     mmioWrite(IMS, 0x00000000);

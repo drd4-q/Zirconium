@@ -120,9 +120,10 @@ pub fn krealloc(ptr: [*]u8, new_size: usize) ?[*]u8 {
         return ptr;
     }
 
-    // Try to merge with next block
+    // Try to merge with next block only if contiguous in memory
     if (block.next) |next| {
-        if (next.free) {
+        const block_end = @intFromPtr(block) + @sizeOf(BlockHeader) + block.size;
+        if (next.free and block_end == @intFromPtr(next)) {
             const total = block.size + @sizeOf(BlockHeader) + next.size;
             if (total >= aligned_new) {
                 block.size += @sizeOf(BlockHeader) + next.size;
@@ -167,9 +168,10 @@ fn splitBlock(block: *BlockHeader, needed: usize) void {
 }
 
 fn mergeBlocks(block: *BlockHeader) void {
-    // Merge with next
+    // Merge with next only if contiguous in memory
     if (block.next) |next| {
-        if (next.free) {
+        const block_end = @intFromPtr(block) + @sizeOf(BlockHeader) + block.size;
+        if (next.free and block_end == @intFromPtr(next)) {
             block.size += @sizeOf(BlockHeader) + next.size;
             block.next = next.next;
             if (next.next) |nn| {
@@ -178,9 +180,10 @@ fn mergeBlocks(block: *BlockHeader) void {
         }
     }
 
-    // Merge with previous
+    // Merge with previous only if contiguous in memory
     if (block.prev) |prev| {
-        if (prev.free) {
+        const prev_end = @intFromPtr(prev) + @sizeOf(BlockHeader) + prev.size;
+        if (prev.free and prev_end == @intFromPtr(block)) {
             prev.size += @sizeOf(BlockHeader) + block.size;
             prev.next = block.next;
             if (block.next) |nn| {
@@ -195,8 +198,15 @@ fn expandHeap(min_needed: usize) bool {
     const new_pages = pmm.allocPages(pages_needed) orelse return false;
 
     const new_size = pages_needed * 4096;
+    const new_end = new_pages + new_size;
 
-    heap_end = @ptrFromInt(new_pages + new_size);
+    if (heap_end) |cur_end| {
+        if (new_end > @intFromPtr(cur_end)) {
+            heap_end = @ptrFromInt(new_end);
+        }
+    } else {
+        heap_end = @ptrFromInt(new_end);
+    }
     heap_pages += pages_needed;
     heap_size += new_size;
 
@@ -207,7 +217,7 @@ fn expandHeap(min_needed: usize) bool {
     new_block.prev = null;
     new_block.next = null;
 
-    // Try to merge with last block
+    // Try to merge with last block only if contiguous
     if (free_list) |head| {
         var last = head;
         while (last.next) |n| {
@@ -217,11 +227,12 @@ fn expandHeap(min_needed: usize) bool {
         // Check if this block is contiguous with the last block
         const last_end = @intFromPtr(last) + @sizeOf(BlockHeader) + last.size;
         if (last_end == new_pages and last.free) {
-            // Merge
+            // Merge contiguous block
             last.size += new_size;
             return true;
         }
 
+        // Non-contiguous or last block in use: link into chain without merging
         last.next = new_block;
         new_block.prev = last;
     } else {

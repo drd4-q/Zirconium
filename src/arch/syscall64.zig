@@ -26,9 +26,9 @@ pub fn init() void {
     msr.write(msr.IA32_STAR, star);
     msr.write(msr.IA32_LSTAR, @intFromPtr(&syscall_entry_64));
 
-    // Mask DF (0x400), TF (0x100), NT (0x4000), AC (0x40000) on syscall entry while
-    // keeping IF=1 so timer/interrupts continue to work for blocking syscalls.
-    const fmask: u64 = (1 << 8) | (1 << 10) | (1 << 14) | (1 << 18); // TF, DF, NT, AC
+    // Mask DF (0x400), TF (0x100), NT (0x4000), AC (0x40000), and IF (0x200) on syscall entry
+    // so interrupts are disabled on entry before the stack is switched to kernel rsp.
+    const fmask: u64 = (1 << 8) | (1 << 9) | (1 << 10) | (1 << 14) | (1 << 18); // TF, IF, DF, NT, AC
     msr.write(msr.IA32_FMASK, fmask);
 
     // Enable the instruction itself.

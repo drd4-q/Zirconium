@@ -75,15 +75,14 @@ pub fn run() void {
     // Try to init SATA AHCI disks
     _ = @import("drivers/ahci.zig").init();
 
+    // Init USB host controllers, root hubs, and devices (including USB mass storage)
+    usb_drv.init();
+
     // Scan MBR & GPT partition tables on all block devices
     @import("fs/partition.zig").scanAll();
 
     // Auto-mount FAT16 if block device / partition available
     @import("fs/fat16.zig").init();
-
-
-    // Init USB host controllers and root hubs
-    usb_drv.init();
 
     mouse.init();
 
@@ -98,6 +97,7 @@ pub fn run() void {
         const nic_name = switch (net.active_nic) {
             .e1000 => "e1000",
             .rtl8169 => "RTL8168/8169",
+            .usb_wifi => "USB Wi-Fi",
             .none => "none",
         };
         vga.write("  Network: ");
@@ -236,7 +236,15 @@ fn execute(cmd: []const u8) void {
         dhcp_mod.run();
     } else if (eql(cmd_name, "smp") or eql(cmd_name, "cpuinfo")) {
         showSmp();
-    } else if (eql(cmd_name, "usb") or eql(cmd_name, "lsusb")) {
+    } else if (eql(cmd_name, "usb")) {
+        if (eql(args, "wifi")) {
+            usb_prog.runWifi();
+        } else if (eql(args, "storage") or eql(args, "disk")) {
+            usb_prog.runStorage();
+        } else {
+            usb_prog.run();
+        }
+    } else if (eql(cmd_name, "lsusb")) {
         usb_prog.run();
     } else if (eql(cmd_name, "acpi")) {
         showAcpi();
@@ -730,7 +738,9 @@ fn printHelp() void {
     vga.write("  CPU / Hardware:\n");
     vga.write("    smp/cpuinfo   SMP & per-CPU status\n");
     vga.write("    acpi          ACPI tables (RSDP, MADT)\n");
-    vga.write("    usb/lsusb     USB controllers & devices status\n\n");
+    vga.write("    usb           USB controllers & devices status\n");
+    vga.write("    usb storage   USB mass storage & disk status\n");
+    vga.write("    usb wifi      USB Wi-Fi adapter status\n\n");
     vga.write("  Filesystem:\n");
     vga.write("    ls [path]     List directory\n");
     vga.write("    cat <file>    Print file contents\n");
@@ -1002,7 +1012,7 @@ fn readLineEnhanced(buf: []u8, max_len: usize) usize {
                 vga.putChar(ch);
             }
         } else {
-            asm volatile ("hlt");
+            asm volatile ("sti\nhlt");
         }
     }
     return pos;

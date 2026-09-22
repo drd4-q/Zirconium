@@ -184,6 +184,7 @@ pub fn handlePacket(frame: []const u8, ihl: usize) void {
                 conn.state = .closed;
                 conn.retx_active = false;
                 conn.retx_len = 0;
+                conn.id = -1;
                 vga.write("[TCP] Connection closed (LAST_ACK)\n");
             },
             else => {},
@@ -216,6 +217,7 @@ pub fn handlePacket(frame: []const u8, ihl: usize) void {
         conn.state = .closed;
         conn.retx_active = false;
         conn.retx_len = 0;
+        conn.id = -1;
         vga.write("[TCP] RST received\n");
         port_io.serialWrite("[TCP] RST received\n");
     }
@@ -286,7 +288,7 @@ fn sendPacket(conn: *Connection, flags_val: u8, payload: ?[]const u8) void {
     }
     buildTcpHeader(conn, flags_val, data_len, tx_buf[34..frame_len]);
 
-    e1000.transmit(tx_buf[0..frame_len]);
+    net.sendFrame(tx_buf[0..frame_len]);
 
     // Save for retransmission (only data-carrying packets)
     if (data_len > 0 and (flags_val & 0x02 == 0)) {
@@ -313,7 +315,7 @@ pub fn retxTick() void {
                     if (net.nextHopMac(c.retx_dst_ip)) |dst_mac| {
                         @memcpy(c.retx_buf[0..6], &dst_mac);
                     }
-                    e1000.transmit(c.retx_buf[0..c.retx_len]);
+                    net.sendFrame(c.retx_buf[0..c.retx_len]);
                     c.retx_last = timer.ticks;
                     c.retx_count += 1;
 
@@ -326,6 +328,8 @@ pub fn retxTick() void {
                     vga.setColor(.white, .black);
                     c.state = .closed;
                     c.retx_active = false;
+                    c.retx_len = 0;
+                    c.id = -1;
                 }
             }
         }
@@ -360,6 +364,9 @@ pub fn openConn(conn: *Connection, dst_ip: [4]u8, dst_port_val: u16) void {
     // slirp drops.
     if (net.nextHopMac(dst_ip) == null) {
         conn.state = .closed;
+        conn.retx_active = false;
+        conn.retx_len = 0;
+        conn.id = -1;
         port_io.serialWrite("[TCP] Connect failed: could not resolve MAC for target/gateway\n");
         return;
     }
@@ -451,6 +458,13 @@ pub fn close(conn: *Connection) void {
         sendPacket(conn, 0x11, null); // FIN+ACK
         conn.state = .last_ack;
         vga.write("[TCP] Sending FIN (close_wait)\n");
+    } else {
+        conn.state = .closed;
+        conn.retx_active = false;
+        conn.retx_len = 0;
+        conn.rx_len = 0;
+        conn.rx_ready = false;
+        conn.id = -1;
     }
 }
 
@@ -459,6 +473,7 @@ pub fn disconnect(conn: *Connection) void {
     conn.rx_len = 0;
     conn.rx_ready = false;
     conn.retx_active = false;
+    conn.retx_len = 0;
     conn.id = -1;
 }
 

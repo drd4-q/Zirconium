@@ -113,18 +113,41 @@ pub fn init(dev: *pci.PciDevice) bool {
     // Enable Bus Mastering and MMIO
     pci.enableBusMaster(dev.bus, dev.dev, dev.func);
 
-    // BAR2 is standard 64-bit MMIO for PCIe 8168/8111, BAR1 for PCI 8169, fallback to BAR0
-    const bar2 = pci.readBar(dev.bus, dev.dev, dev.func, 2);
-    const bar1 = pci.readBar(dev.bus, dev.dev, dev.func, 1);
-    const bar0 = pci.readBar(dev.bus, dev.dev, dev.func, 0);
-
-    if (bar2 != 0 and (bar2 & 1) == 0) {
-        mmio_base = @as(u64, bar2 & 0xFFFFFFF0);
-    } else if (bar1 != 0 and (bar1 & 1) == 0) {
-        mmio_base = @as(u64, bar1 & 0xFFFFFFF0);
-    } else if (bar0 != 0 and (bar0 & 1) == 0) {
-        mmio_base = @as(u64, bar0 & 0xFFFFFFF0);
-    } else {
+    // BAR2 is standard 64-bit MMIO for PCIe 8168/8111, BAR1 for PCI 8169, fallback to BAR0.
+    // All of these can be 64-bit BARs placed above 4GB on real hardware:
+    // combine both halves instead of truncating to 32 bits (which would alias RAM).
+    // BARs at/above the 64GB boot identity map are unusable: skip them.
+    mmio_base = 0;
+    const IDENTITY_LIMIT: u64 = 0x1000000000; // 64GB boot map
+    var bar_i: u8 = 2;
+    while (true) {
+        const reg: u8 = @intCast(0x10 + @as(u16, bar_i) * 4);
+        const lo = pci.readConfig(dev.bus, dev.dev, dev.func, reg);
+        if (lo != 0 and lo != 0xFFFFFFFF and (lo & 1) == 0) {
+            if ((lo & 0x06) == 0x04) {
+                const hi = pci.readConfig(dev.bus, dev.dev, dev.func, reg + 4);
+                const full = (@as(u64, hi) << 32) | (@as(u64, lo) & 0xFFFFFFF0);
+                if (full != 0 and full != 0xFFFFFFFFFFFFFFFF and full < IDENTITY_LIMIT) {
+                    mmio_base = full;
+                    break;
+                }
+            } else if ((lo & 0xFFFFFFF0) != 0) {
+                const base = @as(u64, lo & 0xFFFFFFF0);
+                if (base < IDENTITY_LIMIT) {
+                    mmio_base = base;
+                    break;
+                }
+            }
+        }
+        if (bar_i == 2) {
+            bar_i = 1;
+        } else if (bar_i == 1) {
+            bar_i = 0;
+        } else {
+            break;
+        }
+    }
+    if (mmio_base == 0) {
         port.serialWrite("[RTL8169] Error: no MMIO BAR found\n");
         return false;
     }
