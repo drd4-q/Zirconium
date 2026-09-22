@@ -233,6 +233,7 @@ fn irqHandler(_: *isr_mod.InterruptFrame) void {
     }
 }
 
+<<<<<<< HEAD
 pub fn updateFromUsb(buttons: u8, delta_x: i32, delta_y: i32) void {
     left_button = (buttons & 0x01) != 0;
     right_button = (buttons & 0x02) != 0;
@@ -274,4 +275,21 @@ pub fn updateFromUsbWithWheel(buttons: u8, delta_x: i32, delta_y: i32, delta_whe
 
 pub fn poll() void {
     @import("usb.zig").poll();
+=======
+/// Absolute-position update from a USB tablet (HID digitizer, 0..4095 range
+/// used by QEMU's usb-tablet). Coordinates land in the same pixel space the
+/// PS/2 relative path uses.
+pub fn usbUpdate(x: u32, y: u32, left: bool, right: bool, middle: bool) void {
+    const max_c: u64 = 4095;
+    if (fb.active and fb.fb_width > 0) {
+        mx = @intCast(@min((@as(u64, x) * fb.fb_width) / max_c, fb.fb_width - 1));
+        my = @intCast(@min((@as(u64, y) * fb.fb_height) / max_c, fb.fb_height - 1));
+    } else {
+        mx = @intCast(@min((@as(u64, x) * 80) / max_c, 79));
+        my = @intCast(@min((@as(u64, y) * 25) / max_c, 24));
+    }
+    left_button = left;
+    right_button = right;
+    middle_button = middle;
+>>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
 }

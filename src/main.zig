@@ -79,6 +79,7 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     vfs.init();
     ramfs.init();
     ramfs.registerMount();
+    @import("kernel/seedfs.zig").init();
     vga.write("[BOOT] Filesystem initialized\n");
 
     vga.write("[BOOT] Initializing Kernel modules...\n");
@@ -100,6 +101,14 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     @import("net/mod.zig").init();
     serial.serialWrite("[BOOT] Network init done\n");
 
+    // All PCI-backed devices init right after the single bus scan.
+    vga.write("[BOOT] Initializing storage and input...\n");
+    @import("drivers/virtio_blk.zig").init();
+    @import("fs/fat16.zig").init();
+    @import("drivers/usb.zig").init();
+    @import("drivers/mouse.zig").init();
+    vga.write("[BOOT] Storage and input initialized\n");
+
     vga.write("[BOOT] Bringing secondary CPUs online...\n");
     @import("arch/smp.zig").init();
     vga.write("[BOOT] SMP init done\n");
@@ -107,12 +116,14 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     vga.write("[BOOT] Starting scheduler...\n");
     scheduler.runAll();
     vga.write("[BOOT] Scheduler completed\n");
+    serial.serialWrite("[BOOT] Scheduler completed\n");
 
     vga.write("[BOOT] Initializing USB subsystem...\n");
     @import("drivers/usb.zig").mod.init();
     serial.serialWrite("[BOOT] USB init done\n");
 
     vga.write("[BOOT] Launching Shell...\n");
+    serial.serialWrite("[BOOT] Launching Shell\n");
     shell.run();
 
     serial.serialWrite("[BOOT] Shell exited\n");

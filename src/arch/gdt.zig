@@ -91,11 +91,16 @@ pub fn initCpu(cpu_index: usize, stack_top: u64) void {
     // 0x18: User code (64-bit, DPL=3)
     setEntryForCpu(cpu_index, 3, 0, 0xFFFFF, 0xFA, 0xA0);
     // 0x20: User data (64-bit, DPL=3)
+<<<<<<< HEAD
     setEntryForCpu(cpu_index, 4, 0, 0xFFFFF, 0xF2, 0xC0);
     // 0x28: Kernel code (duplicate, DPL=0)
     setEntryForCpu(cpu_index, 5, 0, 0xFFFFF, 0x9A, 0xA0);
     // 0x30: Kernel data (duplicate, DPL=0)
     setEntryForCpu(cpu_index, 6, 0, 0xFFFFF, 0x92, 0xC0);
+=======
+    setEntry(4, 0, 0xFFFFF, 0xF2, 0xC0);
+    // 0x28..0x38 unused; TSS lives at 0x40
+>>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
 
     tss_per_cpu[cpu_index] = .{};
     tss_per_cpu[cpu_index].rsp0 = stack_top;

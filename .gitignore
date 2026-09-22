@@ -11,3 +11,9 @@ qemu.log
 serial*.log
 test_out.log
 *.img
+
+# boot_watch diagnostics
+screen.ppm
+ser_capture.log
+
+regs_out.txt

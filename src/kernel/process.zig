@@ -13,6 +13,7 @@ const address_space = @import("address_space.zig");
 const binfmt = @import("binfmt.zig");
 const winapi = @import("winapi.zig");
 const fdtable = @import("fdtable.zig");
+const uaccess = @import("uaccess.zig");
 const pmm = @import("pmm.zig");
 const vmm = @import("vmm.zig");
 const msr = @import("../arch/msr.zig");
@@ -265,8 +266,7 @@ fn pushAux(b: *StackBuilder, key: u64, value: u64) void {
 fn setupWindowsStack(
     t: *task.Task,
     as: address_space.AddressSpace,
-    stack_phys: u64,
-    argline: []const u8,
+    stack_phys: u64,    argline: []const u8,
 ) !u64 {
     var b = StackBuilder{ .phys_base = stack_phys, .sp = USER_STACK_TOP - 64 };
 
@@ -286,6 +286,33 @@ fn setupWindowsStack(
 
     try winapi.installThunks(as);
     winapi.setCommandLine(t, cmdline_a, cmdline_w);
+
+    // Fake TEB: MSVC CRT startup dereferences gs:[0x30] (ThreadLocalStorage-
+    // Pointer) and friends before main(). Give it a zeroed TEB page plus a
+    // zeroed TLS pointer array so those reads yield NULL instead of faulting.
+    const teb = mmapAnon(t, 0x2000) orelse return error.OutOfMemory;
+    _ = uaccess.writeU64(teb + 0x30, teb + 0x1000); // ThreadLocalStoragePointer
+    _ = uaccess.writeU64(teb + 0x58, 0); // TlsSlots
+    t.gs_base = teb;
+
+    // CRT globals block: argc at +0, then the pointers/data UCRT's __p__*
+    // accessors hand out (see winapi.zig for the offset map).
+    const cb = mmapAnon(t, 512) orelse return error.OutOfMemory;
+    var argc: u64 = 1;
+    for (argline) |ch| {
+        if (ch == ' ') argc += 1;
+    }
+    _ = uaccess.writeU64(cb + 0, argc); // __p___argc
+    _ = uaccess.writeU64(cb + 8, 0); // __p___wargv
+    _ = uaccess.writeU64(cb + 16, 0); // __p__environ
+    _ = uaccess.writeU64(cb + 24, 0); // __p__wenviron
+    _ = uaccess.writeU64(cb + 32, 0); // __p__commode
+    _ = uaccess.writeU64(cb + 40, 0x8000); // __p__fmode = O_BINARY
+    _ = uaccess.writeU64(cb + 48, 0); // __daylight
+    _ = uaccess.writeU64(cb + 56, 0); // __timezone
+    _ = uaccess.writeU64(cb + 64, cb + 96); // __tzname -> ""
+    _ = uaccess.writeU16(cb + 96, 0);
+    t.crt_block = cb;
 
     b.alignDown(16);
     // 32 bytes of shadow space for the callee, then the return address.
@@ -359,6 +386,7 @@ pub fn exitCurrent(code: i32) noreturn {
     // A Linux task may have installed its own FS_BASE; the kernel does not use
     // one, but leaving a user pointer there would confuse the next task.
     msr.setFsBase(0);
+    msr.setGsBase(0);
 
     sys_exit_return();
 }

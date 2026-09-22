@@ -78,10 +78,29 @@ def create_fat16_disk():
         files_to_copy.append((BUSYBOX_PATH, "cat"))
     hello_linux = os.path.join(SAMPLES_DIR, "hello_linux")
     if os.path.exists(hello_linux):
-        files_to_copy.append((hello_linux, "hello_linux"))
+        # 8.3-safe alias so `exec /mnt/disk/hl` works (no LFN support).
+        files_to_copy.append((hello_linux, "hl"))
     hello_win = os.path.join(SAMPLES_DIR, "hello.exe")
     if os.path.exists(hello_win):
         files_to_copy.append((hello_win, "hello.exe"))
+
+    # Real third-party applications fetched by tools/fetch_apps.py.
+    # The kernel's FAT16 driver only understands 8.3 names (no LFN), so long
+    # names get short aliases here. uutils coreutils is a multicall binary:
+    # copying it under an applet name (ls) makes that applet runnable, since
+    # it dispatches on argv[0] basename. fastfetch ships a glibc-dynamic build
+    # the kernel rejects anyway, so it stays off the disk.
+    app_alias = {"coreutils": "cu", "hello_linux": "hl"}
+    skip = {"fastfetch"}
+    apps_dir = os.path.join(SAMPLES_DIR, "apps")
+    if os.path.isdir(apps_dir):
+        for name in sorted(os.listdir(apps_dir)):
+            path = os.path.join(apps_dir, name)
+            if os.path.isfile(path) and name not in skip:
+                files_to_copy.append((path, app_alias.get(name, name)))
+        coreutils = os.path.join(apps_dir, "coreutils")
+        if os.path.exists(coreutils):
+            files_to_copy.append((coreutils, "ls"))
 
     # Sample text file
     sample_txt = os.path.join(SAMPLES_DIR, "hello.txt")

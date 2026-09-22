@@ -11,6 +11,16 @@ pub const STDIN: usize = 0;
 pub const STDOUT: usize = 1;
 pub const STDERR: usize = 2;
 
+/// Serial counterpart of kb.pollKey() for console stdin: CR -> LF, DEL -> BS.
+fn serialPollKey() ?u8 {
+    const raw = @import("../system/serial.zig").pollRead() orelse return null;
+    return switch (raw) {
+        '\r' => '\n',
+        0x7F => 0x08,
+        else => raw,
+    };
+}
+
 /// Install stdin/stdout/stderr. fd 3 is wired to the serial log, matching the
 /// native ABI's convention so existing debug output keeps working.
 pub fn initStdio(t: *task.Task) void {
@@ -41,6 +51,9 @@ pub fn close(t: *task.Task, fd: usize) bool {
     switch (desc) {
         .file => |h| vfs.close(h),
         .socket => |c| @import("../net/tcp.zig").disconnect(c),
+        // Directory descriptors own no kernel resources besides the inline
+        // path buffer, which dies with the union.
+        .dir => {},
         else => {},
     }
     t.fds[fd] = null;
@@ -79,6 +92,8 @@ pub fn write(t: *task.Task, fd: usize, buf: []const u8) isize {
             tcp.send(c, buf);
             return @intCast(buf.len);
         },
+        // Directories are read via getdents64, not write()/read().
+        .dir => return -21, // EISDIR
     }
 }
 
@@ -89,10 +104,11 @@ pub fn read(t: *task.Task, fd: usize, buf: []u8) isize {
         .console => {
             if (buf.len == 0) return 0;
             // Line-oriented like a tty in canonical mode: programs such as a
-            // shell expect read() to return at the newline.
+            // shell expect read() to return at the newline. Keyboard first,
+            // serial console second (headless automation).
             var count: usize = 0;
             while (count < buf.len) {
-                const ch = kb.pollKey() orelse {
+                const ch = kb.pollKey() orelse serialPollKey() orelse {
                     asm volatile ("hlt");
                     continue;
                 };
@@ -137,6 +153,7 @@ pub fn read(t: *task.Task, fd: usize, buf: []u8) isize {
             c.rx_ready = false;
             return @intCast(n);
         },
+        .dir => return -21, // EISDIR
     }
 }
 

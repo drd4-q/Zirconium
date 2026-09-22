@@ -95,6 +95,14 @@ pub fn kfree(ptr: [*]u8) void {
     if (block.free) {
         serial.serialWrite("[KHEAP] Double free detected at 0x");
         serial.serialWriteHex(addr);
+        serial.serialWrite(" from ra=0x");
+        serial.serialWriteHex(@returnAddress());
+        // Outside any heap page? Then the caller passed a non-kalloc pointer.
+        if (heap_start == null or addr < @intFromPtr(heap_start.?) or
+            (heap_end != null and addr >= @intFromPtr(heap_end.?)))
+        {
+            serial.serialWrite(" [NON-HEAP PTR]");
+        }
         serial.serialWrite("\n");
         return;
     }
@@ -104,7 +112,14 @@ pub fn kfree(ptr: [*]u8) void {
     free_count += 1;
     used_size -= block.size + @sizeOf(BlockHeader);
 
+<<<<<<< HEAD
     // Merge with adjacent free blocks
+=======
+    // Insert FIRST, then merge: mergeBlocks unlinks absorbed neighbours, so
+    // merging before insertion would re-insert a node that prev already
+    // swallowed (classic double-free on the next allocation cycle).
+    addToFreeList(block);
+>>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
     mergeBlocks(block);
 }
 
@@ -167,6 +182,7 @@ fn splitBlock(block: *BlockHeader, needed: usize) void {
     block.size = needed;
 }
 
+<<<<<<< HEAD
 fn mergeBlocks(block: *BlockHeader) void {
     // Merge with next only if contiguous in memory
     if (block.next) |next| {
@@ -190,9 +206,78 @@ fn mergeBlocks(block: *BlockHeader) void {
                 nn.prev = prev;
             }
         }
+=======
+/// Insert into the free list ordered by ADDRESS. mergeBlocks assumes that
+/// list neighbours are memory-adjacent, so an unordered (LIFO) insert here
+/// used to create fake "merged" blocks spanning unrelated memory — any large
+/// allocation then overlapped live data and corrupted it.
+fn addToFreeList(block: *BlockHeader) void {
+    const addr = @intFromPtr(block);
+
+    if (free_list == null or addr < @intFromPtr(free_list.?)) {
+        block.next = free_list;
+        block.prev = null;
+        if (free_list) |head| head.prev = block;
+        free_list = block;
+        return;
+    }
+
+    var cur = free_list.?;
+    while (cur.next) |n| {
+        if (@intFromPtr(n) > addr) break;
+        cur = n;
+>>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
+    }
+    block.next = cur.next;
+    block.prev = cur;
+    if (cur.next) |n| n.prev = block;
+    cur.next = block;
+}
+
+<<<<<<< HEAD
+=======
+fn mergeBlocks(block: *BlockHeader) void {
+    // Merge with the NEXT block only when it is physically adjacent.
+    if (block.next) |next| {
+        if (next.free) {
+            const end = @intFromPtr(block) + @sizeOf(BlockHeader) + block.size;
+            if (@intFromPtr(next) == end) {
+                block.size += @sizeOf(BlockHeader) + next.size;
+                block.next = next.next;
+                if (next.next) |nn| {
+                    nn.prev = block;
+                }
+            }
+        }
+    }
+
+    // Merge with the PREVIOUS block only when this one directly follows it.
+    if (block.prev) |prev| {
+        if (prev.free) {
+            const prev_end = @intFromPtr(prev) + @sizeOf(BlockHeader) + prev.size;
+            if (prev_end == @intFromPtr(block)) {
+                prev.size += @sizeOf(BlockHeader) + block.size;
+                prev.next = block.next;
+                if (block.next) |nn| {
+                    nn.prev = prev;
+                }
+            }
+        }
     }
 }
 
+fn removeBlock(block: *BlockHeader) void {
+    if (block.prev) |prev| {
+        prev.next = block.next;
+    } else {
+        free_list = block.next;
+    }
+    if (block.next) |next| {
+        next.prev = block.prev;
+    }
+}
+
+>>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
 fn expandHeap(min_needed: usize) bool {
     const pages_needed = (min_needed + 4095) / 4096;
     const new_pages = pmm.allocPages(pages_needed) orelse return false;
@@ -210,10 +295,12 @@ fn expandHeap(min_needed: usize) bool {
     heap_pages += pages_needed;
     heap_size += new_size;
 
-    // Create a free block in the new region
+    // Create a free block in the new region and insert it address-sorted;
+    // mergeBlocks then fuses it with a physically adjacent neighbour.
     const new_block: *BlockHeader = @ptrFromInt(new_pages);
     new_block.size = new_size - @sizeOf(BlockHeader);
     new_block.free = true;
+<<<<<<< HEAD
     new_block.prev = null;
     new_block.next = null;
 
@@ -239,6 +326,11 @@ fn expandHeap(min_needed: usize) bool {
         free_list = new_block;
     }
 
+=======
+
+    addToFreeList(new_block);
+    mergeBlocks(new_block);
+>>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
     return true;
 }
 

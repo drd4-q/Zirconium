@@ -39,3 +39,9 @@ pub fn setFsBase(base: u64) void {
 pub fn getFsBase() u64 {
     return read(IA32_FS_BASE);
 }
+
+/// GS base as user code sees it (no swapgs in this kernel: the same value is
+/// visible in ring 0 and ring 3, which is fine because the kernel ignores GS).
+pub fn setGsBase(base: u64) void {
+    write(IA32_GS_BASE, base);
+}
