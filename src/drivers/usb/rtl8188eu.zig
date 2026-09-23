@@ -9,7 +9,6 @@
 ///   - RTL8188EU UMCTL datasheet (Realtek, confidential)
 ///   - IEEE 802.11-2020 §9 Frame formats
 ///   - USB CDC ECM / RNDIS for understanding of USB-NIC encapsulation
-
 const std = @import("std");
 const root = @import("root");
 const serial = root.serial;
@@ -105,10 +104,18 @@ fn usbControlTransfer(
         .wIndex = index,
         .wLength = if (data) |d| @intCast(d.len) else 0,
     };
-    // Delegate to the controller-specific control transfer
-    // The USB mod provides a global ctrl_transfer_fn we can use
+    // Delegate to the controller-specific control transfer.  Vendor OUT
+    // requests must carry their payload in the OUT stage; passing it as an
+    // IN buffer makes Realtek chips reject register writes.
     const mod = @import("mod.zig");
-    return mod.usbControlTransfer(dev.addr, @intCast(dev.ep_max_packet), &pkt, null, data);
+    const is_in = (request_type & 0x80) != 0;
+    return mod.usbControlTransfer(
+        dev.addr,
+        @min(dev.ep0_max_packet, 64),
+        &pkt,
+        if (is_in) null else data,
+        if (is_in) data else null,
+    );
 }
 
 // ─── Register Access ─────────────────────────────────────────────────

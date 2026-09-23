@@ -28,29 +28,55 @@ pub const TD_CTRL_IOC: u32 = 1 << 24;
 pub const TD_CTRL_LOWSPEED: u32 = 1 << 26;
 pub const TD_CTRL_3ERRORS: u32 = 3 << 27;
 pub const TD_CTRL_SPD: u32 = 1 << 29;
+pub const TD_CTRL_STALL: u32 = 1 << 22;
+pub const TD_CTRL_BABBLE: u32 = 1 << 20;
+pub const TD_CTRL_NAK: u32 = 1 << 19;
+pub const TD_CTRL_TIMEOUT: u32 = 1 << 18;
+pub const TD_CTRL_DATA_ERR: u32 = 1 << 17;
 
 inline fn inb(port: u16) u8 {
-    return asm volatile ("inb %%dx, %%al" : [result] "={al}" (-> u8), : [port] "{dx}" (port));
+    return asm volatile ("inb %%dx, %%al"
+        : [result] "={al}" (-> u8),
+        : [port] "{dx}" (port),
+    );
 }
 
 inline fn outb(port: u16, val: u8) void {
-    asm volatile ("outb %%al, %%dx" : : [val] "{al}" (val), [port] "{dx}" (port));
+    asm volatile ("outb %%al, %%dx"
+        :
+        : [val] "{al}" (val),
+          [port] "{dx}" (port),
+    );
 }
 
 inline fn inw(port: u16) u16 {
-    return asm volatile ("inw %%dx, %%ax" : [result] "={ax}" (-> u16), : [port] "{dx}" (port));
+    return asm volatile ("inw %%dx, %%ax"
+        : [result] "={ax}" (-> u16),
+        : [port] "{dx}" (port),
+    );
 }
 
 inline fn outw(port: u16, val: u16) void {
-    asm volatile ("outw %%ax, %%dx" : : [val] "{ax}" (val), [port] "{dx}" (port));
+    asm volatile ("outw %%ax, %%dx"
+        :
+        : [val] "{ax}" (val),
+          [port] "{dx}" (port),
+    );
 }
 
 inline fn inl(port: u16) u32 {
-    return asm volatile ("inl %%dx, %%eax" : [result] "={eax}" (-> u32), : [port] "{dx}" (port));
+    return asm volatile ("inl %%dx, %%eax"
+        : [result] "={eax}" (-> u32),
+        : [port] "{dx}" (port),
+    );
 }
 
 inline fn outl(port: u16, val: u32) void {
-    asm volatile ("outl %%eax, %%dx" : : [val] "{eax}" (val), [port] "{dx}" (port));
+    asm volatile ("outl %%eax, %%dx"
+        :
+        : [val] "{eax}" (val),
+          [port] "{dx}" (port),
+    );
 }
 
 inline fn readVolatileU32(ptr: *const u32) u32 {
@@ -155,10 +181,13 @@ pub const UhciController = struct {
         self.bulk_tds = @ptrCast(@alignCast(page_bytes + 1088));
         self.bulk_buf = @ptrCast(@alignCast(page_bytes + 1600));
 
-        self.bulk_qh.head_link = 1;
+        // Keep the control QH as the tail of the schedule.  The bulk QH is
+        // the root and points to the control QH, so both queues remain
+        // reachable while the control QH itself terminates the chain.
+        self.bulk_qh.head_link = @intCast(@intFromPtr(self.ctrl_qh) | 0x02);
         self.bulk_qh.element_link = 1;
 
-        self.ctrl_qh.head_link = @intCast(@intFromPtr(self.bulk_qh) | 0x02);
+        self.ctrl_qh.head_link = 1;
         self.ctrl_qh.element_link = 1;
 
         // Reset UHCI controller
@@ -169,8 +198,8 @@ pub const UhciController = struct {
         outw(self.io_base + 0x06, 0x0000); // FRNUM: reset frame num
         outb(self.io_base + 0x0C, 0x40); // SOFMOD: 1ms SOF
 
-        // Point all frame list entries to the control QH
-        const qh_phys: u32 = @intCast(@intFromPtr(self.ctrl_qh) | 0x02);
+        // Point all frame list entries to the schedule root (bulk QH).
+        const qh_phys: u32 = @intCast(@intFromPtr(self.bulk_qh) | 0x02);
         f = 0;
         while (f < 1024) : (f += 1) {
             self.frame_list[f] = qh_phys;
@@ -276,7 +305,24 @@ pub const UhciController = struct {
         data_out: ?[]const u8,
         data_in: ?[]u8,
     ) bool {
-        self.ctrl_setup_pkt.* = setup.*;
+        // Control transfers use a shared DMA buffer.  Bound the request to
+        // both the hardware buffer and the caller's slice before programming
+        // any TDs; otherwise a malformed/large wLength can overrun ctrl_buf.
+        const requested_len: usize = @intCast(setup.wLength);
+        const supplied_len: usize = if (data_in) |d| d.len else if (data_out) |d| d.len else 0;
+        const data_len = @min(@min(requested_len, self.ctrl_buf.len), supplied_len);
+        if (requested_len > 0 and supplied_len == 0) return false;
+
+        var wire_setup = setup.*;
+        wire_setup.wLength = @intCast(data_len);
+        self.ctrl_setup_pkt.* = wire_setup;
+        @memset(self.ctrl_buf[0..], 0);
+
+        // Reset all fields that may have been left by a previous transfer.
+        var reset_idx: usize = 0;
+        while (reset_idx < self.ctrl_tds.len) : (reset_idx += 1) {
+            self.ctrl_tds[reset_idx] = .{};
+        }
 
         // Setup stage TD
         self.ctrl_tds[0].ctrl_status = TD_CTRL_ACTIVE | TD_CTRL_3ERRORS | (if (low_speed) TD_CTRL_LOWSPEED else 0);
@@ -285,12 +331,11 @@ pub const UhciController = struct {
 
         var td_idx: usize = 1;
         var toggle: u32 = 1; // Data stage starts with DATA1
+        const mp: usize = if (max_packet0 > 0) max_packet0 else 8;
 
-        if (data_in) |din| {
+        if (data_in) |_| {
             var transferred: usize = 0;
-            const total = din.len;
-            if (total > self.ctrl_buf.len) return false;
-            const mp: usize = if (max_packet0 > 0) max_packet0 else 8;
+            const total = data_len;
             while (transferred < total) {
                 if (td_idx + 1 >= self.ctrl_tds.len) {
                     writeVolatileU32(&self.ctrl_qh.element_link, 1);
@@ -307,9 +352,7 @@ pub const UhciController = struct {
             }
         } else if (data_out) |dout| {
             var transferred: usize = 0;
-            const total = dout.len;
-            if (total > self.ctrl_buf.len) return false;
-            const mp: usize = if (max_packet0 > 0) max_packet0 else 8;
+            const total = data_len;
             while (transferred < total) {
                 if (td_idx + 1 >= self.ctrl_tds.len) {
                     writeVolatileU32(&self.ctrl_qh.element_link, 1);
@@ -368,10 +411,37 @@ pub const UhciController = struct {
                         }
                     }
                     writeVolatileU32(&self.ctrl_qh.element_link, 1);
-                    if (err) return false;
+                    if (err) {
+                        serial.serialWrite("[UHCI] control TD error, last status=0x");
+                        serial.serialWriteHex(readVolatileU32(&self.ctrl_tds[last_td].ctrl_status));
+                        serial.serialWrite(" requested=");
+                        serial.serialWriteDec(requested_len);
+                        serial.serialWrite(" supplied=");
+                        serial.serialWriteDec(supplied_len);
+                        serial.serialWrite(" data=");
+                        serial.serialWriteDec(data_len);
+                        serial.serialWrite("\n");
+                        return false;
+                    }
 
                     if (data_in) |din| {
-                        @memcpy(din, self.ctrl_buf[0..din.len]);
+                        // UHCI stores (actual_length - 1) in status bits
+                        // 0..10; 0x7fff denotes a zero-length packet.  Sum
+                        // the data TDs so short descriptor replies do not
+                        // copy stale bytes from the previous transfer.
+                        var actual_len: usize = 0;
+                        var data_td: usize = 1;
+                        var offset: usize = 0;
+                        while (data_td < td_idx) : (data_td += 1) {
+                            const st = readVolatileU32(&self.ctrl_tds[data_td].ctrl_status);
+                            const chunk = @min(data_len - offset, mp);
+                            const length_field: usize = @intCast(st & 0x7FF);
+                            const transferred: usize = if (length_field == 0x7FF) 0 else length_field + 1;
+                            actual_len += @min(transferred, chunk);
+                            offset += chunk;
+                        }
+                        if (actual_len > din.len) actual_len = din.len;
+                        @memcpy(din[0..actual_len], self.ctrl_buf[0..actual_len]);
                     }
                     return true;
                 }
@@ -402,7 +472,9 @@ pub const UhciController = struct {
             const num_tds = (chunk_total + mp - 1) / mp;
             if (num_tds == 0 or num_tds > self.bulk_tds.len) break;
 
-            if (!is_in) {
+            if (is_in) {
+                @memset(self.bulk_buf[0..chunk_total], 0);
+            } else {
                 @memcpy(self.bulk_buf[0..chunk_total], data[total_transferred .. total_transferred + chunk_total]);
             }
 
@@ -474,19 +546,36 @@ pub const UhciController = struct {
                 }
             }
 
+            var actual_chunk: usize = chunk_total;
             if (is_in) {
-                @memcpy(data[total_transferred .. total_transferred + chunk_total], self.bulk_buf[0..chunk_total]);
+                actual_chunk = 0;
+                var t: usize = 0;
+                var offset: usize = 0;
+                while (t < num_tds) : (t += 1) {
+                    const st = readVolatileU32(&self.bulk_tds[t].ctrl_status);
+                    const chunk = @min(chunk_total - offset, mp);
+                    const length_field: usize = @intCast(st & 0x7FF);
+                    const transferred: usize = if (length_field == 0x7FF) 0 else length_field + 1;
+                    const received: usize = @min(transferred, chunk);
+                    actual_chunk += received;
+                    offset += chunk;
+                }
+                if (actual_chunk > data.len - total_transferred) {
+                    actual_chunk = data.len - total_transferred;
+                }
+                @memcpy(data[total_transferred .. total_transferred + actual_chunk], self.bulk_buf[0..actual_chunk]);
             }
 
-            total_transferred += chunk_total;
+            total_transferred += actual_chunk;
+            if (actual_chunk < chunk_total) break;
         }
 
         return total_transferred;
     }
 
     pub fn linkEndpointQh(self: *UhciController, qh: *UhciQh) void {
-        // Insert QH before control QH
-        qh.head_link = @intCast(@intFromPtr(self.ctrl_qh) | 0x02);
+        // Insert QH before the bulk/control tail of the schedule.
+        qh.head_link = @intCast(@intFromPtr(self.bulk_qh) | 0x02);
         const qh_phys: u32 = @intCast(@intFromPtr(qh) | 0x02);
         var f: usize = 0;
         while (f < 1024) : (f += 1) {

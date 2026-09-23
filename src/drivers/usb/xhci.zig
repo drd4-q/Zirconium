@@ -34,8 +34,24 @@ pub const TRB_TYPE_CONFIG_ENDPOINT: u32 = 12;
 pub const TRB_TYPE_EVAL_CONTEXT: u32 = 13;
 pub const TRB_TYPE_RESET_ENDPOINT: u32 = 14;
 pub const TRB_TYPE_TRANSFER_EVENT: u32 = 32;
+
+// xHCI specifies transfer length in status[30:16].  QEMU's xHCI model (and
+// a few older hosts) still samples status[16:0], so populate both views while
+// the controller model is being used by the test harness.  The low copy is
+// reserved on real hardware and is ignored there.
+inline fn trbLength(len: u32) u32 {
+    return (len << 16) | (len & 0x1FFFF);
+}
 pub const TRB_TYPE_COMMAND_COMPLETION: u32 = 33;
 pub const TRB_TYPE_PORT_STATUS_CHANGE: u32 = 34;
+
+inline fn readTrbControl(trb: *const XhciTrb) u32 {
+    return @as(*const volatile u32, @ptrCast(&trb.control)).*;
+}
+
+inline fn readTrbStatus(trb: *const XhciTrb) u32 {
+    return @as(*const volatile u32, @ptrCast(&trb.status)).*;
+}
 
 inline fn readMmio32(addr: usize) u32 {
     const p: *const volatile u32 = @ptrFromInt(addr);
@@ -103,6 +119,24 @@ pub const XhciSlot = struct {
     intr2_cycle: u1 = 1,
     intr2_dci: u8 = 0,
 
+    // Separate transfer rings for bulk IN/OUT.  A device may use both
+    // directions (USB mass storage is the common case), so they cannot share
+    // one ring or one DCI state.
+    bulk_in_ring_phys: usize = 0,
+    bulk_in_ring: *[16]XhciTrb = undefined,
+    bulk_in_enqueue: usize = 0,
+    bulk_in_cycle: u1 = 1,
+    bulk_in_dci: u8 = 0,
+    bulk_in_max_packet: u16 = 512,
+    bulk_out_ring_phys: usize = 0,
+    bulk_out_ring: *[16]XhciTrb = undefined,
+    bulk_out_enqueue: usize = 0,
+    bulk_out_cycle: u1 = 1,
+    bulk_out_dci: u8 = 0,
+    bulk_out_max_packet: u16 = 512,
+    bulk_buf_phys: usize = 0,
+    bulk_buf: *[4096]u8 = undefined,
+
     ctrl_buf_phys: usize = 0,
     ctrl_buf: *[512]u8 = undefined,
 };
@@ -122,8 +156,9 @@ pub const XhciController = struct {
     num_ports: u8 = 0,
     max_slots: u8 = 0,
     csz_64: bool = false,
+    qemu_length_compat: bool = false,
     ports: [32]UsbPortStatus = undefined,
-    slots: [8]XhciSlot = [_]XhciSlot{.{}} ** 8,
+    slots: [16]XhciSlot = [_]XhciSlot{.{}} ** 16,
 
     // PMM DMA Memory
     dcbaa_phys: usize = 0,
@@ -147,6 +182,13 @@ pub const XhciController = struct {
 
     dma_pool: dma.UsbDmaPool = dma.UsbDmaPool.init(),
 
+    inline fn encodeTrbLength(self: *const XhciController, len: u32) u32 {
+        // QEMU's legacy xHCI model consumes the low 17 bits.  Real xHCI
+        // controllers use status[30:16]; populate both for the latter and
+        // keep the QEMU-compatible encoding for the former.
+        return if (self.qemu_length_compat) len & 0x1FFFF else trbLength(len);
+    }
+
     pub fn init(self: *XhciController, pci_ctrl: *const pci_detect.PciUsbController, id: u8) bool {
         self.id = id;
         self.bus = pci_ctrl.bus;
@@ -154,6 +196,7 @@ pub const XhciController = struct {
         self.func = pci_ctrl.func;
         self.vendor_id = pci_ctrl.vendor_id;
         self.device_id = pci_ctrl.device_id;
+        self.qemu_length_compat = self.vendor_id == 0x1B36 or self.vendor_id == 0x1033;
         self.irq = pci_ctrl.irq;
         self.mmio_base = pci_ctrl.mmio_base;
 
@@ -465,6 +508,7 @@ pub const XhciController = struct {
             if (self.slots[sl].active) {
                 if (self.slots[sl].input_ctx_phys != 0) dma.freePage(self.slots[sl].input_ctx_phys);
                 if (self.slots[sl].dev_ctx_phys != 0) dma.freePage(self.slots[sl].dev_ctx_phys);
+                if (self.slots[sl].bulk_buf_phys != 0) dma.freePage(self.slots[sl].bulk_buf_phys);
                 self.slots[sl] = .{};
             }
         }
@@ -634,6 +678,16 @@ pub const XhciController = struct {
         writeMmio32(db_addr, @as(u32, target_endpoint));
     }
 
+    fn advanceEvent(self: *XhciController) void {
+        self.event_dequeue += 1;
+        if (self.event_dequeue == 256) {
+            self.event_dequeue = 0;
+            self.event_cycle ^= 1;
+        }
+        const erdp_val = @as(u64, self.event_ring_phys + self.event_dequeue * @sizeOf(XhciTrb)) | (1 << 3);
+        writeMmio64(self.rt_regs + 0x38, erdp_val);
+    }
+
     pub fn sendCommandRaw(self: *XhciController, param: u64, status: u32, ctrl: u32, out_slot_id: ?*u8) bool {
         const idx = self.cmd_enqueue;
         self.cmd_ring[idx] = XhciTrb{
@@ -655,12 +709,12 @@ pub const XhciController = struct {
         var loop_spins: usize = 0;
         while ((timer.ticks > 0 and timer.ticks - start_tick < 50) or (timer.ticks == 0 and loop_spins < 2_000_000)) : (loop_spins += 1) {
             const ev_trb = &self.event_ring[self.event_dequeue];
-            const ev_ctrl = ev_trb.control;
+            const ev_ctrl = readTrbControl(ev_trb);
             const ev_cycle: u1 = @intCast(ev_ctrl & 1);
 
             if (ev_cycle == self.event_cycle) {
                 const ev_type = (ev_ctrl >> 10) & 0x3F;
-                const comp_code = (ev_trb.status >> 24) & 0xFF;
+                const comp_code = (readTrbStatus(ev_trb) >> 24) & 0xFF;
                 const slot_id: u8 = @intCast((ev_ctrl >> 24) & 0xFF);
 
                 self.event_dequeue += 1;
@@ -720,11 +774,18 @@ pub const XhciController = struct {
                     dma.freePage(page1);
                     return null;
                 };
+                const page3 = dma.allocPage() orelse {
+                    dma.freePage(page2);
+                    dma.freePage(page1);
+                    return null;
+                };
 
                 const p1_bytes: [*]u8 = @ptrFromInt(page1);
                 const p2_bytes: [*]u8 = @ptrFromInt(page2);
+                const p3_bytes: [*]u8 = @ptrFromInt(page3);
                 @memset(p1_bytes[0..dma.PAGE_SIZE], 0);
                 @memset(p2_bytes[0..dma.PAGE_SIZE], 0);
+                @memset(p3_bytes[0..dma.PAGE_SIZE], 0);
 
                 slot.active = true;
                 slot.slot_id = slot_id;
@@ -732,6 +793,8 @@ pub const XhciController = struct {
                 slot.speed_code = speed_code;
                 slot.input_ctx_phys = page1;
                 slot.dev_ctx_phys = page2;
+                slot.bulk_buf_phys = page3;
+                slot.bulk_buf = @ptrCast(@alignCast(p3_bytes));
 
                 slot.ep0_ring_phys = page1 + 2176;
                 slot.ep0_ring = @ptrCast(@alignCast(p1_bytes + 2176));
@@ -767,6 +830,28 @@ pub const XhciController = struct {
                 slot.intr2_enqueue = 0;
                 slot.intr2_cycle = 1;
                 slot.intr2_dci = 0;
+
+                slot.bulk_in_ring_phys = page1 + 3456;
+                slot.bulk_in_ring = @ptrCast(@alignCast(p1_bytes + 3456));
+                slot.bulk_in_ring[15] = XhciTrb{
+                    .parameter = @as(u64, slot.bulk_in_ring_phys),
+                    .status = 0,
+                    .control = (TRB_TYPE_LINK << 10) | (1 << 1),
+                };
+                slot.bulk_in_enqueue = 0;
+                slot.bulk_in_cycle = 1;
+                slot.bulk_in_dci = 0;
+
+                slot.bulk_out_ring_phys = page1 + 3712;
+                slot.bulk_out_ring = @ptrCast(@alignCast(p1_bytes + 3712));
+                slot.bulk_out_ring[15] = XhciTrb{
+                    .parameter = @as(u64, slot.bulk_out_ring_phys),
+                    .status = 0,
+                    .control = (TRB_TYPE_LINK << 10) | (1 << 1),
+                };
+                slot.bulk_out_enqueue = 0;
+                slot.bulk_out_cycle = 1;
+                slot.bulk_out_dci = 0;
 
                 return s_idx;
             }
@@ -805,7 +890,8 @@ pub const XhciController = struct {
             else => 8,
         };
         ep0_ctx[0] = 0;
-        ep0_ctx[1] = (3 << 1) | (4 << 3) | (max_p0 << 16);
+        // EP0 is a control endpoint (type 4); CErr is three errors.
+        ep0_ctx[1] = (4 << 3) | (3 << 1) | (max_p0 << 16);
         ep0_ctx[2] = @as(u32, @intCast(slot.ep0_ring_phys & 0xFFFFFFFF)) | 1;
         ep0_ctx[3] = @as(u32, @intCast(slot.ep0_ring_phys >> 32));
         ep0_ctx[4] = 8;
@@ -813,6 +899,32 @@ pub const XhciController = struct {
         self.dcbaa[slot.slot_id] = @as(u64, slot.dev_ctx_phys);
 
         const cmd_ctrl = (TRB_TYPE_ADDRESS_DEVICE << 10) | (@as(u32, slot.slot_id) << 24) | @as(u32, self.cmd_cycle);
+        return self.sendCommandRaw(@as(u64, slot.input_ctx_phys), 0, cmd_ctrl, null);
+    }
+
+    pub fn updateEp0MaxPacket(self: *XhciController, slot_idx: usize, max_packet: u8) bool {
+        if (slot_idx >= self.slots.len or max_packet == 0) return false;
+        const slot = &self.slots[slot_idx];
+        if (!slot.active) return false;
+
+        const ctx_size: usize = if (self.csz_64) 64 else 32;
+        const input_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys));
+        const add_mask: u32 = 0x3; // A0 (slot) + A1 (EP0)
+        if (self.csz_64) {
+            input_ctx[0] = 0;
+            input_ctx[1] = 0;
+            input_ctx[2] = add_mask;
+            input_ctx[3] = 0;
+        } else {
+            input_ctx[0] = 0;
+            input_ctx[1] = add_mask;
+        }
+        const ep0_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + 2 * ctx_size));
+        const mps: u32 = @min(@max(max_packet, 8), 512);
+        ep0_ctx[1] = (4 << 3) | (3 << 1) | (mps << 16);
+
+        const cmd_ctrl = (TRB_TYPE_EVAL_CONTEXT << 10) |
+            (@as(u32, slot.slot_id) << 24) | @as(u32, self.cmd_cycle);
         return self.sendCommandRaw(@as(u64, slot.input_ctx_phys), 0, cmd_ctrl, null);
     }
 
@@ -829,18 +941,26 @@ pub const XhciController = struct {
         const slot = &self.slots[slot_idx];
         if (!slot.active) return false;
 
-        const is_in = (setup.bmRequestType & 0x80) != 0;
-        const trt: u32 = if (setup.wLength == 0) 0 else if (is_in) 3 else 2;
-        const setup_param: u64 = @as(u64, setup.bmRequestType) |
-            (@as(u64, setup.bRequest) << 8) |
-            (@as(u64, setup.wValue) << 16) |
-            (@as(u64, setup.wIndex) << 32) |
-            (@as(u64, setup.wLength) << 48);
+        const requested_len: usize = @intCast(setup.wLength);
+        const supplied_len: usize = if (data_in) |d| d.len else if (data_out) |d| d.len else 0;
+        if (requested_len > 0 and supplied_len == 0) return false;
+        const data_len = @min(@min(requested_len, slot.ctrl_buf.len), supplied_len);
+        var wire_setup = setup.*;
+        wire_setup.wLength = @intCast(data_len);
+        @memset(slot.ctrl_buf[0..], 0);
+
+        const is_in = (wire_setup.bmRequestType & 0x80) != 0;
+        const trt: u32 = if (data_len == 0) 0 else if (is_in) 3 else 2;
+        const setup_param: u64 = @as(u64, wire_setup.bmRequestType) |
+            (@as(u64, wire_setup.bRequest) << 8) |
+            (@as(u64, wire_setup.wValue) << 16) |
+            (@as(u64, wire_setup.wIndex) << 32) |
+            (@as(u64, wire_setup.wLength) << 48);
 
         const setup_idx = slot.ep0_enqueue;
         slot.ep0_ring[setup_idx] = XhciTrb{
             .parameter = setup_param,
-            .status = 8,
+            .status = self.encodeTrbLength(8),
             .control = (TRB_TYPE_SETUP_STAGE << 10) | (1 << 6) | (trt << 16) | @as(u32, slot.ep0_cycle),
         };
         slot.ep0_enqueue += 1;
@@ -850,17 +970,15 @@ pub const XhciController = struct {
             slot.ep0_cycle ^= 1;
         }
 
-        if (setup.wLength > 0) {
-            const len = setup.wLength;
+        if (data_len > 0) {
             if (!is_in and data_out != null) {
-                const chunk = @min(len, @as(u16, @intCast(data_out.?.len)));
-                @memcpy(slot.ctrl_buf[0..chunk], data_out.?[0..chunk]);
+                @memcpy(slot.ctrl_buf[0..data_len], data_out.?[0..data_len]);
             }
 
             const data_idx = slot.ep0_enqueue;
             slot.ep0_ring[data_idx] = XhciTrb{
                 .parameter = @as(u64, slot.ctrl_buf_phys),
-                .status = @as(u32, len),
+                .status = self.encodeTrbLength(@as(u32, data_len)),
                 .control = (TRB_TYPE_DATA_STAGE << 10) | (if (is_in) @as(u32, 1 << 16) else 0) | @as(u32, slot.ep0_cycle),
             };
             slot.ep0_enqueue += 1;
@@ -871,7 +989,7 @@ pub const XhciController = struct {
             }
         }
 
-        const status_dir: u32 = if (setup.wLength == 0 or !is_in) 1 else 0;
+        const status_dir: u32 = if (data_len == 0 or !is_in) 1 else 0;
         const status_idx = slot.ep0_enqueue;
         slot.ep0_ring[status_idx] = XhciTrb{
             .parameter = 0,
@@ -891,7 +1009,7 @@ pub const XhciController = struct {
         var loop_spins: usize = 0;
         while ((timer.ticks > 0 and timer.ticks - start_tick < 50) or (timer.ticks == 0 and loop_spins < 2_000_000)) : (loop_spins += 1) {
             const ev_trb = &self.event_ring[self.event_dequeue];
-            const ev_ctrl = ev_trb.control;
+            const ev_ctrl = readTrbControl(ev_trb);
             const ev_cycle: u1 = @intCast(ev_ctrl & 1);
 
             if (ev_cycle == self.event_cycle) {
@@ -907,10 +1025,10 @@ pub const XhciController = struct {
                 writeMmio64(self.rt_regs + 0x38, erdp_val);
 
                 if (ev_type == TRB_TYPE_TRANSFER_EVENT and ev_slot == slot.slot_id) {
-                    const comp_code = (ev_trb.status >> 24) & 0xFF;
+                    const comp_code = (readTrbStatus(ev_trb) >> 24) & 0xFF;
                     if (comp_code == 1 or comp_code == 13) {
                         if (is_in and data_in != null) {
-                            const copy_len = @min(setup.wLength, @as(u16, @intCast(data_in.?.len)));
+                            const copy_len = @min(data_len, data_in.?.len);
                             @memcpy(data_in.?[0..copy_len], slot.ctrl_buf[0..copy_len]);
                         }
                         return true;
@@ -968,7 +1086,7 @@ pub const XhciController = struct {
         slot_ctx[0] = (slot_ctx[0] & ~@as(u32, 0x1F << 27)) | (@as(u32, max_entries) << 27);
 
         const ep_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + (@as(usize, dci) + 1) * ctx_size));
-        
+
         var p_exp: u32 = 0;
         const target_iv: u32 = if (interval > 0) interval else 10;
         while ((@as(u32, 1) << @as(u5, @intCast(p_exp))) < target_iv and p_exp < 8) : (p_exp += 1) {}
@@ -976,7 +1094,8 @@ pub const XhciController = struct {
 
         const max_p: u32 = @min(@max(max_packet, 8), 64);
         ep_ctx[0] = interval_val << 16;
-        ep_ctx[1] = (3 << 1) | (7 << 3) | (max_p << 16);
+        // Interrupt IN is endpoint type 7 in the xHCI context encoding.
+        ep_ctx[1] = (7 << 3) | (3 << 1) | (max_p << 16);
         ep_ctx[2] = @as(u32, @intCast(ring_phys & 0xFFFFFFFF)) | 1;
         ep_ctx[3] = @as(u32, @intCast(ring_phys >> 32));
         // Dword 4: Low 16 bits = Average TRB Length, High 16 bits = Max ESIT Payload (mandatory on bare-metal xHCI!)
@@ -990,6 +1109,268 @@ pub const XhciController = struct {
             serial.serialWrite("\n");
         }
         return ok;
+    }
+
+    pub fn configureBulkEndpoint(
+        self: *XhciController,
+        slot_idx: usize,
+        ep_num: u8,
+        is_in: bool,
+        max_packet: u16,
+    ) bool {
+        if (slot_idx >= self.slots.len) return false;
+        var slot = &self.slots[slot_idx];
+        if (!slot.active) return false;
+
+        const ctx_size: usize = if (self.csz_64) 64 else 32;
+        const dci: u8 = ep_num * 2 + @as(u8, if (is_in) 1 else 0);
+        const ring_phys = if (is_in) slot.bulk_in_ring_phys else slot.bulk_out_ring_phys;
+        if (ring_phys == 0) return false;
+
+        const input_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys));
+        const add_mask: u32 = 1 | (@as(u32, 1) << @as(u5, @intCast(dci)));
+        if (self.csz_64) {
+            input_ctx[0] = 0;
+            input_ctx[1] = 0;
+            input_ctx[2] = add_mask;
+            input_ctx[3] = 0;
+        } else {
+            input_ctx[0] = 0;
+            input_ctx[1] = add_mask;
+        }
+
+        const slot_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + ctx_size));
+        const entries = @max((slot_ctx[0] >> 27) & 0x1F, dci);
+        slot_ctx[0] = (slot_ctx[0] & ~@as(u32, 0x1F << 27)) | (entries << 27);
+
+        const ep_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + (@as(usize, dci) + 1) * ctx_size));
+        const max_p: u32 = @min(@max(max_packet, 8), 1024);
+        const endpoint_type: u32 = if (is_in) 6 else 2; // bulk IN / bulk OUT
+        ep_ctx[0] = 0;
+        ep_ctx[1] = (endpoint_type << 3) | (3 << 1) | (max_p << 16);
+        ep_ctx[2] = @as(u32, @intCast(ring_phys & 0xFFFFFFFF)) | 1;
+        ep_ctx[3] = @as(u32, @intCast(ring_phys >> 32));
+        ep_ctx[4] = max_p;
+
+        if (is_in) {
+            slot.bulk_in_dci = dci;
+            slot.bulk_in_max_packet = @intCast(max_p);
+            slot.bulk_in_enqueue = 0;
+            slot.bulk_in_cycle = 1;
+        } else {
+            slot.bulk_out_dci = dci;
+            slot.bulk_out_max_packet = @intCast(max_p);
+            slot.bulk_out_enqueue = 0;
+            slot.bulk_out_cycle = 1;
+        }
+
+        const cmd_ctrl = (TRB_TYPE_CONFIG_ENDPOINT << 10) |
+            (@as(u32, slot.slot_id) << 24) | @as(u32, self.cmd_cycle);
+        const ok = self.sendCommandRaw(@as(u64, slot.input_ctx_phys), 0, cmd_ctrl, null);
+        if (!ok) {
+            serial.serialWrite("[XHCI] Configure bulk endpoint failed for DCI=");
+            serial.serialWriteDec(dci);
+            serial.serialWrite("\n");
+        }
+        return ok;
+    }
+
+    pub fn configureBulkEndpoints(
+        self: *XhciController,
+        slot_idx: usize,
+        ep_in_num: u8,
+        max_in_packet: u16,
+        ep_out_num: u8,
+        max_out_packet: u16,
+    ) bool {
+        if (slot_idx >= self.slots.len) return false;
+        var slot = &self.slots[slot_idx];
+        if (!slot.active) return false;
+
+        const ctx_size: usize = if (self.csz_64) 64 else 32;
+        const dci_in: u8 = ep_in_num * 2 + 1;
+        const dci_out: u8 = ep_out_num * 2;
+        const input_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys));
+        const add_mask: u32 = 1 | (@as(u32, 1) << @as(u5, @intCast(dci_in))) |
+            (@as(u32, 1) << @as(u5, @intCast(dci_out)));
+        if (self.csz_64) {
+            input_ctx[0] = 0;
+            input_ctx[1] = 0;
+            input_ctx[2] = add_mask;
+            input_ctx[3] = 0;
+        } else {
+            input_ctx[0] = 0;
+            input_ctx[1] = add_mask;
+        }
+
+        const slot_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + ctx_size));
+        const entries = @max((slot_ctx[0] >> 27) & 0x1F, @as(u32, dci_out));
+        slot_ctx[0] = (slot_ctx[0] & ~@as(u32, 0x1F << 27)) | (entries << 27);
+
+        const ep_in_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + (@as(usize, dci_in) + 1) * ctx_size));
+        const ep_out_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + (@as(usize, dci_out) + 1) * ctx_size));
+        const max_in: u32 = @min(@max(max_in_packet, 8), 1024);
+        const max_out: u32 = @min(@max(max_out_packet, 8), 1024);
+        ep_in_ctx[0] = 0;
+        ep_in_ctx[1] = (6 << 3) | (3 << 1) | (max_in << 16);
+        ep_in_ctx[2] = @as(u32, @intCast(slot.bulk_in_ring_phys & 0xFFFFFFFF)) | 1;
+        ep_in_ctx[3] = @as(u32, @intCast(slot.bulk_in_ring_phys >> 32));
+        ep_in_ctx[4] = max_in;
+        ep_out_ctx[0] = 0;
+        ep_out_ctx[1] = (2 << 3) | (3 << 1) | (max_out << 16);
+        ep_out_ctx[2] = @as(u32, @intCast(slot.bulk_out_ring_phys & 0xFFFFFFFF)) | 1;
+        ep_out_ctx[3] = @as(u32, @intCast(slot.bulk_out_ring_phys >> 32));
+        ep_out_ctx[4] = max_out;
+
+        slot.bulk_in_dci = dci_in;
+        slot.bulk_out_dci = dci_out;
+        slot.bulk_in_max_packet = @intCast(max_in);
+        slot.bulk_out_max_packet = @intCast(max_out);
+        slot.bulk_in_enqueue = 0;
+        slot.bulk_out_enqueue = 0;
+        slot.bulk_in_cycle = 1;
+        slot.bulk_out_cycle = 1;
+
+        const cmd_ctrl = (TRB_TYPE_CONFIG_ENDPOINT << 10) |
+            (@as(u32, slot.slot_id) << 24) | @as(u32, self.cmd_cycle);
+        return self.sendCommandRaw(@as(u64, slot.input_ctx_phys), 0, cmd_ctrl, null);
+    }
+
+    pub fn resetEndpoint(self: *XhciController, slot_idx: usize, dci: u8) bool {
+        if (slot_idx >= self.slots.len or dci == 0 or dci > 31) return false;
+        const slot = &self.slots[slot_idx];
+        if (!slot.active) return false;
+        const cmd_ctrl = (TRB_TYPE_RESET_ENDPOINT << 10) |
+            (@as(u32, slot.slot_id) << 24) | (@as(u32, dci) << 16) | @as(u32, self.cmd_cycle);
+        return self.sendCommandRaw(0, 0, cmd_ctrl, null);
+    }
+
+    pub fn recoverInterruptEndpoint(
+        self: *XhciController,
+        slot_idx: usize,
+        ep_num: u8,
+        max_packet: u16,
+        interval: u8,
+    ) bool {
+        const dci: u8 = ep_num * 2 + 1;
+        if (!self.resetEndpoint(slot_idx, dci)) return false;
+        return self.configureInterruptEndpoint(slot_idx, ep_num, max_packet, interval);
+    }
+
+    pub fn recoverBulkEndpoint(
+        self: *XhciController,
+        slot_idx: usize,
+        ep_num: u8,
+        is_in: bool,
+        max_packet: u16,
+    ) bool {
+        const dci: u8 = ep_num * 2 + @as(u8, if (is_in) 1 else 0);
+        if (!self.resetEndpoint(slot_idx, dci)) return false;
+        return self.configureBulkEndpoint(slot_idx, ep_num, is_in, max_packet);
+    }
+
+    /// Submit one or more synchronous bulk transfers on a configured endpoint.
+    /// The event ring is polled here because storage and Wi-Fi need a bounded
+    /// request/response operation; interrupt HID transfers remain asynchronous.
+    pub fn bulkTransfer(
+        self: *XhciController,
+        slot_idx: usize,
+        ep_num: u8,
+        is_in: bool,
+        data: []u8,
+    ) ?usize {
+        if (slot_idx >= self.slots.len or data.len == 0) return if (data.len == 0) 0 else null;
+        var slot = &self.slots[slot_idx];
+        if (!slot.active) return null;
+
+        const dci: u8 = ep_num * 2 + @as(u8, if (is_in) 1 else 0);
+        if ((is_in and slot.bulk_in_dci != dci) or (!is_in and slot.bulk_out_dci != dci)) return null;
+
+        var transferred: usize = 0;
+        while (transferred < data.len) {
+            const chunk = @min(data.len - transferred, 4096);
+            const ring = if (is_in) slot.bulk_in_ring else slot.bulk_out_ring;
+            var enqueue = if (is_in) slot.bulk_in_enqueue else slot.bulk_out_enqueue;
+            var cycle = if (is_in) slot.bulk_in_cycle else slot.bulk_out_cycle;
+            if (enqueue >= 15) {
+                enqueue = 0;
+                cycle ^= 1;
+            }
+
+            @memset(slot.bulk_buf[0..chunk], 0);
+            if (!is_in) {
+                @memcpy(slot.bulk_buf[0..chunk], data[transferred .. transferred + chunk]);
+            }
+            ring[enqueue] = XhciTrb{
+                .parameter = @as(u64, slot.bulk_buf_phys),
+                .status = self.encodeTrbLength(@as(u32, @intCast(chunk))),
+                .control = (TRB_TYPE_NORMAL << 10) | (1 << 5) | @as(u32, cycle),
+            };
+            enqueue += 1;
+            if (enqueue == 15) {
+                ring[15].control = (TRB_TYPE_LINK << 10) | (1 << 1) | @as(u32, cycle);
+                enqueue = 0;
+                cycle ^= 1;
+            }
+            if (is_in) {
+                slot.bulk_in_enqueue = enqueue;
+                slot.bulk_in_cycle = cycle;
+            } else {
+                slot.bulk_out_enqueue = enqueue;
+                slot.bulk_out_cycle = cycle;
+            }
+            self.ringDoorbell(slot.slot_id, dci);
+
+            const start_tick = timer.ticks;
+            var spins: usize = 0;
+            var completed = false;
+            while ((timer.ticks > 0 and timer.ticks -% start_tick < 50) or
+                (timer.ticks == 0 and spins < 2_000_000)) : (spins += 1)
+            {
+                const ev = &self.event_ring[self.event_dequeue];
+                const ev_control = @as(*const volatile u32, @ptrCast(&ev.control)).*;
+                const ev_cycle: u1 = @intCast(ev_control & 1);
+                if (ev_cycle != self.event_cycle) {
+                    asm volatile ("pause");
+                    continue;
+                }
+
+                const ev_status = @as(*const volatile u32, @ptrCast(&ev.status)).*;
+                const ev_type = (ev_control >> 10) & 0x3F;
+                const ev_slot: u8 = @intCast((ev_control >> 24) & 0xFF);
+                const ev_dci: u8 = @intCast((ev_control >> 16) & 0x1F);
+                self.advanceEvent();
+                if (ev_type == TRB_TYPE_TRANSFER_EVENT and ev_slot == slot.slot_id and ev_dci == dci) {
+                    const completion = (ev_status >> 24) & 0xFF;
+                    if (completion == 1 or completion == 13) {
+                        const residual: usize = @intCast(ev_status & 0xFFFFFF);
+                        const actual = chunk - @min(residual, chunk);
+                        if (is_in and actual > 0) {
+                            @memcpy(data[transferred .. transferred + actual], slot.bulk_buf[0..actual]);
+                        }
+                        transferred += actual;
+                        completed = true;
+                        if (actual < chunk) return transferred;
+                        break;
+                    }
+                    const recovery_mp: u16 = if (is_in) slot.bulk_in_max_packet else slot.bulk_out_max_packet;
+                    if (!self.recoverBulkEndpoint(slot_idx, ep_num, is_in, recovery_mp)) {
+                        serial.serialWrite("[XHCI] bulk endpoint recovery failed\n");
+                    }
+                    return null;
+                }
+                asm volatile ("pause");
+            }
+            if (!completed) {
+                serial.serialWrite("[XHCI] bulk transfer timeout dci=");
+                serial.serialWriteDec(dci);
+                serial.serialWrite(" slot=");
+                serial.serialWriteDec(slot.slot_id);
+                serial.serialWrite("\n");
+                return null;
+            }
+        }
+        return transferred;
     }
 
     pub fn queueInterruptTransfer(
@@ -1010,7 +1391,7 @@ pub const XhciController = struct {
             const idx = slot.intr2_enqueue;
             slot.intr2_ring[idx] = XhciTrb{
                 .parameter = @as(u64, report_buf_phys),
-                .status = @as(u32, max_len),
+                .status = self.encodeTrbLength(@as(u32, max_len)),
                 .control = (TRB_TYPE_NORMAL << 10) | (1 << 5) | @as(u32, slot.intr2_cycle),
             };
             slot.intr2_enqueue += 1;
@@ -1024,7 +1405,7 @@ pub const XhciController = struct {
             const idx = slot.intr_enqueue;
             slot.intr_ring[idx] = XhciTrb{
                 .parameter = @as(u64, report_buf_phys),
-                .status = @as(u32, max_len),
+                .status = self.encodeTrbLength(@as(u32, max_len)),
                 .control = (TRB_TYPE_NORMAL << 10) | (1 << 5) | @as(u32, slot.intr_cycle),
             };
             slot.intr_enqueue += 1;
@@ -1047,14 +1428,15 @@ pub const XhciController = struct {
     pub fn pollEvents(self: *XhciController, on_transfer: *const fn (slot_id: u8, dci: u8, rem_bytes: u32, comp_code: u32) void) void {
         while (true) {
             const ev_trb = &self.event_ring[self.event_dequeue];
-            const ev_ctrl = ev_trb.control;
+            const ev_ctrl = readTrbControl(ev_trb);
             const ev_cycle: u1 = @intCast(ev_ctrl & 1);
             if (ev_cycle != self.event_cycle) break;
 
             const ev_type = (ev_ctrl >> 10) & 0x3F;
             const ev_slot: u8 = @intCast((ev_ctrl >> 24) & 0xFF);
-            const comp_code: u32 = (ev_trb.status >> 24) & 0xFF;
-            const rem_bytes: u32 = ev_trb.status & 0xFFFFFF;
+            const ev_status_read = readTrbStatus(ev_trb);
+            const comp_code: u32 = (ev_status_read >> 24) & 0xFF;
+            const rem_bytes: u32 = ev_status_read & 0xFFFFFF;
             const dci: u8 = @intCast((ev_ctrl >> 16) & 0x1F);
 
             self.event_dequeue += 1;

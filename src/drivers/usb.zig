@@ -85,12 +85,10 @@ pub fn scan() void {
 
 pub fn poll() void {
     mod.poll();
-    // Keep local packet counts and toggles in sync
-    var j: usize = 0;
-    while (j < usb_device_count) : (j += 1) {
-        usb_devices[j].packet_count = mod.usb_devices[j].packet_count;
-        usb_devices[j].caps_lock = mod.usb_devices[j].caps_lock;
-    }
+    // The compatibility view is a copy of the driver state.  Refresh the
+    // whole device record so packet_count, toggles, endpoint state, and xHCI
+    // slot metadata are not stale for shell/foreign callers.
+    syncState();
 }
 
 pub fn getControllers() []UsbController {

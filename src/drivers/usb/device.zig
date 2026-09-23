@@ -25,6 +25,7 @@ pub const UsbDevice = struct {
     ctrl_idx: u8 = 0,
     port: u8 = 0,
     addr: u8 = 0,
+    ep0_max_packet: u8 = 8,
     low_speed: bool = false,
     speed: UsbSpeed = .full,
     dev_type: UsbDeviceType = .unknown,
@@ -52,6 +53,9 @@ pub const UsbDevice = struct {
     caps_lock: bool = false,
     xhci_slot_id: u8 = 0,
     xhci_slot_idx: u8 = 0,
+    xhci_intr_configured: bool = false,
+    xhci_bulk_in_configured: bool = false,
+    xhci_bulk_out_configured: bool = false,
 
     // Bulk endpoints (for Mass Storage, USB Wi-Fi, etc.)
     ep_bulk_in: u8 = 0,
@@ -104,7 +108,13 @@ pub fn enumerateDevice(
         return false;
     }
 
-    const max_packet0: u8 = if (dev_desc_8[7] > 0) dev_desc_8[7] else 8;
+    const max_packet0: u8 = switch (dev_desc_8[7]) {
+        16 => 16,
+        32 => 32,
+        64 => 64,
+        else => 8,
+    };
+    dev_out.ep0_max_packet = max_packet0;
 
     // Step 2: Set Address (only if NOT already addressed by hardware, e.g. UHCI/EHCI)
     if (!already_addressed) {
@@ -157,7 +167,15 @@ pub fn enumerateDevice(
         return false;
     }
 
+    if (cfg_hdr[0] < 9 or cfg_hdr[1] != types.DESC_CONFIGURATION) {
+        serial.serialWrite("[USB] Invalid configuration descriptor header\n");
+        return false;
+    }
     var total_cfg_len = @as(u16, cfg_hdr[2]) | (@as(u16, cfg_hdr[3]) << 8);
+    if (total_cfg_len < 9) {
+        serial.serialWrite("[USB] Invalid configuration descriptor length\n");
+        return false;
+    }
     total_cfg_len = @min(total_cfg_len, 512);
 
     // Step 5: Read full Configuration Descriptor tree

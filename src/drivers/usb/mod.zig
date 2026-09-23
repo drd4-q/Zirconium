@@ -77,10 +77,12 @@ fn enumerateCompositeInterfaces(dev: *device.UsbDevice, c_idx: u8, p: u8, is_low
         const iface = &dev.interfaces[if_idx];
         if (iface.class_code == 0x03) {
             var dev_extra = &usb_devices[usb_device_count];
+            dev_extra.* = .{};
             dev_extra.active = true;
             dev_extra.ctrl_idx = c_idx;
             dev_extra.port = p + 1;
             dev_extra.addr = new_addr;
+            dev_extra.ep0_max_packet = dev.ep0_max_packet;
             dev_extra.low_speed = is_low_speed;
             dev_extra.speed = dev.speed;
             dev_extra.dev_type = iface.driver_type;
@@ -106,9 +108,11 @@ fn enumerateCompositeInterfaces(dev: *device.UsbDevice, c_idx: u8, p: u8, is_low
                 }
             }
             if (!found_ep) {
-                dev_extra.ep_in = @intCast(if_idx + 1);
-                dev_extra.ep_max_packet = 8;
-                dev_extra.ep_interval = 10;
+                // Do not invent an interrupt endpoint: a composite interface
+                // without one must stay out of the HID transfer schedule.
+                dev_extra.ep_in = 0;
+                dev_extra.ep_max_packet = 0;
+                dev_extra.ep_interval = 0;
             }
 
             dev_extra.toggle = 0;
@@ -134,6 +138,19 @@ fn enumerateCompositeInterfaces(dev: *device.UsbDevice, c_idx: u8, p: u8, is_low
     }
 }
 
+fn duplicateHidEndpoint(dev: *device.UsbDevice, upto: usize) bool {
+    var i: usize = 0;
+    while (i < upto) : (i += 1) {
+        const prior = &usb_devices[i];
+        if (prior.active and prior.ctrl_idx == dev.ctrl_idx and prior.addr == dev.addr and
+            prior.ep_in == dev.ep_in and (prior.dev_type == .keyboard or prior.dev_type == .mouse))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn relinkUhciControllerSchedule(u_ctrl: *uhci.UhciController, ctrl_index: u8) void {
     var prev_qh: ?*UhciQh = null;
 
@@ -141,7 +158,9 @@ fn relinkUhciControllerSchedule(u_ctrl: *uhci.UhciController, ctrl_index: u8) vo
     while (i < usb_device_count) : (i += 1) {
         const dev = &usb_devices[i];
         if (!dev.active or dev.ctrl_idx != ctrl_index) continue;
-        if (dev.dev_type != .keyboard and dev.dev_type != .mouse and dev.dev_type != .unknown) continue;
+        if (dev.dev_type != .keyboard and dev.dev_type != .mouse) continue;
+        if (dev.ep_in == 0) continue;
+        if (duplicateHidEndpoint(dev, i)) continue;
 
         const max_p: u32 = @min(@max(dev.ep_max_packet, 8), 64);
 
@@ -166,27 +185,35 @@ fn relinkUhciControllerSchedule(u_ctrl: *uhci.UhciController, ctrl_index: u8) vo
     }
 
     if (prev_qh) |pq| {
-        pq.head_link = @intCast(@intFromPtr(u_ctrl.ctrl_qh) | 0x02);
+        pq.head_link = @intCast(@intFromPtr(u_ctrl.bulk_qh) | 0x02);
     } else {
-        const qh_ptr: u32 = @intCast(@intFromPtr(u_ctrl.ctrl_qh) | 0x02);
+        const qh_ptr: u32 = @intCast(@intFromPtr(u_ctrl.bulk_qh) | 0x02);
         var f: usize = 0;
         while (f < 1024) : (f += 1) {
             u_ctrl.frame_list[f] = qh_ptr;
         }
     }
-    u_ctrl.ctrl_qh.head_link = @intCast(@intFromPtr(u_ctrl.bulk_qh) | 0x02);
-    u_ctrl.bulk_qh.head_link = 1;
+    // The control QH is the terminal QH.  Keeping it last also makes the
+    // schedule termination explicit instead of relying on a stale link.
+    u_ctrl.ctrl_qh.head_link = 1;
+    u_ctrl.bulk_qh.head_link = @intCast(@intFromPtr(u_ctrl.ctrl_qh) | 0x02);
     u_ctrl.bulk_qh.element_link = 1;
 }
 
 fn relinkEhciControllerSchedule(e_ctrl: *ehci.EhciController, ctrl_index: u8) void {
-    var prev_qh: ?*ehci.EhciQh = null;
+    var frame: usize = 0;
+    while (frame < 1024) : (frame += 1) {
+        e_ctrl.periodic_list[frame] = 1;
+    }
+    var hid_index: usize = 0;
 
     var i: usize = 0;
     while (i < usb_device_count) : (i += 1) {
         const dev = &usb_devices[i];
         if (!dev.active or dev.ctrl_idx != ctrl_index) continue;
-        if (dev.dev_type != .keyboard and dev.dev_type != .mouse and dev.dev_type != .unknown) continue;
+        if (dev.dev_type != .keyboard and dev.dev_type != .mouse) continue;
+        if (dev.ep_in == 0) continue;
+        if (duplicateHidEndpoint(dev, i)) continue;
 
         const max_p: u32 = @min(@max(dev.ep_max_packet, 8), 64);
 
@@ -209,12 +236,9 @@ fn relinkEhciControllerSchedule(e_ctrl: *ehci.EhciController, ctrl_index: u8) vo
         dev.ehci_qh.overlay_alt_next_qtd = 1;
         dev.ehci_qh.overlay_token = 0;
 
-        if (prev_qh) |pq| {
-            pq.horizontal_link = @intCast(@intFromPtr(&dev.ehci_qh) | 0x02);
-        } else {
-            e_ctrl.linkInterruptQh(&dev.ehci_qh);
-        }
-        prev_qh = &dev.ehci_qh;
+        const interval: usize = @max(@as(usize, dev.ep_interval), 1);
+        e_ctrl.linkInterruptQhScheduled(&dev.ehci_qh, hid_index, interval);
+        hid_index += 1;
     }
 }
 
@@ -403,18 +427,17 @@ pub fn init() void {
                                                     const extra_start = usb_device_count;
                                                     enumerateCompositeInterfaces(dev, c_idx, p, is_low_speed, new_addr);
 
-                                                    // Configure interrupt endpoint on xHCI for primary device
-                                                    _ = x.configureInterruptEndpoint(slot_idx, dev.ep_in, dev.ep_max_packet, dev.ep_interval);
-                                                    // Queue initial interrupt transfer
-                                                    x.queueInterruptTransfer(slot_idx, dev.ep_in * 2 + 1, @intFromPtr(&dev.report_buf), @min(@max(dev.ep_max_packet, 8), 64));
+                                                    // Configure endpoints from the parsed interface class. HID gets interrupt-IN
+                                                    // queues; storage and Wi-Fi get bulk endpoints.
+                                                    _ = x.updateEp0MaxPacket(slot_idx, dev.ep0_max_packet);
+                                                    configureXhciDeviceEndpoints(x, dev);
 
-                                                    // Also configure interrupt endpoints for any secondary composite interfaces
+                                                    // Configure composite interface records as well.
                                                     var sec_i = extra_start;
                                                     while (sec_i < usb_device_count) : (sec_i += 1) {
                                                         const sec_dev = &usb_devices[sec_i];
-                                                        if (sec_dev.active and sec_dev.ep_in != dev.ep_in) {
-                                                            _ = x.configureInterruptEndpoint(slot_idx, sec_dev.ep_in, sec_dev.ep_max_packet, sec_dev.ep_interval);
-                                                            x.queueInterruptTransfer(slot_idx, sec_dev.ep_in * 2 + 1, @intFromPtr(&sec_dev.report_buf), @min(@max(sec_dev.ep_max_packet, 8), 64));
+                                                        if (sec_dev.active) {
+                                                            configureXhciDeviceEndpoints(x, sec_dev);
                                                         }
                                                     }
                                                 } else {
@@ -601,9 +624,107 @@ pub fn init() void {
     }
 }
 
+fn configureXhciDeviceEndpoints(x: *xhci.XhciController, dev: *device.UsbDevice) void {
+    if (dev.xhci_slot_idx == 0 and dev.xhci_slot_id == 0) return;
+    const slot_idx: usize = dev.xhci_slot_idx;
+
+    // Configure the endpoint belonging to this logical interface.  A
+    // composite device has one UsbDevice record per HID interface, each with
+    // its own report buffer; scanning every interface here would make all
+    // records race on the same buffer.
+    var target_iface: ?*types.UsbInterface = null;
+    var if_idx: usize = 0;
+    while (if_idx < dev.interface_count) : (if_idx += 1) {
+        const candidate = &dev.interfaces[if_idx];
+        if (candidate.interface_num == dev.interface_num) {
+            target_iface = candidate;
+            break;
+        }
+    }
+
+    var shared_hid_endpoint = false;
+    var prior_idx: usize = 0;
+    while (prior_idx < usb_device_count) : (prior_idx += 1) {
+        const prior = &usb_devices[prior_idx];
+        if (prior != dev and prior.active and prior.xhci_intr_configured and
+            prior.xhci_slot_idx == dev.xhci_slot_idx and prior.xhci_slot_id == dev.xhci_slot_id and
+            prior.addr == dev.addr and prior.ep_in == dev.ep_in)
+        {
+            shared_hid_endpoint = true;
+            break;
+        }
+    }
+    if (shared_hid_endpoint) dev.xhci_intr_configured = true;
+
+    if (target_iface) |iface| {
+        if (iface.class_code == 0x03 and !shared_hid_endpoint) {
+            var ep_idx: usize = 0;
+            while (ep_idx < iface.endpoint_count) : (ep_idx += 1) {
+                const ep = &iface.endpoints[ep_idx];
+                if (!ep.active or !ep.isInput() or ep.transfer_type != .interrupt) continue;
+                const ep_num = ep.epNumber();
+                if (x.configureInterruptEndpoint(slot_idx, ep_num, ep.max_packet_size, ep.interval_ms)) {
+                    dev.xhci_intr_configured = true;
+                    x.queueInterruptTransfer(
+                        slot_idx,
+                        ep_num * 2 + 1,
+                        @intFromPtr(&dev.report_buf),
+                        @intCast(@min(@max(ep.max_packet_size, 8), 64)),
+                    );
+                } else {
+                    serial.serialWrite("[XHCI] HID endpoint configuration failed at EP");
+                    serial.serialWriteDec(ep_num);
+                    serial.serialWrite("\n");
+                }
+                break;
+            }
+        }
+    }
+
+    if (dev.ep_bulk_in != 0 and dev.ep_bulk_out != 0 and
+        !dev.xhci_bulk_in_configured and !dev.xhci_bulk_out_configured)
+    {
+        if (x.configureBulkEndpoints(slot_idx, dev.ep_bulk_in, dev.ep_bulk_in_max_pkt, dev.ep_bulk_out, dev.ep_bulk_out_max_pkt)) {
+            dev.xhci_bulk_in_configured = true;
+            dev.xhci_bulk_out_configured = true;
+        } else {
+            serial.serialWrite("[XHCI] bulk endpoint configuration failed\n");
+        }
+    } else {
+        if (dev.ep_bulk_in != 0 and !dev.xhci_bulk_in_configured) {
+            if (x.configureBulkEndpoint(slot_idx, dev.ep_bulk_in, true, dev.ep_bulk_in_max_pkt)) {
+                dev.xhci_bulk_in_configured = true;
+            }
+        }
+        if (dev.ep_bulk_out != 0 and !dev.xhci_bulk_out_configured) {
+            if (x.configureBulkEndpoint(slot_idx, dev.ep_bulk_out, false, dev.ep_bulk_out_max_pkt)) {
+                dev.xhci_bulk_out_configured = true;
+            }
+        }
+    }
+}
+
 fn processHidReport(dev: *device.UsbDevice, len: usize) void {
-    if (len == 0) return;
+    if (len == 0 or len > dev.report_buf.len) return;
+
     hid_core.processRawDeviceReport(dev, len);
+
+    // Composite receivers often expose keyboard and mouse interfaces on the
+    // same interrupt endpoint.  Only one physical QH is scheduled, so fan the
+    // report out to the other logical interface records instead of dropping
+    // the mouse half of the device.
+    if (dev.report_buf[0] == 1 or dev.report_buf[0] == 2) {
+        var alias_idx: usize = 0;
+        while (alias_idx < usb_device_count) : (alias_idx += 1) {
+            const alias = &usb_devices[alias_idx];
+            if (alias == dev or !alias.active or alias.ctrl_idx != dev.ctrl_idx or
+                alias.addr != dev.addr or alias.ep_in != dev.ep_in) continue;
+            if (alias.dev_type != .keyboard and alias.dev_type != .mouse) continue;
+            @memcpy(alias.report_buf[0..len], dev.report_buf[0..len]);
+            alias.packet_count +%= 1;
+            hid_core.processRawDeviceReport(alias, len);
+        }
+    }
 }
 
 var current_poll_xhci: ?*xhci.XhciController = null;
@@ -619,10 +740,14 @@ fn onXhciTransfer(slot_id: u8, dci: u8, rem_bytes: u32, comp_code: u32) void {
                     const max_p = @min(@max(d.ep_max_packet, 8), 64);
                     const actual_len: usize = if (max_p >= rem_bytes) @as(usize, @intCast(max_p - rem_bytes)) else max_p;
                     if (actual_len > 0) {
+                        d.packet_count +%= 1;
                         processHidReport(d, actual_len);
                     }
+                    x.queueInterruptTransfer(d.xhci_slot_idx, dci, @intFromPtr(&d.report_buf), @min(@max(d.ep_max_packet, 8), 64));
+                } else {
+                    _ = usbClearHalt(d, d.ep_in, true);
+                    x.queueInterruptTransfer(d.xhci_slot_idx, dci, @intFromPtr(&d.report_buf), @min(@max(d.ep_max_packet, 8), 64));
                 }
-                x.queueInterruptTransfer(d.xhci_slot_idx, dci, @intFromPtr(&d.report_buf), @min(@max(d.ep_max_packet, 8), 64));
                 break;
             }
         }
@@ -633,7 +758,7 @@ var in_usb_poll = false;
 
 // Asynchronous, non-blocking polling hook
 pub fn poll() void {
-    if (!initialized or usb_device_count == 0) return;
+    if (!initialized) return;
     if (in_usb_poll) return;
     in_usb_poll = true;
     defer in_usb_poll = false;
@@ -650,18 +775,26 @@ pub fn poll() void {
                 // Check if Active bit (bit 23) has cleared on the interrupt TD
                 const st = @as(*const volatile u32, @ptrCast(&dev.td.ctrl_status)).*;
                 if ((st & uhci.TD_CTRL_ACTIVE) == 0) {
-                    // Check for error bits (bits 22..17)
-                    if ((st & 0x007E0000) == 0) {
+                    // A NAK means "no report yet": the data toggle must stay
+                    // unchanged.  Real errors likewise must not be mistaken
+                    // for a successful packet, otherwise the next DATA0/1
+                    // phase is desynchronised.
+                    const had_nak = (st & uhci.TD_CTRL_NAK) != 0;
+                    const had_error = (st & (uhci.TD_CTRL_STALL | uhci.TD_CTRL_BABBLE |
+                        uhci.TD_CTRL_TIMEOUT | uhci.TD_CTRL_DATA_ERR)) != 0;
+                    if (!had_nak and !had_error) {
                         const act_len_field = st & 0x7FF;
                         const actual_len: usize = if (act_len_field == 0x7FF) 0 else @as(usize, @intCast(act_len_field + 1));
                         if (actual_len > 0) {
                             dev.packet_count +%= 1;
                             processHidReport(dev, actual_len);
                         }
+                        dev.toggle ^= 1;
+                    } else if ((st & uhci.TD_CTRL_STALL) != 0) {
+                        _ = usbClearHalt(dev, dev.ep_in, true);
                     }
 
-                    // Re-arm TD for next interrupt transfer non-blockingly
-                    dev.toggle ^= 1;
+                    // Re-arm TD for next interrupt transfer non-blockingly.
                     const max_p: u32 = @min(@max(dev.ep_max_packet, 8), 64);
                     dev.td.token = 0x69 | (@as(u32, dev.addr) << 8) | (@as(u32, dev.ep_in) << 15) | (@as(u32, dev.toggle) << 19) | ((max_p - 1) << 21);
                     dev.td.link = 1;
@@ -673,8 +806,10 @@ pub fn poll() void {
                 // Check if Active bit (bit 7) has cleared on the interrupt qTD
                 const tok = @as(*const volatile u32, @ptrCast(&dev.ehci_qtd.token)).*;
                 if ((tok & ehci.QTD_ACTIVE) == 0) {
-                    // Check error bits: bits 6:3 (Halted, Data Buffer Error, Babble, XactErr)
-                    if ((tok & 0x78) == 0) {
+                    // qTD errors (halted/buffer/babble/transaction) are not
+                    // successful reports and must not advance the data toggle.
+                    const had_error = (tok & 0x7C) != 0;
+                    if (!had_error) {
                         const max_p: u32 = @min(@max(dev.ep_max_packet, 8), 64);
                         const rem_bytes = (tok >> 16) & 0x7FFF;
                         const actual_len: usize = if (max_p >= rem_bytes) @as(usize, @intCast(max_p - rem_bytes)) else 0;
@@ -682,10 +817,12 @@ pub fn poll() void {
                             dev.packet_count +%= 1;
                             processHidReport(dev, actual_len);
                         }
+                        dev.toggle ^= 1;
+                    } else if ((tok & (1 << 6)) != 0) {
+                        _ = usbClearHalt(dev, dev.ep_in, true);
                     }
 
-                    // Re-arm qTD for next interrupt transfer non-blockingly
-                    dev.toggle ^= 1;
+                    // Re-arm qTD for next interrupt transfer non-blockingly.
                     const max_p: u32 = @min(@max(dev.ep_max_packet, 8), 64);
                     dev.ehci_qtd.next_qtd = 1;
                     dev.ehci_qtd.alt_next_qtd = 1;
@@ -904,12 +1041,47 @@ pub fn usbBulkTransfer(
                 return e.bulkTransfer(dev.addr, ep_num, is_in, t, mp, data);
             }
         },
+        .xhci => {
+            if (ctrl.inst_idx < xhci_count) {
+                return xhci_instances[ctrl.inst_idx].bulkTransfer(
+                    dev.xhci_slot_idx,
+                    ep_num,
+                    is_in,
+                    data,
+                );
+            }
+        },
         else => return null,
     }
     return null;
 }
 
-/// Clear a stalled endpoint using standard USB CLEAR_FEATURE(ENDPOINT_HALT).
+/// Reset and re-enable an xHCI bulk endpoint after a stall.
+pub fn recoverXhciBulkEndpoint(dev: *device.UsbDevice, ep_num: u8, is_in: bool) bool {
+    if (dev.xhci_slot_id == 0 or dev.ctrl_idx >= controller_count) return false;
+    const ctrl = &controllers[dev.ctrl_idx];
+    if (ctrl.ctrl_type != .xhci or ctrl.inst_idx >= xhci_count) return false;
+    const max_packet = if (is_in) dev.ep_bulk_in_max_pkt else dev.ep_bulk_out_max_pkt;
+    return xhci_instances[ctrl.inst_idx].recoverBulkEndpoint(
+        dev.xhci_slot_idx,
+        ep_num,
+        is_in,
+        max_packet,
+    );
+}
+
+pub fn recoverXhciInterruptEndpoint(dev: *device.UsbDevice, ep_num: u8) bool {
+    if (dev.xhci_slot_id == 0 or dev.ctrl_idx >= controller_count) return false;
+    const ctrl = &controllers[dev.ctrl_idx];
+    if (ctrl.ctrl_type != .xhci or ctrl.inst_idx >= xhci_count) return false;
+    return xhci_instances[ctrl.inst_idx].recoverInterruptEndpoint(
+        dev.xhci_slot_idx,
+        ep_num,
+        dev.ep_max_packet,
+        dev.ep_interval,
+    );
+}
+
 pub fn usbClearHalt(dev: *device.UsbDevice, ep_num: u8, is_in: bool) bool {
     const ep_addr = ep_num | (if (is_in) @as(u8, 0x80) else 0);
     const clear_pkt = types.UsbSetupPacket{
@@ -919,8 +1091,18 @@ pub fn usbClearHalt(dev: *device.UsbDevice, ep_num: u8, is_in: bool) bool {
         .wIndex = ep_addr,
         .wLength = 0,
     };
-    const maxp0: u8 = @intCast(@min(dev.ep_max_packet, 64));
-    return usbControlTransfer(dev.addr, maxp0, &clear_pkt, null, null);
+    const maxp0: u8 = @min(dev.ep0_max_packet, 64);
+    const ok = usbControlTransfer(dev.addr, maxp0, &clear_pkt, null, null);
+    if (ok and dev.xhci_slot_id != 0) {
+        if (ep_num == dev.ep_in and (dev.dev_type == .keyboard or dev.dev_type == .mouse)) {
+            _ = recoverXhciInterruptEndpoint(dev, ep_num);
+        } else if (ep_num == dev.ep_bulk_in and is_in) {
+            _ = recoverXhciBulkEndpoint(dev, ep_num, true);
+        } else if (ep_num == dev.ep_bulk_out and !is_in) {
+            _ = recoverXhciBulkEndpoint(dev, ep_num, false);
+        }
+    }
+    return ok;
 }
 
 /// Perform a USB bulk OUT transfer.

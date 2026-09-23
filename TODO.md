@@ -119,7 +119,7 @@
 - [x] Real-app matrix (`tools/fetch_apps.py` → samples/apps → disk.img): busybox ✓, uutils coreutils ✓ (`ls --version`, 14 MB Rust ELF), jq.exe loads+starts (crashes late-CRT — needs more UCRT), curl.exe/rg.exe hit remaining unimplemented imports, fastfetch = glibc-dynamic honestly rejected
 - [ ] fork/vfork/clone for the Linux personality (busybox sh needs it — `sh script` hangs at first external command)
 - [ ] Second-spawn race: a spawn right after another task's exit occasionally hangs inside file read (REGS show kernel spin, IF=0, rep-movs-sized RCX); single spawns and some sequences work — needs virtio/kalloc trace
-- [ ] xHCI HID bring-up: qemu-xhci detected+reset+running, PORTSC reads work (PP/PLS), but usb-kbd/usb-tablet never set CCS on any root port even though QEMU lists them on "Port 1/2" — likely internal USB2/USB3 hub topology of qemu-xhci; next step: enumerate via hub descriptors or test with `-device nec-usb-xhci`
+- [ ] xHCI downstream hub/hotplug: root-port `usb-kbd`/`usb-tablet` enumeration and interrupt/bulk paths now work on QEMU; internal USB2 hubs and reconnect events still need full traversal/teardown
 - [ ] Real time-of-day clock feeding gettimeofday/clock_gettime/_time64 (currently PIT ticks since boot)
 - [ ] Math double-args (sin/pow/...) need XMM state in InterruptFrame before UCRT math can bind
 

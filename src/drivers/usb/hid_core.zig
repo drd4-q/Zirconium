@@ -21,6 +21,7 @@ pub const HidDevice = struct {
     interface_num: u8 = 0,
     dev_type: types.UsbDeviceType = .unknown,
     is_wireless: bool = false,
+    ep0_max_packet: u8 = 8,
     num_lock: bool = true,
     caps_lock: bool = false,
     scroll_lock: bool = false,
@@ -56,10 +57,11 @@ pub fn setDeviceLeds(hid_dev: *HidDevice, num_lock: bool, caps_lock: bool, scrol
     const led_data = [_]u8{led_val};
 
     const pkt = usbhid.makeSetReportPacket(hid_dev.interface_num, usbhid.REPORT_TYPE_OUTPUT, 0, 1);
-    var ok = mod.usbControlTransfer(hid_dev.addr, 8, &pkt, &led_data, null);
+    const max_p0: u8 = @min(hid_dev.ep0_max_packet, 64);
+    var ok = mod.usbControlTransfer(hid_dev.addr, max_p0, &pkt, &led_data, null);
     if (!ok and hid_dev.is_wireless) {
         const pkt_id1 = usbhid.makeSetReportPacket(hid_dev.interface_num, usbhid.REPORT_TYPE_OUTPUT, 1, 1);
-        ok = mod.usbControlTransfer(hid_dev.addr, 8, &pkt_id1, &led_data, null);
+        ok = mod.usbControlTransfer(hid_dev.addr, max_p0, &pkt_id1, &led_data, null);
     }
     if (ok) {
         hid_dev.num_lock = num_lock;
@@ -93,6 +95,7 @@ pub fn registerHidDevice(dev_idx: usize, dev: *device.UsbDevice, iface_num: u8, 
         .interface_num = iface_num,
         .dev_type = dev_type,
         .is_wireless = dev.is_wireless,
+        .ep0_max_packet = dev.ep0_max_packet,
         .num_lock = hid_input.num_lock_state,
         .caps_lock = hid_input.caps_lock_state,
         .scroll_lock = hid_input.scroll_lock_state,
@@ -100,7 +103,7 @@ pub fn registerHidDevice(dev_idx: usize, dev: *device.UsbDevice, iface_num: u8, 
     };
 
     // 1. SET_PROTOCOL: Boot Protocol (0)
-    const max_p0: u8 = @intCast(@min(dev.ep_max_packet, 64));
+    const max_p0: u8 = @min(dev.ep0_max_packet, 64);
     const set_proto_pkt = usbhid.makeSetProtocolPacket(iface_num, usbhid.PROTOCOL_BOOT);
     _ = mod.usbControlTransfer(dev.addr, max_p0, &set_proto_pkt, null, null);
 
@@ -150,7 +153,6 @@ pub fn usbhidIrqIn(inst: *HidDevice, actual_len: usize) void {
 /// Process an incoming HID packet from an underlying UsbDevice buffer.
 pub fn processRawDeviceReport(dev: *device.UsbDevice, actual_len: usize) void {
     if (actual_len == 0) return;
-    dev.packet_count +%= 1;
 
     // Route report through generic HID driver with dynamic LED state callback
     hid_generic.processReport(

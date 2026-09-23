@@ -33,7 +33,9 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     vga.write(msg);
     vga.write("\n");
     var current_rbp: u64 = 0;
-    asm volatile ("movq %%rbp, %[rbp]" : [rbp] "=r" (current_rbp));
+    asm volatile ("movq %%rbp, %[rbp]"
+        : [rbp] "=r" (current_rbp),
+    );
     @import("system/panic.zig").printBacktrace(current_rbp);
     while (true) {
         asm volatile ("hlt");
@@ -106,6 +108,7 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     @import("drivers/virtio_blk.zig").init();
     @import("fs/fat16.zig").init();
     @import("drivers/usb.zig").init();
+    @import("net/mod.zig").refreshUsbNic();
     @import("drivers/mouse.zig").init();
     vga.write("[BOOT] Storage and input initialized\n");
 

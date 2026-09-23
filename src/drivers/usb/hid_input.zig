@@ -126,6 +126,8 @@ pub fn handleKeyboardReport(
     while (k < 8) : (k += 1) {
         const key = report[offset + k];
         if (key == 0) continue;
+        // 0x01/0x02 are the HID rollover-error usages, not key presses.
+        if (key == 0x01 or key == 0x02) continue;
 
         var was_pressed = false;
         var prev_k: usize = 2;
@@ -180,8 +182,12 @@ pub fn handleMouseReport(report: []const u8, prev_report: []u8) void {
     const dy = @as(i32, @as(i8, @bitCast(report[offset + 2])));
 
     const last_buttons = if (prev_report.len > 0) prev_report[0] else 0;
-    if (dx != 0 or dy != 0 or buttons != last_buttons) {
-        mouse.updateFromUsb(buttons, dx, dy);
+    const wheel = if (report.len >= offset + 4)
+        @as(i32, @as(i8, @bitCast(report[offset + 3])))
+    else
+        0;
+    if (dx != 0 or dy != 0 or wheel != 0 or buttons != last_buttons) {
+        mouse.updateFromUsbWithWheel(buttons, dx, dy, wheel);
     }
 
     if (prev_report.len > 0) {

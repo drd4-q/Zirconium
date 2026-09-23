@@ -285,7 +285,7 @@ pub const EhciController = struct {
                 const line_status = (status >> 10) & 0x03;
                 if (line_status == 0x01 and self.num_companions > 0) {
                     // Low-Speed device on EHCI -> release port to companion (Port Owner bit 13)
-                    writeMmio32(port_reg, status | (1 << 13));
+                    writeMmio32(port_reg, (status & ~@as(u32, 1 << 2)) | (1 << 13));
                     self.ports[p] = .{
                         .port = p + 1,
                         .connected = false,
@@ -297,7 +297,7 @@ pub const EhciController = struct {
                 }
 
                 // High-Speed / Full-Speed Reset: assert PR (bit 8) for 50ms, then deassert
-                writeMmio32(port_reg, (status & ~@as(u32, 0x0A)) | (1 << 8));
+                writeMmio32(port_reg, (status & ~@as(u32, 1 << 2)) | (1 << 8));
                 spinDelayMs(50);
                 writeMmio32(port_reg, readMmio32(port_reg) & ~@as(u32, 1 << 8));
                 spinDelayMs(20);
@@ -307,7 +307,7 @@ pub const EhciController = struct {
 
                 if (!enabled and self.num_companions > 0) {
                     // Full-Speed device on EHCI -> release port to companion
-                    writeMmio32(port_reg, status | (1 << 13));
+                    writeMmio32(port_reg, (status & ~@as(u32, 1 << 2)) | (1 << 13));
                     self.ports[p] = .{
                         .port = p + 1,
                         .connected = false,
@@ -342,7 +342,7 @@ pub const EhciController = struct {
         const port_reg = self.op_regs + 0x44 + (@as(usize, port_idx) * 4);
         var status = readMmio32(port_reg);
 
-        writeMmio32(port_reg, (status & ~@as(u32, 0x0A)) | (1 << 8));
+        writeMmio32(port_reg, (status & ~@as(u32, 1 << 2)) | (1 << 8));
         spinDelayMs(50);
         writeMmio32(port_reg, readMmio32(port_reg) & ~@as(u32, 1 << 8));
         spinDelayMs(20);
@@ -359,10 +359,21 @@ pub const EhciController = struct {
         data_out: ?[]const u8,
         data_in: ?[]u8,
     ) bool {
-        self.ctrl_setup_pkt.* = setup.*;
+        const requested_len: usize = @intCast(setup.wLength);
+        const supplied_len: usize = if (data_in) |d| d.len else if (data_out) |d| d.len else 0;
+        if (requested_len > 0 and supplied_len == 0) return false;
+        const data_len = @min(@min(requested_len, self.ctrl_buf.len), supplied_len);
+        var wire_setup = setup.*;
+        wire_setup.wLength = @intCast(data_len);
+        self.ctrl_setup_pkt.* = wire_setup;
+        @memset(self.ctrl_buf[0..], 0);
+        var reset_idx: usize = 0;
+        while (reset_idx < self.ctrl_qtds.len) : (reset_idx += 1) {
+            self.ctrl_qtds[reset_idx] = .{};
+        }
 
         // Update target address and max packet size in ctrl_qh
-        const mp: u32 = if (max_packet0 > 0) max_packet0 else 64;
+        const mp: u32 = @min(if (max_packet0 > 0) max_packet0 else 64, 64);
         self.ctrl_qh.ep_characteristics = (@as(u32, dev_addr) & 0x7F) |
             (2 << 12) | // High Speed (10b)
             (1 << 14) | // DTC
@@ -372,13 +383,15 @@ pub const EhciController = struct {
         self.ctrl_qtds[0].token = QTD_ACTIVE | QTD_PID_SETUP | QTD_3ERRORS | (@as(u32, 8) << 16);
         self.ctrl_qtds[0].buf[0] = @intCast(@intFromPtr(self.ctrl_setup_pkt));
         self.ctrl_qtds[0].buf[1] = 0;
+        self.ctrl_qtds[0].next_qtd = 1;
+        self.ctrl_qtds[0].alt_next_qtd = 1;
 
         var qtd_idx: usize = 1;
         var toggle: u32 = 1;
 
-        if (data_in) |din| {
+        if (data_in) |_| {
             var transferred: usize = 0;
-            const total = din.len;
+            const total = data_len;
             if (total > self.ctrl_buf.len) return false;
             while (transferred < total) {
                 if (qtd_idx + 1 >= self.ctrl_qtds.len) {
@@ -389,13 +402,14 @@ pub const EhciController = struct {
                 self.ctrl_qtds[qtd_idx - 1].next_qtd = @intCast(@intFromPtr(&self.ctrl_qtds[qtd_idx]));
                 self.ctrl_qtds[qtd_idx].token = QTD_ACTIVE | QTD_PID_IN | QTD_3ERRORS | (@as(u32, @intCast(chunk)) << 16) | (toggle << 31);
                 self.ctrl_qtds[qtd_idx].buf[0] = @intCast(@intFromPtr(&self.ctrl_buf[transferred]));
+                self.ctrl_qtds[qtd_idx].alt_next_qtd = 1;
                 toggle ^= 1;
                 transferred += chunk;
                 qtd_idx += 1;
             }
         } else if (data_out) |dout| {
             var transferred: usize = 0;
-            const total = dout.len;
+            const total = data_len;
             if (total > self.ctrl_buf.len) return false;
             while (transferred < total) {
                 if (qtd_idx + 1 >= self.ctrl_qtds.len) {
@@ -407,6 +421,7 @@ pub const EhciController = struct {
                 self.ctrl_qtds[qtd_idx - 1].next_qtd = @intCast(@intFromPtr(&self.ctrl_qtds[qtd_idx]));
                 self.ctrl_qtds[qtd_idx].token = QTD_ACTIVE | QTD_PID_OUT | QTD_3ERRORS | (@as(u32, @intCast(chunk)) << 16) | (toggle << 31);
                 self.ctrl_qtds[qtd_idx].buf[0] = @intCast(@intFromPtr(&self.ctrl_buf[transferred]));
+                self.ctrl_qtds[qtd_idx].alt_next_qtd = 1;
                 toggle ^= 1;
                 transferred += chunk;
                 qtd_idx += 1;
@@ -419,7 +434,7 @@ pub const EhciController = struct {
             return false;
         }
         self.ctrl_qtds[qtd_idx - 1].next_qtd = @intCast(@intFromPtr(&self.ctrl_qtds[qtd_idx]));
-        const is_read = (setup.bmRequestType & 0x80) != 0;
+        const is_read = (wire_setup.bmRequestType & 0x80) != 0;
         const status_pid = if (is_read) QTD_PID_OUT else QTD_PID_IN;
         self.ctrl_qtds[qtd_idx].token = QTD_ACTIVE | status_pid | QTD_3ERRORS | QTD_IOC | QTD_TOGGLE_1;
         self.ctrl_qtds[qtd_idx].buf[0] = 0;
@@ -454,7 +469,18 @@ pub const EhciController = struct {
                     if (err) return false;
 
                     if (data_in) |din| {
-                        @memcpy(din, self.ctrl_buf[0..din.len]);
+                        var actual_len: usize = 0;
+                        var data_qtd: usize = 1;
+                        var offset: usize = 0;
+                        while (data_qtd < qtd_idx) : (data_qtd += 1) {
+                            const tok = @as(*const volatile u32, @ptrCast(&self.ctrl_qtds[data_qtd].token)).*;
+                            const chunk = @min(data_len - offset, @as(usize, @intCast(mp)));
+                            const residual: usize = @intCast((tok >> 16) & 0x7FFF);
+                            actual_len += if (residual >= chunk) 0 else chunk - residual;
+                            offset += chunk;
+                        }
+                        if (actual_len > din.len) actual_len = din.len;
+                        @memcpy(din[0..actual_len], self.ctrl_buf[0..actual_len]);
                     }
                     return true;
                 }
@@ -488,7 +514,9 @@ pub const EhciController = struct {
                 (2 << 12) | // High Speed (10b)
                 (mp << 16);
 
-            if (!is_in) {
+            if (is_in) {
+                @memset(self.bulk_buf[0..chunk_total], 0);
+            } else {
                 @memcpy(self.bulk_buf[0..chunk_total], data[total_transferred .. total_transferred + chunk_total]);
             }
 
@@ -537,20 +565,31 @@ pub const EhciController = struct {
                 return null;
             }
 
+            var actual_chunk: usize = chunk_total;
             if (is_in) {
-                @memcpy(data[total_transferred .. total_transferred + chunk_total], self.bulk_buf[0..chunk_total]);
+                const residual: usize = @intCast((final_tok >> 16) & 0x7FFF);
+                actual_chunk = if (residual >= chunk_total) 0 else chunk_total - residual;
+                if (actual_chunk > 0) {
+                    @memcpy(data[total_transferred .. total_transferred + actual_chunk], self.bulk_buf[0..actual_chunk]);
+                }
             }
 
-            total_transferred += chunk_total;
+            total_transferred += actual_chunk;
+            if (actual_chunk < chunk_total) break;
         }
 
         return total_transferred;
     }
 
     pub fn linkInterruptQh(self: *EhciController, qh: *EhciQh) void {
+        self.linkInterruptQhScheduled(qh, 0, 1);
+    }
+
+    pub fn linkInterruptQhScheduled(self: *EhciController, qh: *EhciQh, start: usize, interval: usize) void {
         const qh_phys: u32 = @intCast(@intFromPtr(qh) | 0x02); // 0x02 = QH
-        var f: usize = 0;
-        while (f < 1024) : (f += 1) {
+        const step = @max(interval, 1);
+        var f = start % 1024;
+        while (f < 1024) : (f += step) {
             self.periodic_list[f] = qh_phys;
         }
     }

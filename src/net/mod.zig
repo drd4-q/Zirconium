@@ -26,6 +26,17 @@ pub fn hasNic() bool {
     return active_nic != .none;
 }
 
+/// USB Wi-Fi is discovered after the initial PCI network probe.  Refresh the
+/// selection when no built-in NIC claimed the bus; do not displace a working
+/// e1000/RTL8169 device.
+pub fn refreshUsbNic() void {
+    if (!rtl8188eu.initialized or active_nic != .none) return;
+    active_nic = .usb_wifi;
+    @memcpy(&our_mac, &rtl8188eu.mac);
+    arp_cache.init();
+    port.serialWrite("[NET] USB Wi-Fi selected after USB enumeration\n");
+}
+
 pub fn init() void {
     if (e1000.initialized) {
         active_nic = .e1000;
@@ -196,18 +207,24 @@ pub fn sendPacket(dst: [6]u8, eth_type_val: u16, payload: []const u8) void {
     const total = 14 + payload.len;
     if (total > send_buf.len) return;
 
-    send_buf[0] = dst[0]; send_buf[1] = dst[1]; send_buf[2] = dst[2];
-    send_buf[3] = dst[3]; send_buf[4] = dst[4]; send_buf[5] = dst[5];
-    send_buf[6] = our_mac[0]; send_buf[7] = our_mac[1];
-    send_buf[8] = our_mac[2]; send_buf[9] = our_mac[3];
-    send_buf[10] = our_mac[4]; send_buf[11] = our_mac[5];
+    send_buf[0] = dst[0];
+    send_buf[1] = dst[1];
+    send_buf[2] = dst[2];
+    send_buf[3] = dst[3];
+    send_buf[4] = dst[4];
+    send_buf[5] = dst[5];
+    send_buf[6] = our_mac[0];
+    send_buf[7] = our_mac[1];
+    send_buf[8] = our_mac[2];
+    send_buf[9] = our_mac[3];
+    send_buf[10] = our_mac[4];
+    send_buf[11] = our_mac[5];
     send_buf[12] = @intCast(eth_type_val >> 8);
     send_buf[13] = @intCast(eth_type_val & 0xFF);
     @memcpy(send_buf[14 .. 14 + payload.len], payload);
 
     sendFrame(send_buf[0..total]);
 }
-
 
 pub fn printIp(ip: [4]u8) void {
     vga.writeDec(ip[0]);
