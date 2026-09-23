@@ -221,17 +221,6 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
 
     fb_type = @as(u32, @intCast(mbi[109]));
 
-<<<<<<< HEAD
-    if (fb_addr == 0 or fb_width == 0 or fb_height == 0) return;
-    if (fb_bpp != 32 and fb_bpp != 24) return;
-    if (fb_pitch == 0) {
-        fb_pitch = fb_width * (fb_bpp / 8);
-    }
-
-    // Ensure framebuffer range is identity-mapped in page tables (crucial if fb_addr >= 8GB)
-    const total_fb_bytes = @as(u64, fb_pitch) * fb_height;
-    mapFbRange(fb_addr, total_fb_bytes);
-=======
     if (fb_addr == 0 or fb_width == 0 or fb_height == 0) {
         serial.serialWrite("[FB] Degenerate framebuffer info; staying in text mode\n");
         return;
@@ -246,6 +235,9 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
         return;
     }
     fb_bytes_pp = fb_bpp / 8;
+    if (fb_pitch == 0) {
+        fb_pitch = fb_width * fb_bytes_pp;
+    }
 
     serial.serialWrite("[FB] LFB ");
     serial.serialWriteDec(fb_width);
@@ -256,7 +248,10 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
     serial.serialWrite(" @0x");
     serial.serialWriteHex(@truncate(fb_addr));
     serial.serialWrite("\n");
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
+
+    // Ensure framebuffer range is identity-mapped in page tables (crucial if fb_addr >= 8GB)
+    const total_fb_bytes = @as(u64, fb_pitch) * fb_height;
+    mapFbRange(fb_addr, total_fb_bytes);
 
     cols = fb_width / char_w;
     rows = fb_height / char_h;
@@ -331,24 +326,7 @@ pub fn putPixel(x: u32, y: u32, r: u8, g: u8, b: u8) void {
         markDirty(x, y);
         return;
     }
-<<<<<<< HEAD
-    if (fb_bpp == 24) {
-        const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 3;
-        const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
-        ptr[0] = b;
-        ptr[1] = g;
-        ptr[2] = r;
-        return;
-    }
-    const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 4;
-    const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
-    ptr[0] = b;
-    ptr[1] = g;
-    ptr[2] = r;
-    ptr[3] = 0;
-=======
     lfbPut(x, y, (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b));
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
 }
 
 pub fn getPixel(x: u32, y: u32) u32 {
@@ -356,18 +334,7 @@ pub fn getPixel(x: u32, y: u32) u32 {
     if (shadow_pixels != 0 and x < fb_width and y < fb_height) {
         return shadow[@as(u64, y) * fb_width + x];
     }
-<<<<<<< HEAD
-    if (fb_bpp == 24) {
-        const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 3;
-        const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
-        return (@as(u32, ptr[2]) << 16) | (@as(u32, ptr[1]) << 8) | @as(u32, ptr[0]);
-    }
-    const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 4;
-    const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
-    return (@as(u32, ptr[2]) << 16) | (@as(u32, ptr[1]) << 8) | @as(u32, ptr[0]);
-=======
     return lfbGet(x, y);
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
 }
 
 // LFB-only accessors: bypass the shadow buffer and dirty tracking entirely.
@@ -376,40 +343,12 @@ pub fn getPixel(x: u32, y: u32) u32 {
 // shadow -> flush pipeline.
 pub fn rawPutPixel(x: u32, y: u32, r: u8, g: u8, b: u8) void {
     if (x >= fb_width or y >= fb_height) return;
-<<<<<<< HEAD
-    if (fb_bpp == 24) {
-        const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 3;
-        const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
-        ptr[0] = b;
-        ptr[1] = g;
-        ptr[2] = r;
-        return;
-    }
-    const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 4;
-    const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
-    ptr[0] = b;
-    ptr[1] = g;
-    ptr[2] = r;
-    ptr[3] = 0;
-=======
     lfbPut(x, y, (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b));
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
 }
 
 pub fn rawPixel(x: u32, y: u32) u32 {
     if (x >= fb_width or y >= fb_height) return 0;
-<<<<<<< HEAD
-    if (fb_bpp == 24) {
-        const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 3;
-        const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
-        return (@as(u32, ptr[2]) << 16) | (@as(u32, ptr[1]) << 8) | @as(u32, ptr[0]);
-    }
-    const offset = @as(u64, y) * fb_pitch + @as(u64, x) * 4;
-    const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
-    return (@as(u32, ptr[2]) << 16) | (@as(u32, ptr[1]) << 8) | @as(u32, ptr[0]);
-=======
     return lfbGet(x, y);
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
 }
 
 pub fn markDirtyRect(x: u32, y: u32, w: u32, h: u32) void {
@@ -446,39 +385,6 @@ pub fn flush() void {
 
     const w = x1 - x0;
     var y: u32 = y0;
-<<<<<<< HEAD
-    if (fb_bpp == 24) {
-        while (y < y1) : (y += 1) {
-            const row_off = @as(u64, y) * fb_width + x0;
-            const src: [*]const u32 = shadow + row_off;
-            const dst_off: u64 = @as(u64, y) * fb_pitch + @as(u64, x0) * 3;
-            const dst: [*]volatile u8 = @ptrFromInt(fb_addr + dst_off);
-            var x: u32 = 0;
-            while (x < w) : (x += 1) {
-                const px = src[x];
-                dst[x * 3 + 0] = @intCast(px & 0xFF);
-                dst[x * 3 + 1] = @intCast((px >> 8) & 0xFF);
-                dst[x * 3 + 2] = @intCast((px >> 16) & 0xFF);
-            }
-        }
-    } else {
-        while (y < y1) : (y += 1) {
-            const row_off = @as(u64, y) * fb_width + x0;
-            const src: [*]const u32 = shadow + row_off;
-            const dst_off: u64 = @as(u64, y) * fb_pitch + @as(u64, x0) * 4;
-            const dst: [*]volatile u32 = @ptrFromInt(fb_addr + dst_off);
-
-            // Copy 64-bit qwords (2 pixels per store) to minimize MMIO wait states
-            const src64: [*]const u64 = @ptrCast(@alignCast(src));
-            const dst64: [*]volatile u64 = @ptrCast(@alignCast(dst));
-            const w64 = w / 2;
-            var x: u32 = 0;
-            while (x < w64) : (x += 1) {
-                dst64[x] = src64[x];
-            }
-            if ((w & 1) != 0) {
-                dst[w - 1] = src[w - 1];
-=======
     while (y < y1) : (y += 1) {
         const row_off = @as(u64, y) * fb_width + x0;
         const src: [*]const u32 = shadow + row_off;
@@ -492,7 +398,6 @@ pub fn flush() void {
             var x: u32 = 0;
             while (x < w) : (x += 1) {
                 lfbPut(x0 + x, y, src[x]);
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
             }
         }
     }
@@ -521,24 +426,8 @@ pub fn fillRect(px: u32, py: u32, pw: u32, ph: u32, r: u8, g: u8, b: u8) void {
     }
 
     var y: u32 = y0;
-<<<<<<< HEAD
-    if (fb_bpp == 24) {
-        while (y < y1) : (y += 1) {
-            const offset = @as(u64, y) * fb_pitch + @as(u64, x0) * 3;
-            const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
-            var x: u32 = 0;
-            while (x < w) : (x += 1) {
-                ptr[x * 3 + 0] = b;
-                ptr[x * 3 + 1] = g;
-                ptr[x * 3 + 2] = r;
-            }
-        }
-    } else {
-        while (y < y1) : (y += 1) {
-=======
     while (y < y1) : (y += 1) {
         if (fb_bytes_pp == 4) {
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
             const offset = @as(u64, y) * fb_pitch + @as(u64, x0) * 4;
             const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
             var x: u32 = 0;
@@ -548,14 +437,11 @@ pub fn fillRect(px: u32, py: u32, pw: u32, ph: u32, r: u8, g: u8, b: u8) void {
                 ptr[x * 4 + 2] = r;
                 ptr[x * 4 + 3] = 0;
             }
-<<<<<<< HEAD
-=======
         } else {
             var x: u32 = 0;
             while (x < w) : (x += 1) {
                 lfbPut(x0 + x, y, col);
             }
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
         }
     }
 }
@@ -759,29 +645,6 @@ pub fn scrollUp() void {
             const src_sh: [*]const u32 = shadow + @as(u64, py) * fb_width;
             @memcpy(dst_sh[0..text_w], src_sh[0..text_w]);
 
-<<<<<<< HEAD
-            if (fb_bpp == 24) {
-                const dst_lfb: [*]volatile u8 = @ptrFromInt(fb_addr + @as(u64, py - row_px) * fb_pitch);
-                var x: usize = 0;
-                while (x < text_w) : (x += 1) {
-                    const px = src_sh[x];
-                    dst_lfb[x * 3 + 0] = @intCast(px & 0xFF);
-                    dst_lfb[x * 3 + 1] = @intCast((px >> 8) & 0xFF);
-                    dst_lfb[x * 3 + 2] = @intCast((px >> 16) & 0xFF);
-                }
-            } else {
-                const dst_lfb: [*]volatile u32 = @ptrFromInt(fb_addr + @as(u64, py - row_px) * fb_pitch);
-                const src64: [*]const u64 = @ptrCast(@alignCast(src_sh));
-                const dst64: [*]volatile u64 = @ptrCast(@alignCast(dst_lfb));
-                const count64 = text_w / 2;
-                var x: usize = 0;
-                while (x < count64) : (x += 1) {
-                    dst64[x] = src64[x];
-                }
-                if ((text_w & 1) != 0) {
-                    dst_lfb[text_w - 1] = src_sh[text_w - 1];
-                }
-=======
             // Byte-wise row copy works for any bpp since both rows start at
             // x=0 (offsets are just y * pitch).
             const dst_lfb: [*]volatile u8 = @ptrFromInt(fb_addr + @as(u64, py - row_px) * fb_pitch);
@@ -790,7 +653,6 @@ pub fn scrollUp() void {
             var b: usize = 0;
             while (b < row_bytes) : (b += 1) {
                 dst_lfb[b] = src_lfb[b];
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
             }
         }
 

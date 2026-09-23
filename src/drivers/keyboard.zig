@@ -103,10 +103,7 @@ pub fn pushScancode(scancode: u8) void {
 /// Inject an already-decoded character (USB HID path). The ring carries the
 /// same values pollKey() hands out: ASCII for printable keys, KEY_* specials.
 pub fn injectChar(ch: u8) void {
-    const next = (ring_head + 1) % RING_SIZE;
-    if (next == ring_tail) return; // ring full
-    scancode_ring[ring_head] = ch;
-    ring_head = next;
+    pushKey(ch);
 }
 
 fn readScancode() ?u8 {

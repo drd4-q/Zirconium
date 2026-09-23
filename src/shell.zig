@@ -29,6 +29,7 @@ const vfs = @import("fs/vfs.zig");
 const smp = @import("arch/smp.zig");
 const acpi = @import("arch/acpi.zig");
 const usb_prog = @import("programs/usb.zig");
+const usb_drv = @import("drivers/usb.zig");
 const dillo_prog = @import("programs/dillo.zig");
 
 const HISTORY_SIZE: usize = 16;
@@ -110,7 +111,7 @@ var cmd_buf: [CMD_MAX]u8 = undefined;
 pub fn run() void {
     root.serial.serialWrite("[SHELL] run: enter\n");
     kb.init();
-<<<<<<< HEAD
+    root.serial.serialWrite("[SHELL] run: keyboard ready\n");
 
     pci.scan();
 
@@ -130,9 +131,6 @@ pub fn run() void {
     @import("fs/fat16.zig").init();
 
     mouse.init();
-=======
-    root.serial.serialWrite("[SHELL] run: keyboard ready\n");
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
 
     root.scheduler_ready = true;
 
@@ -207,153 +205,9 @@ fn execute(cmd: []const u8) void {
     const cmd_name = line[0..cmd_end];
     const args = if (args_start < line.len) line[args_start..] else "";
 
-<<<<<<< HEAD
-    if (eql(cmd_name, "help")) {
-        printHelp();
-    } else if (eql(cmd_name, "info")) {
-        info.run();
-    } else if (eql(cmd_name, "calc")) {
-        calc.run();
-    } else if (eql(cmd_name, "color")) {
-        color.run();
-    } else if (eql(cmd_name, "clock")) {
-        clock_mod.run();
-    } else if (eql(cmd_name, "ping")) {
-        ping_mod.run(args);
-    } else if (eql(cmd_name, "get") or eql(cmd_name, "wget")) {
-        web.run(args);
-    } else if (eql(cmd_name, "dillo")) {
-        dillo_prog.run(args);
-    } else if (eql(cmd_name, "net")) {
-        netinfo.run();
-    } else if (eql(cmd_name, "sysinfo")) {
-        sysinfo.run();
-    } else if (eql(cmd_name, "mem")) {
-        mem_mod.run();
-    } else if (eql(cmd_name, "ps")) {
-        showPs();
-    } else if (eql(cmd_name, "fib")) {
-        fib.run();
-    } else if (eql(cmd_name, "lua")) {
-        lua_prog.run();
-        vga.clear();
-        printBanner();
-    } else if (eql(cmd_name, "user")) {
-        const sched = root.scheduler;
-        const user_test_bin = @import("user_test_bin");
-        vga.write("[SHELL] Spawning user-space ELF task...\n");
-        if (sched.spawnProgramImage(&user_test_bin.data, "user_test")) |task_id| {
-            sched.runTask(task_id);
-        } else |err| {
-            vga.write("[SHELL] Error: failed to spawn user task: ");
-            vga.write(@errorName(err));
-            vga.write("\n");
-        }
-    } else if (eql(cmd_name, "exec")) {
-        cmdExec(args);
-    } else if (eql(cmd_name, "save")) {
-        cmdSave(args);
-    } else if (eql(cmd_name, "matrix")) {
-
-        matrix.run();
-        vga.clear();
-        printBanner();
-    } else if (eql(cmd_name, "clear") or eql(cmd_name, "cls")) {
-        vga.clear();
-    } else if (eql(cmd_name, "halt")) {
-        vga.setColor(.light_red, .black);
-        vga.write("\n  System halted.\n");
-        root.serial.serialWrite("\n[BOOT] System halted by user.\n");
-        while (true) {
-            asm volatile ("cli; hlt");
-        }
-    } else if (eql(cmd_name, "reboot")) {
-        vga.setColor(.yellow, .black);
-        vga.write("\n  Rebooting...\n");
-        port_io.outb(0x92, 0x03);
-        while (true) {
-            asm volatile ("cli; hlt");
-        }
-    } else if (eql(cmd_name, "set")) {
-        cmdSet(args);
-    } else if (eql(cmd_name, "unset")) {
-        cmdUnset(args);
-    } else if (eql(cmd_name, "env")) {
-        cmdEnv();
-    } else if (eql(cmd_name, "mouse")) {
-        showMouse();
-    } else if (eql(cmd_name, "resolution")) {
-        cmdResolution(args);
-    } else if (eql(cmd_name, "gui")) {
-        gui.run();
-        vga.clear();
-        printBanner();
-    } else if (eql(cmd_name, "dhcp")) {
-        dhcp_mod.run();
-    } else if (eql(cmd_name, "smp") or eql(cmd_name, "cpuinfo")) {
-        showSmp();
-    } else if (eql(cmd_name, "usb")) {
-        if (eql(args, "wifi")) {
-            usb_prog.runWifi();
-        } else if (eql(args, "storage") or eql(args, "disk")) {
-            usb_prog.runStorage();
-        } else {
-            usb_prog.run();
-        }
-    } else if (eql(cmd_name, "lsusb")) {
-        usb_prog.run();
-    } else if (eql(cmd_name, "acpi")) {
-        showAcpi();
-    } else if (eql(cmd_name, "arpcache")) {
-        arp_cache.printCache();
-    } else if (eql(cmd_name, "nslookup")) {
-        cmdNslookup(args);
-    } else if (eql(cmd_name, "ls")) {
-        files.cmdLs(args);
-    } else if (eql(cmd_name, "cat")) {
-        files.cmdCat(args);
-    } else if (eql(cmd_name, "touch")) {
-        files.cmdTouch(args);
-    } else if (eql(cmd_name, "mkdir")) {
-        files.cmdMkdir(args);
-    } else if (eql(cmd_name, "rm")) {
-        files.cmdRm(args);
-    } else if (eql(cmd_name, "write")) {
-        files.cmdWrite(args);
-    } else if (eql(cmd_name, "cd")) {
-        files.cmdCd(args);
-    } else if (eql(cmd_name, "mount")) {
-        vfs.printMounts();
-    } else if (eql(cmd_name, "nano")) {
-        vga.clear();
-        nano_prog.run(args);
-        vga.clear();
-        printBanner();
-    } else {
-        if (resolveExecutablePath(cmd_name)) |exec_path| {
-            vga.setColor(.light_cyan, .black);
-            vga.write("[SHELL] Executing ");
-            vga.write(exec_path);
-            vga.write("...\n");
-            vga.setColor(.white, .black);
-
-            const sched = root.scheduler;
-            const task_id = sched.spawnProgram(exec_path, cmd) catch |err| {
-                vga.setColor(.light_red, .black);
-                vga.write("[SHELL] Error: failed to spawn '");
-                vga.write(exec_path);
-                vga.write("': ");
-                vga.write(@errorName(err));
-                vga.write("\n");
-                vga.setColor(.white, .black);
-                return;
-            };
-            sched.runTask(task_id);
-=======
     for (command_table) |entry| {
         if (eql(entry.name, cmd_name)) {
             entry.run(args);
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
             return;
         }
     }
@@ -402,8 +256,15 @@ fn runDhcp(_: []const u8) void {
 fn runArpcache(_: []const u8) void {
     arp_cache.printCache();
 }
-fn runUsb(_: []const u8) void {
-    usb_prog.run();
+fn runUsb(args: []const u8) void {
+    // Dispatch helper matching eql(cmd_name, "usb") and eql(cmd_name, "lsusb")
+    if (eql(args, "wifi")) {
+        usb_prog.runWifi();
+    } else if (eql(args, "storage") or eql(args, "disk")) {
+        usb_prog.runStorage();
+    } else {
+        usb_prog.run();
+    }
 }
 fn runMount(_: []const u8) void {
     vfs.printMounts();
@@ -1278,12 +1139,6 @@ fn readLineEnhanced(buf: []u8, max_len: usize) usize {
                 pos += 1;
                 vga.putChar(ch);
             }
-<<<<<<< HEAD
-        } else {
-            asm volatile ("sti\nhlt");
-        }
-=======
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
     }
     return pos;
 }

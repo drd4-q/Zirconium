@@ -202,12 +202,7 @@ fn ramfsClose(fs: *vfs.FileSystem, handle: *vfs.FileHandle) void {
     // Handle storage belongs to vfs.open_files[], not to this filesystem.
     // Node data is freed by truncate/unlink paths.
     _ = fs;
-<<<<<<< HEAD
-    if (vfs.isStaticHandle(handle)) return;
-    kalloc.kfree(@ptrFromInt(@intFromPtr(handle)));
-=======
     _ = handle;
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
 }
 
 fn ramfsRead(fs: *vfs.FileSystem, handle: *vfs.FileHandle, buf: []u8) usize {

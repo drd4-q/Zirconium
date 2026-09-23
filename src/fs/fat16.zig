@@ -48,16 +48,13 @@ const FileInfo = struct {
     file_size: u32,
     parent_cluster: u16 = 0, // cluster of the directory holding this file (0 = root)
     used: bool = false,
-<<<<<<< HEAD
     ref_count: usize = 0,
-=======
     // Sequential-read cache: the chain position of the last read. Without it
     // every read() restarts at first_cluster, making large sequential reads
     // quadratic (a 1 MB binary took minutes through virtio).
     cur_valid: bool = false,
     cur_cluster: u16 = 0,
     cur_base: u64 = 0, // byte offset of cur_cluster within the file
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
 };
 
 var boot_sector: Fat16BootSector = undefined;
@@ -999,23 +996,10 @@ fn tryMount(dev: *blockdev.BlockDevice) bool {
         .total_sectors_32 = @as(u32, buf[32]) | (@as(u32, buf[33]) << 8) | (@as(u32, buf[34]) << 16) | (@as(u32, buf[35]) << 24),
     };
 
-<<<<<<< HEAD
     // Validate FAT16 characteristics
     if (boot_sector.bytes_per_sector != SECTOR_SIZE) return false;
     if (boot_sector.fat_size_sectors == 0) return false;
     if (boot_sector.sectors_per_cluster == 0) return false;
-=======
-    // Validate
-    if (boot_sector.bytes_per_sector != SECTOR_SIZE or boot_sector.fat_size_sectors == 0) {
-        serial.serialWrite("[FAT16] No FAT16 filesystem found (bytes/sector=");
-        serial.serialWriteDec(boot_sector.bytes_per_sector);
-        serial.serialWrite(", fat size=");
-        serial.serialWriteDec(boot_sector.fat_size_sectors);
-        serial.serialWrite(") — formatting blank disk\n");
-        _ = format();
-        return;
-    }
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
 
     // Calculate layout
     fat_start_sector = boot_sector.reserved_sectors;
@@ -1032,22 +1016,15 @@ fn tryMount(dev: *blockdev.BlockDevice) bool {
     serial.serialWriteDec(boot_sector.fat_size_sectors);
     serial.serialWrite(", root entries=");
     serial.serialWriteDec(boot_sector.root_entry_count);
-<<<<<<< HEAD
-=======
     const eff_total = if (boot_sector.total_sectors_16 != 0)
         @as(u64, boot_sector.total_sectors_16)
     else
         @as(u64, boot_sector.total_sectors_32);
     serial.serialWrite(", total sectors=");
     serial.serialWriteDec(eff_total);
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
     serial.serialWrite("\n");
 
-    tryMount();
-}
-
-pub fn isMounted() bool {
-    return fs_mounted;
+    return mountFs();
 }
 
 /// Forget the current mount so a following format() can register a fresh one.
@@ -1184,10 +1161,7 @@ pub fn format() bool {
     serial.serialWriteDec(fat_size);
     serial.serialWrite(" sectors)\n");
 
-    fat_dev = dev;
-    tryMount();
-    _ = &zeros;
-    return fs_mounted;
+    return tryMount(dev);
 }
 
 /// Count free clusters by walking FAT#0 (one sector read per 256 entries).
@@ -1241,8 +1215,8 @@ pub fn printInfo() void {
     vga.write(" clusters)\n");
 }
 
-fn tryMount() void {
-    if (fs_mounted) return;
+fn mountFs() bool {
+    if (fs_mounted) return true;
     var fs = vfs.FileSystem{
         .name = undefined,
         .mount_point = undefined,
@@ -1290,11 +1264,7 @@ pub fn init() void {
     }
     serial.serialWrite("[FAT16] No FAT16 filesystem found on any block device\n");
 }
-<<<<<<< HEAD
 
 pub fn isMounted() bool {
     return fs_mounted;
 }
-
-=======
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db

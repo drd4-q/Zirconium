@@ -288,7 +288,7 @@ class TestContext:
                 timeout=35.0,
                 name="UHCI-HID-Boot"
             )
-            self.cached_uhci_hid_log = runner.run(stop_pattern="[USB] Subsystem initialized with")
+            self.cached_uhci_hid_log = runner.run(stop_pattern="[USER-HEAP] free + reuse OK")
         return self.cached_uhci_hid_log
 
     def get_multi_usb_log(self) -> str:

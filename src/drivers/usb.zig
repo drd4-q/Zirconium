@@ -1,4 +1,5 @@
 const std = @import("std");
+const pci = @import("pci.zig");
 pub const types = @import("usb/types.zig");
 pub const dma = @import("usb/dma.zig");
 pub const pci_detect = @import("usb/pci_detect.zig");
@@ -96,7 +97,6 @@ pub fn getControllers() []UsbController {
     return controllers[0..controller_count];
 }
 
-<<<<<<< HEAD
 pub fn getControllerCount() usize {
     return controller_count;
 }
@@ -107,39 +107,11 @@ pub fn getDevices() []UsbDevice {
 
 pub fn getDeviceCount() usize {
     return usb_device_count;
-=======
-    // Bring up real hardware behind any xHCI controller we found.
-    for (controllers[0..controller_count]) |*ctrl| {
-        if (ctrl.ctrl_type == .xhci) {
-            var probe_dev = pci.PciDevice{
-                .bus = ctrl.bus,
-                .dev = ctrl.dev,
-                .func = ctrl.func,
-                .vendor_id = ctrl.vendor_id,
-                .device_id = ctrl.device_id,
-                .class = 0x0C,
-                .subclass = 0x03,
-                .prog_if = 0x30,
-                .bar0 = @intCast(ctrl.mmio_base & 0xFFFFFFFF),
-                .bar1 = @intCast(ctrl.mmio_base >> 32),
-                .irq = ctrl.irq,
-            };
-            if (@import("xhci.zig").init(&probe_dev)) {
-                xhci_ready = true;
-                break;
-            }
-        }
-    }
-
-    initialized = true;
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
 }
-
-var xhci_ready: bool = false;
 
 /// Drain USB HID events (called from the scheduler tick).
 pub fn pollHid() void {
-    if (xhci_ready) @import("xhci.zig").pollHid();
+    poll();
 }
 
 pub fn printUsbStatus(writeFn: *const fn (s: []const u8) void, writeDecFn: *const fn (v: u64) void, writeHexFn: *const fn (v: u64) void) void {

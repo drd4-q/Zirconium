@@ -275,9 +275,11 @@ pub fn enumerateDevice(
     while (if_idx < iface_count) : (if_idx += 1) {
         const iface = &dev_out.interfaces[if_idx];
         if (iface.class_code == 0x03) {
-            // SET_PROTOCOL: 0 = Boot Protocol
-            const set_proto_pkt = hid.makeSetProtocolPacket(iface.interface_num, hid.PROTOCOL_BOOT);
-            _ = ctrl_transfer_fn(new_addr, max_packet0, &set_proto_pkt, null, null);
+            // SET_PROTOCOL: 0 = Boot Protocol (only valid for boot interface subclass)
+            if (iface.subclass_code == 0x01) {
+                const set_proto_pkt = hid.makeSetProtocolPacket(iface.interface_num, hid.PROTOCOL_BOOT);
+                _ = ctrl_transfer_fn(new_addr, max_packet0, &set_proto_pkt, null, null);
+            }
 
             // SET_IDLE: 0 = Report on change
             const set_idle_pkt = hid.makeSetIdlePacket(iface.interface_num, 0, 0);

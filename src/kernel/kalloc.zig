@@ -112,14 +112,10 @@ pub fn kfree(ptr: [*]u8) void {
     free_count += 1;
     used_size -= block.size + @sizeOf(BlockHeader);
 
-<<<<<<< HEAD
-    // Merge with adjacent free blocks
-=======
     // Insert FIRST, then merge: mergeBlocks unlinks absorbed neighbours, so
     // merging before insertion would re-insert a node that prev already
     // swallowed (classic double-free on the next allocation cycle).
     addToFreeList(block);
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
     mergeBlocks(block);
 }
 
@@ -182,31 +178,6 @@ fn splitBlock(block: *BlockHeader, needed: usize) void {
     block.size = needed;
 }
 
-<<<<<<< HEAD
-fn mergeBlocks(block: *BlockHeader) void {
-    // Merge with next only if contiguous in memory
-    if (block.next) |next| {
-        const block_end = @intFromPtr(block) + @sizeOf(BlockHeader) + block.size;
-        if (next.free and block_end == @intFromPtr(next)) {
-            block.size += @sizeOf(BlockHeader) + next.size;
-            block.next = next.next;
-            if (next.next) |nn| {
-                nn.prev = block;
-            }
-        }
-    }
-
-    // Merge with previous only if contiguous in memory
-    if (block.prev) |prev| {
-        const prev_end = @intFromPtr(prev) + @sizeOf(BlockHeader) + prev.size;
-        if (prev.free and prev_end == @intFromPtr(block)) {
-            prev.size += @sizeOf(BlockHeader) + block.size;
-            prev.next = block.next;
-            if (block.next) |nn| {
-                nn.prev = prev;
-            }
-        }
-=======
 /// Insert into the free list ordered by ADDRESS. mergeBlocks assumes that
 /// list neighbours are memory-adjacent, so an unordered (LIFO) insert here
 /// used to create fake "merged" blocks spanning unrelated memory — any large
@@ -226,7 +197,6 @@ fn addToFreeList(block: *BlockHeader) void {
     while (cur.next) |n| {
         if (@intFromPtr(n) > addr) break;
         cur = n;
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
     }
     block.next = cur.next;
     block.prev = cur;
@@ -234,8 +204,6 @@ fn addToFreeList(block: *BlockHeader) void {
     cur.next = block;
 }
 
-<<<<<<< HEAD
-=======
 fn mergeBlocks(block: *BlockHeader) void {
     // Merge with the NEXT block only when it is physically adjacent.
     if (block.next) |next| {
@@ -277,7 +245,6 @@ fn removeBlock(block: *BlockHeader) void {
     }
 }
 
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
 fn expandHeap(min_needed: usize) bool {
     const pages_needed = (min_needed + 4095) / 4096;
     const new_pages = pmm.allocPages(pages_needed) orelse return false;
@@ -300,37 +267,8 @@ fn expandHeap(min_needed: usize) bool {
     const new_block: *BlockHeader = @ptrFromInt(new_pages);
     new_block.size = new_size - @sizeOf(BlockHeader);
     new_block.free = true;
-<<<<<<< HEAD
-    new_block.prev = null;
-    new_block.next = null;
-
-    // Try to merge with last block only if contiguous
-    if (free_list) |head| {
-        var last = head;
-        while (last.next) |n| {
-            last = n;
-        }
-
-        // Check if this block is contiguous with the last block
-        const last_end = @intFromPtr(last) + @sizeOf(BlockHeader) + last.size;
-        if (last_end == new_pages and last.free) {
-            // Merge contiguous block
-            last.size += new_size;
-            return true;
-        }
-
-        // Non-contiguous or last block in use: link into chain without merging
-        last.next = new_block;
-        new_block.prev = last;
-    } else {
-        free_list = new_block;
-    }
-
-=======
-
     addToFreeList(new_block);
     mergeBlocks(new_block);
->>>>>>> b588c390dec30ac14d775895765ce1109b2ad3db
     return true;
 }
 

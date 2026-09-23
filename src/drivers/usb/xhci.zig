@@ -205,7 +205,7 @@ pub const XhciController = struct {
         const hcs2 = readMmio32(self.mmio_base + 0x08);
         const max_scratchpads: usize = (((hcs2 >> 27) & 0x1F) << 5) | ((hcs2 >> 21) & 0x1F);
 
-        const hcc1 = readMmio32(self.mmio_base + 0x0C);
+        const hcc1 = readMmio32(self.mmio_base + 0x10);
         self.csz_64 = (hcc1 & (1 << 2)) != 0;
         const xecp = (hcc1 >> 16) & 0xFFFF;
 
@@ -388,10 +388,10 @@ pub const XhciController = struct {
 
         // Initialize Primary Interrupter (Interrupter 0 at rt_regs + 0x20)
         const intr0 = self.rt_regs + 0x20;
-        writeMmio32(intr0 + 0x28, 1); // ERSTSZ = 1
-        writeMmio64(intr0 + 0x30, @as(u64, self.erst_phys)); // ERSTBA
-        writeMmio64(intr0 + 0x38, @as(u64, self.event_ring_phys) | (1 << 3)); // ERDP (EHB bit 3)
-        writeMmio32(intr0 + 0x20, 2); // IMAN: Interrupt Enable = 1
+        writeMmio32(intr0 + 0x08, 1); // ERSTSZ = 1
+        writeMmio64(intr0 + 0x10, @as(u64, self.erst_phys)); // ERSTBA
+        writeMmio64(intr0 + 0x18, @as(u64, self.event_ring_phys) | (1 << 3)); // ERDP (EHB bit 3)
+        writeMmio32(intr0 + 0x00, 2); // IMAN: Interrupt Enable = 1
 
         // ─── Power on root hub ports ────────────────────────────────
         serial.serialWrite("[XHCI] Powering on ");
@@ -651,42 +651,39 @@ pub const XhciController = struct {
 
         self.ringDoorbell(0, 0);
 
-        var wait_ms: u32 = 0;
-        while (wait_ms < 500) : (wait_ms += 1) {
-            var inner: u32 = 0;
-            while (inner < 50) : (inner += 1) {
-                const ev_trb = &self.event_ring[self.event_dequeue];
-                const ev_ctrl = ev_trb.control;
-                const ev_cycle: u1 = @intCast(ev_ctrl & 1);
+        const start_tick = timer.ticks;
+        var loop_spins: usize = 0;
+        while ((timer.ticks > 0 and timer.ticks - start_tick < 50) or (timer.ticks == 0 and loop_spins < 2_000_000)) : (loop_spins += 1) {
+            const ev_trb = &self.event_ring[self.event_dequeue];
+            const ev_ctrl = ev_trb.control;
+            const ev_cycle: u1 = @intCast(ev_ctrl & 1);
 
-                if (ev_cycle == self.event_cycle) {
-                    const ev_type = (ev_ctrl >> 10) & 0x3F;
-                    const comp_code = (ev_trb.status >> 24) & 0xFF;
-                    const slot_id: u8 = @intCast((ev_ctrl >> 24) & 0xFF);
+            if (ev_cycle == self.event_cycle) {
+                const ev_type = (ev_ctrl >> 10) & 0x3F;
+                const comp_code = (ev_trb.status >> 24) & 0xFF;
+                const slot_id: u8 = @intCast((ev_ctrl >> 24) & 0xFF);
 
-                    self.event_dequeue += 1;
-                    if (self.event_dequeue == 256) {
-                        self.event_dequeue = 0;
-                        self.event_cycle ^= 1;
-                    }
-                    const erdp_val = @as(u64, self.event_ring_phys + self.event_dequeue * @sizeOf(XhciTrb)) | (1 << 3);
-                    writeMmio64(self.rt_regs + 0x20 + 0x38, erdp_val);
-
-                    if (ev_type == TRB_TYPE_COMMAND_COMPLETION) {
-                        if (out_slot_id) |s| {
-                            s.* = slot_id;
-                        }
-                        if (comp_code != 1) {
-                            serial.serialWrite("[XHCI] Command completed with code: ");
-                            serial.serialWriteDec(comp_code);
-                            serial.serialWrite("\n");
-                        }
-                        return comp_code == 1; // 1 = Success
-                    }
+                self.event_dequeue += 1;
+                if (self.event_dequeue == 256) {
+                    self.event_dequeue = 0;
+                    self.event_cycle ^= 1;
                 }
-                asm volatile ("pause");
+                const erdp_val = @as(u64, self.event_ring_phys + self.event_dequeue * @sizeOf(XhciTrb)) | (1 << 3);
+                writeMmio64(self.rt_regs + 0x38, erdp_val);
+
+                if (ev_type == TRB_TYPE_COMMAND_COMPLETION) {
+                    if (out_slot_id) |s| {
+                        s.* = slot_id;
+                    }
+                    if (comp_code != 1) {
+                        serial.serialWrite("[XHCI] Command completed with code: ");
+                        serial.serialWriteDec(comp_code);
+                        serial.serialWrite("\n");
+                    }
+                    return comp_code == 1; // 1 = Success
+                }
             }
-            spinDelayMs(1);
+            asm volatile ("pause");
         }
 
         serial.serialWrite("[XHCI] Command timed out after 500ms\n");
@@ -890,44 +887,41 @@ pub const XhciController = struct {
 
         self.ringDoorbell(slot.slot_id, 1);
 
-        var wait_ms: u32 = 0;
-        while (wait_ms < 500) : (wait_ms += 1) {
-            var inner: u32 = 0;
-            while (inner < 50) : (inner += 1) {
-                const ev_trb = &self.event_ring[self.event_dequeue];
-                const ev_ctrl = ev_trb.control;
-                const ev_cycle: u1 = @intCast(ev_ctrl & 1);
+        const start_tick = timer.ticks;
+        var loop_spins: usize = 0;
+        while ((timer.ticks > 0 and timer.ticks - start_tick < 50) or (timer.ticks == 0 and loop_spins < 2_000_000)) : (loop_spins += 1) {
+            const ev_trb = &self.event_ring[self.event_dequeue];
+            const ev_ctrl = ev_trb.control;
+            const ev_cycle: u1 = @intCast(ev_ctrl & 1);
 
-                if (ev_cycle == self.event_cycle) {
-                    const ev_type = (ev_ctrl >> 10) & 0x3F;
-                    const ev_slot = (ev_ctrl >> 24) & 0xFF;
+            if (ev_cycle == self.event_cycle) {
+                const ev_type = (ev_ctrl >> 10) & 0x3F;
+                const ev_slot = (ev_ctrl >> 24) & 0xFF;
 
-                    self.event_dequeue += 1;
-                    if (self.event_dequeue == 256) {
-                        self.event_dequeue = 0;
-                        self.event_cycle ^= 1;
-                    }
-                    const erdp_val = @as(u64, self.event_ring_phys + self.event_dequeue * @sizeOf(XhciTrb)) | (1 << 3);
-                    writeMmio64(self.rt_regs + 0x20 + 0x38, erdp_val);
-
-                    if (ev_type == TRB_TYPE_TRANSFER_EVENT and ev_slot == slot.slot_id) {
-                        const comp_code = (ev_trb.status >> 24) & 0xFF;
-                        if (comp_code == 1 or comp_code == 13) {
-                            if (is_in and data_in != null) {
-                                const copy_len = @min(setup.wLength, @as(u16, @intCast(data_in.?.len)));
-                                @memcpy(data_in.?[0..copy_len], slot.ctrl_buf[0..copy_len]);
-                            }
-                            return true;
-                        }
-                        serial.serialWrite("[XHCI] Transfer failed with completion code: ");
-                        serial.serialWriteDec(comp_code);
-                        serial.serialWrite("\n");
-                        return false;
-                    }
+                self.event_dequeue += 1;
+                if (self.event_dequeue == 256) {
+                    self.event_dequeue = 0;
+                    self.event_cycle ^= 1;
                 }
-                asm volatile ("pause");
+                const erdp_val = @as(u64, self.event_ring_phys + self.event_dequeue * @sizeOf(XhciTrb)) | (1 << 3);
+                writeMmio64(self.rt_regs + 0x38, erdp_val);
+
+                if (ev_type == TRB_TYPE_TRANSFER_EVENT and ev_slot == slot.slot_id) {
+                    const comp_code = (ev_trb.status >> 24) & 0xFF;
+                    if (comp_code == 1 or comp_code == 13) {
+                        if (is_in and data_in != null) {
+                            const copy_len = @min(setup.wLength, @as(u16, @intCast(data_in.?.len)));
+                            @memcpy(data_in.?[0..copy_len], slot.ctrl_buf[0..copy_len]);
+                        }
+                        return true;
+                    }
+                    serial.serialWrite("[XHCI] Transfer failed with completion code: ");
+                    serial.serialWriteDec(comp_code);
+                    serial.serialWrite("\n");
+                    return false;
+                }
             }
-            spinDelayMs(1);
+            asm volatile ("pause");
         }
         serial.serialWrite("[XHCI] Control transfer timed out after 500ms\n");
         return false;
@@ -1069,7 +1063,7 @@ pub const XhciController = struct {
                 self.event_cycle ^= 1;
             }
             const erdp_val = @as(u64, self.event_ring_phys + self.event_dequeue * @sizeOf(XhciTrb)) | (1 << 3);
-            writeMmio64(self.rt_regs + 0x20 + 0x38, erdp_val);
+            writeMmio64(self.rt_regs + 0x38, erdp_val);
 
             if (ev_type == TRB_TYPE_TRANSFER_EVENT) {
                 on_transfer(ev_slot, dci, rem_bytes, comp_code);
