@@ -5,9 +5,10 @@ Bare-metal x86_64 OS kernel in Zig: Multiboot/GRUB boot, identity-mapped 2 MB pa
 ## Build & run
 
 ```bash
-zig build            # Debug → zig-out/bin/kernel
-zig build -Drelease  # ReleaseFast — what run.sh and both harnesses ship
-./run.sh             # build -Drelease → grub-mkrescue ISO → QEMU (gtk)
+zig build                          # Debug production kernel → zig-out/bin/kernel
+zig build -Drelease                # ReleaseFast production kernel
+zig build -Drelease -Dselftest=true # ReleaseFast with the embedded ring-3 self-test
+./run.sh                           # build -Drelease → grub-mkrescue ISO → QEMU (gtk)
 ./run.sh --vnc       # VNC on host port 5901 instead of gtk
 ./run.sh --gdb       # QEMU -s -S; attach gdb to localhost:1234
 ./run.sh --test      # = python3 tools/test_runner.py (the gate harness)
@@ -24,7 +25,7 @@ run.bat              # Windows equivalent (patch_iso.py / qemu-img / fsutil fall
 
 ## Testing — two harnesses
 
-**`tools/test_runner.py`** (the gate): runs `zig build -Drelease`, gets the kernel into `kernel.iso` (patches `kernel.bin` in place if the new binary fits the old slot, else rebuilds with `grub-mkrescue` incl. a WSL fallback; with no ISO at all it boots `-kernel zig-out/bin/kernel` — standalone patcher `tools/patch_iso.py`, used by `run.bat`). Then boots QEMU headless:
+**`tools/test_runner.py`** (the gate): runs `zig build -Drelease -Dselftest=true`, gets the kernel into `kernel.iso` (patches `kernel.bin` in place if the new binary fits the old slot, else rebuilds with `grub-mkrescue` incl. a WSL fallback; with no ISO at all it boots `-kernel zig-out/bin/kernel` — standalone patcher `tools/patch_iso.py`, used by `run.bat`). Then boots QEMU headless:
 
 ```
 -cdrom kernel.iso -boot d -m 512M -smp 4 -display none -serial stdio
@@ -58,20 +59,21 @@ It boots several QEMU profiles through its `get_*_log` helpers: baseline, UHCI+H
 - `tools/fetch_apps.py` downloads real apps into `samples/apps/` (busybox, uutils coreutils, jq.exe, curl.exe, …); `create_test_disk.py` copies them onto `disk.img` under 8.3 aliases (coreutils→`cu` and `ls`, hello_linux→`hl` — no LFN support).
 - In the guest these appear at `/mnt/disk/...`. Run them via `exec /mnt/disk/hello.exe`, `exec /mnt/disk/busybox uname -a`, **or just type the name** — unknown commands fall through to `resolveExecutablePath` in `src/shell.zig`.
 - `tools/boot_watch.py <seconds> [disk] [cmd:"shell command" ...]` boots the ISO headless, drives the shell over serial (full log → `ser_capture.log`), and takes a QMP screendump → `screen.ppm`. This is how you exercise disk/foreign-binary/GUI behavior outside the gate.
+- `tools/create_fat32_disk.py --output fat32-test.img --size-mb 1024` creates a sparse MBR/FAT32 fixture without host `mtools`; `tools/test_fat32_log.py` boots it and checks mount, `KERNEL.LOG`, nested directories, append/copy, and a cluster above `0xFFFF`.
 - `create_usb.sh [device]` writes `kernel.iso` to a USB stick for bare-metal boot (Legacy/CSM GRUB, Secure Boot off; Ventoy also works).
 
 ## Codegen — two embedded blobs
 
 `build.zig` runs the host tool `tools/bin2zig.zig` twice, turning binaries into Zig byte arrays injected as anonymous modules:
 
-- `user_test_bin` ← `src/user/test.zig` built as a freestanding ELF (`image_base = 0x2000000`, entry `_start`). `kernel/init.zig` registers it via `scheduler.addElfUserTask`, so it runs in ring 3 **before the shell on every boot** and exercises write/socket/connect/send/recv/brk; the shell `user` command respawns it via `scheduler.spawnProgramImage`.
+- `user_test_bin` ← `src/user/test.zig` built as a freestanding ELF (`image_base = 0x2000000`, entry `_start`). With `-Dselftest=true`, `kernel/init.zig` registers it via `scheduler.addElfUserTask`, so it runs in ring 3 **before the shell** and exercises write/socket/connect/send/recv/brk; production builds skip only this automatic task, while the shell `user` command can still respawn it.
 - `ap_tramp_bin` ← `src/arch/trampoline.S` (Zig assembler, flat link at 0x8000 via `trampoline.ld`, `objcopy` to `.bin`).
 
 Editing either source retriggers codegen on the next `zig build`; no manual step.
 
 ## Architecture
 
-**Boot:** `src/entry.S` (32-bit multiboot entry → zeroes `.bss` → identity-maps the first 64 GB with 64 PDs × 512 × 2 MB pages → long mode) → `kernel_entry` (`src/main.zig:43`): serial → `gdt.init` (ring 3 segments + per-CPU TSS) → `vga.initFb(mbi_ptr)` → `system_init.init` (PIC, IDT) → `syscall64.init()` (MSRs enabling the `syscall` instruction) → PMM → VMM → kalloc → VFS + ramfs mount + `seedfs.init()` (writes static `/etc/*`, `/proc/*`, `/sys/*` snapshots into ramfs — there is no real procfs) → `kernel_init.init()` (timer, scheduler, registers the embedded ring-3 user test) → `pci.scan()` + one e1000-**or**-rtl8169 probe + `net/mod.zig.init()` → storage/input group: `virtio_blk.init()`, `fat16.init()`, `usb.zig.init()`, `mouse.init()` → `smp.init()` → `scheduler.runAll()` (runs the user test to completion) → `usb.zig.mod.init()` **again** → `shell.run()`. There is exactly one `pci.scan()` in `main.zig`, but USB init runs twice — only the shim `drivers/usb.zig:init()` refreshes its mirrored state, the raw `mod.init()` does not. `shell.run` may repeat parts of device init; check `shell.zig` before assuming boot-time init is the only one.
+**Boot:** `src/entry.S` (32-bit multiboot entry → zeroes `.bss` → identity-maps the first 64 GB with 64 PDs × 512 × 2 MB pages → long mode) → `kernel_entry` (`src/main.zig:43`): serial → `gdt.init` (ring 3 segments + per-CPU TSS) → `vga.initFb(mbi_ptr)` → `system_init.init` (PIC, IDT) → `syscall64.init()` (MSRs enabling the `syscall` instruction) → PMM → VMM → kalloc → VFS + ramfs mount + `seedfs.init()` (writes static `/etc/*`, `/proc/*`, `/sys/*` snapshots into ramfs — there is no real procfs) → `kernel_init.init()` (timer, scheduler; registers the embedded ring-3 user test only with `-Dselftest=true`) → one `pci.scan()` + e1000-**or**-rtl8169 probe + lazy/selftest-aware `net/mod.zig.init()` → one storage/input pass: `virtio_blk.init()`, `ahci.init()`, `usb.zig.init()`, `partition.scanAll()`, FAT16/FAT32 probe, `kernel_log.init()`, `mouse.init()` → `smp.init()` → `scheduler.runAll()` → shell. The shell no longer repeats PCI/storage initialization; the raw USB `mod.init()` remains a guarded compatibility call.
 
 **Layout:**
 - `src/arch/` — gdt (per-CPU GDT/TSS, `MAX_CPUS=64`), idt (256 entries; INT 0x80 **and** the Win32 INT 0x81 thunk gate, both DPL 3), pic, port, isr (`isr.S` + `isr.zig`; `isr.S` also defines `syscall_entry_64` and `sys_exit_return`), acpi (MADT scan), smp + `trampoline.S/.ld`, msr, syscall64 (STAR/LSTAR/FMASK/SCE MSRs).
@@ -80,7 +82,7 @@ Editing either source retriggers codegen on the next `zig build`; no manual step
 - `src/system/env.zig` — kernel-wide KEY=VALUE environment table; the shell manages it (`set`/`unset`/`env`, `echo` with `$KEY` expansion) and Win32 PE programs read it via emulated `GetEnvironmentVariableA`/`GetEnvironmentStringsW`. Static storage, no allocation.
 - `src/drivers/` — keyboard (IRQ1), mouse (PS/2), input (unified input facade, see USB), timer, apic, pci, e1000, rtl8169, virtio_blk, ahci, xhci (poll-based xHCI HID drain behind `usb.zig:pollHid`), usb (re-export shim) + `usb/` (16-file stack, see below).
 - `src/net/` — arp, arp_cache, ip, icmp, tcp, udp, dns, dhcp, http; `mod.zig` is the public surface **and** the NIC dispatcher.
-- `src/fs/` — vfs, ramfs (mounted at `/` plus `/dev`, `/tmp`, `/etc`), blockdev, partition (MBR/GPT), fat16 (mounted at `/mnt/disk`).
+- `src/fs/` — vfs (including append flags and cursor-aware directory reads), ramfs (mounted at `/` plus `/dev`, `/tmp`, `/etc`), blockdev, partition (MBR/GPT), fat16 (legacy `/mnt/disk` fallback), fat32 (512-byte-sector, 8.3-name MVP).
 - `src/programs/` — one file per shell command (dispatch via `command_table` in `shell.zig`) plus the dillo browser package `dillo/` (browser, css, entities, html, layout, mod, url) and its engines `dillo_engine.zig` / `js_engine.zig`.
 - `src/lua/` — lexer, parser, ast, value, vm, api; `mod.zig` re-exports.
 - `src/user/` — ring-3 test ELF + heap.
@@ -136,7 +138,7 @@ Modular stack under `src/drivers/usb/` (16 files); `src/drivers/usb.zig` is a re
 - **e1000 register bits are easy to get wrong** — RCTL bit 15 is BAM (broadcast accept, required for DHCP OFFERs), bit 3 is UPE (not BAM), bit 6 is loopback (not BSIZE). BSIZE=2048 is the default (bits 17:16 = 00, BSEX clear). TX descriptors need the RS bit (0x08) for the DD status bit to ever be set, and RDT must be written with the index just recycled, not the next one. Named constants at the top of `src/drivers/e1000.zig`; `e1000.debug_trace` gates per-packet serial dumps (off by default — they are slower than the network and cause the timeouts they are meant to diagnose).
 - **IP payload length comes from the header, not the frame.** Ethernet pads to 60 bytes, so `ip.handlePacket` trims to the declared `total_len` before dispatch; TCP/UDP/ICMP all derive payload size from the slice they receive.
 - **TCP is minimal but real:** `MSS=1440` (fits MTU + single `retx_buf`), `send()` splits, a single retransmission slot per connection, ISN varied per connection, SYN retransmitted while `syn_retries < 3` in `waitEstablished`, in-order-only data acceptance (out-of-order/duplicate segments are re-ACKed, not appended). Checksums must be computed after the payload is in the buffer — `buildTcpHeader` takes the whole segment slice for that reason.
-- **Disk/FAT16:** `run.sh`/`run.bat` create a raw 64 MB `disk.img` if missing. Boot mounts FAT16 at `/mnt/disk` when a block device + FAT16 filesystem is present; without one, `ls/cat/cd/touch/mkdir/rm/write/save/cp/hexdump` hit ramfs at `/`. `mkfs` reformats in-kernel (`fat16.format()` writes BPB + FATs + root dir), `df` shows usage. `drivers/ahci.zig` and `fs/partition.zig` (MBR/GPT) exist alongside virtio-blk. `vfs.isStaticHandle` prevents `kfree` on the static `open_files` BSS array — don't "fix" handle allocation in a way that bypasses it.
+- **Disk/FAT16/FAT32:** `run.sh`/`run.bat` create a raw 64 MB `disk.img` if missing. Boot scans providers and partitions once, then mounts FAT16 at `/mnt/disk` and probes FAT32 (512-byte sectors, 8.3 names, one static volume in the MVP) at `/mnt/disk` or `/log`. `klog` stores `/KERNEL.LOG` through a 64 KiB async RAM queue with early-boot replay and best-effort panic flush; `klog status|flush|dump|clear` is available. `tools/test_fat32_log.py` validates a 1 GiB image, nested files, multi-cluster append/copy, and a cluster above `0xFFFF`. `mkfs` still reformats FAT16 only. `drivers/ahci.zig` and `fs/partition.zig` (MBR/GPT) exist alongside virtio-blk. `vfs.isStaticHandle` prevents `kfree` on the static `open_files` BSS array — don't "fix" handle allocation in a way that bypasses it.
 - **Framebuffer/GUI:** `src/entry.S` requests a linear 1024x768x32 framebuffer (multiboot VIDEO flag); `grub.cfg` tries `1024x768x32,800x600x32,640x480x32` and always ends `gfxpayload` with a `text` fallback so the console stays visible for unusable modes. `vga.isFbActive()` accepts both **24bpp and 32bpp** (`fb_bytes_pp` in `framebuffer.zig`; all raw-LFB access goes through `lfbPut`/`lfbGet`). Commands `gui`, `resolution <WxH>`, `mouse` work once the fb is active; the console shell stays VGA text. `framebuffer.zig` is a shadow buffer: draw into RAM, then `flush()` the tracked dirty rect to the LFB. The harness runs `-display none`, so GUI changes need visual verification via `tools/boot_watch.py` (QMP screendump → `screen.ppm`).
 - **Adding a shell command needs two required edits** in `src/shell.zig`: a handler `fn(args: []const u8)` (zero-arg programs get an adapter like `fn runX(_: []const u8)`) and one `command_table` entry. The table drives **dispatch and tab completion** (`execute` iterates it — there is no separate dispatch branch to add). Also add a line to `printHelp` — it is a hand-written list, not generated from the table. Full-screen programs (lua/matrix/gui/nano) clear the screen and reprint the banner on exit — see `cmdLua` for the pattern. Unknown input falls through to `execFromPath` → `resolveExecutablePath`, which tries the raw name, `/bin/<name>`, `/mnt/disk/<name>`, then each with a `.exe` suffix.
 

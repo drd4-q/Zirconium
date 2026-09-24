@@ -239,6 +239,46 @@ pub fn cmdWrite(args: []const u8) void {
     _ = vfs.write(handle, text);
 }
 
+pub fn cmdAppend(args: []const u8) void {
+    if (args.len == 0) {
+        vga.setColor(.light_red, .black);
+        vga.write("  Usage: append <file> <text>\n");
+        vga.setColor(.white, .black);
+        return;
+    }
+
+    var path_buf: [MAX_PATH]u8 = undefined;
+    var path_len: usize = 0;
+    var text_start: usize = 0;
+    for (args, 0..) |ch, i| {
+        if (ch == ' ' and path_len > 0) {
+            text_start = i + 1;
+            break;
+        }
+        if (path_len < MAX_PATH) {
+            path_buf[path_len] = ch;
+            path_len += 1;
+        }
+    }
+    if (path_len == 0 or text_start >= args.len) {
+        vga.setColor(.light_red, .black);
+        vga.write("  Usage: append <file> <text>\n");
+        vga.setColor(.white, .black);
+        return;
+    }
+
+    const handle = vfs.open(path_buf[0..path_len], .{ .create = true, .write = true, .append = true }) orelse {
+        vga.setColor(.light_red, .black);
+        vga.write("  append: Failed to open ");
+        vga.write(path_buf[0..path_len]);
+        vga.write("\n");
+        vga.setColor(.white, .black);
+        return;
+    };
+    defer vfs.close(handle);
+    _ = vfs.write(handle, args[text_start..]);
+}
+
 pub fn cmdCd(args: []const u8) void {
     if (args.len == 0) {
         vga.write("  ");

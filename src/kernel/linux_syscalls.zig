@@ -270,8 +270,9 @@ fn sysGetdents64(t: *task.Task, fd: u64, buf_ptr: u64, buf_len: u64) isize {
     const dir = &desc.dir;
 
     var entries: [32]vfs.DirEntry = undefined;
-    const count = vfs.readdir(dir.path_buf[0..dir.path_len], &entries);
-    if (dir.cursor >= count) {
+    const start_cursor = dir.cursor;
+    const count = vfs.readdirFrom(dir.path_buf[0..dir.path_len], start_cursor, &entries);
+    if (count == 0) {
         dir.cursor = 0; // rewind so reopening-by-seek semantics stay sane
         return 0; // EOF
     }
@@ -287,8 +288,8 @@ fn sysGetdents64(t: *task.Task, fd: u64, buf_ptr: u64, buf_len: u64) isize {
         const reclen = (@as(usize, 19) + e.name_len + 1 + 7) & ~@as(usize, 7);
         if (written + reclen > buf_len) break;
 
-        _ = uaccess.writeU64(buf_ptr + written, i + 1); // d_ino
-        _ = uaccess.writeU64(buf_ptr + written + 8, i + 1); // d_off
+        _ = uaccess.writeU64(buf_ptr + written, start_cursor + i + 1); // d_ino
+        _ = uaccess.writeU64(buf_ptr + written + 8, start_cursor + i + 1); // d_off
         _ = uaccess.writeU16(buf_ptr + written + 16, @intCast(reclen));
         _ = uaccess.writeU8(buf_ptr + written + 18, if (e.file_type == .directory) DT_DIR else DT_REG);
         var k: usize = 0;
@@ -302,8 +303,8 @@ fn sysGetdents64(t: *task.Task, fd: u64, buf_ptr: u64, buf_len: u64) isize {
         written += reclen;
     }
 
-    if (written == 0 and count > dir.cursor) return EINVAL; // buffer too small
-    dir.cursor = i;
+    if (written == 0 and count > 0) return EINVAL; // buffer too small
+    dir.cursor = start_cursor + i;
     return @intCast(written);
 }
 

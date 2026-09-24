@@ -21,6 +21,7 @@ pub const PciDevice = struct {
 
 pub var devices: [512]PciDevice = undefined;
 pub var device_count: usize = 0;
+pub var scan_complete: bool = false;
 
 fn outb(p: u16, v: u8) void {
     asm volatile ("outb %%al, %%dx" : : [val] "{al}" (v), [port] "{dx}" (p));
@@ -75,6 +76,10 @@ pub fn getBarSize(bus: u8, dev: u8, func: u8, bar_num: u8) u32 {
 }
 
 pub fn scan() void {
+    // The current kernel has no PCI hotplug path.  Re-walking all 256 buses
+    // from main, shell, and AHCI only adds hundreds of unnecessary config
+    // transactions on real hardware.
+    if (scan_complete) return;
     device_count = 0;
     var bus: u16 = 0;
     while (bus < 256) : (bus += 1) {
@@ -125,6 +130,7 @@ pub fn scan() void {
             }
         }
     }
+    scan_complete = true;
 }
 
 pub fn enableBusMaster(bus: u8, dev: u8, func: u8) void {

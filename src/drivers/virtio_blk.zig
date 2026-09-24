@@ -250,6 +250,7 @@ fn totalSectorsFn(_: *blockdev.BlockDevice) u64 {
 }
 
 pub fn init() void {
+    if (virtio_ready) return;
     var dev_opt: ?*pci.PciDevice = pci.findDevice(0x1AF4, 0x1001);
     if (dev_opt == null) {
         dev_opt = pci.findDevice(0x1AF4, 0x1042);

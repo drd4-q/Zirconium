@@ -182,7 +182,7 @@ def run_profile(profile: str, base_port: int) -> str:
         )
         missing = [marker for marker in required if marker not in text]
         if missing:
-            raise RuntimeError(f"{profile}: missing markers: {', '.join(missing)}")
+            raise RuntimeError(f"{profile}: missing markers: {', '.join(missing)}; serial tail: {text[-2500:]}")
         return text
     finally:
         try:

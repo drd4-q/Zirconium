@@ -3,7 +3,6 @@ const root = @import("root");
 const vga = root.vga;
 const kb = @import("drivers/keyboard.zig");
 const mouse = @import("drivers/mouse.zig");
-const pci = @import("drivers/pci.zig");
 const net = @import("net/mod.zig");
 const vga_fb = @import("system/framebuffer.zig");
 const gui = @import("system/gui.zig");
@@ -30,6 +29,7 @@ const smp = @import("arch/smp.zig");
 const acpi = @import("arch/acpi.zig");
 const usb_prog = @import("programs/usb.zig");
 const usb_drv = @import("drivers/usb.zig");
+const klog = @import("system/kernel_log.zig");
 const dillo_prog = @import("programs/dillo.zig");
 
 const HISTORY_SIZE: usize = 16;
@@ -89,6 +89,7 @@ const command_table = [_]CmdEntry{
     .{ .name = "cpuinfo",    .run = showSmp },
     .{ .name = "usb",        .run = runUsb },
     .{ .name = "lsusb",      .run = runUsb },
+    .{ .name = "klog",       .run = runKlog },
     .{ .name = "acpi",       .run = showAcpi },
     .{ .name = "ls",         .run = files.cmdLs },
     .{ .name = "cat",        .run = files.cmdCat },
@@ -96,6 +97,7 @@ const command_table = [_]CmdEntry{
     .{ .name = "mkdir",      .run = files.cmdMkdir },
     .{ .name = "rm",         .run = files.cmdRm },
     .{ .name = "write",      .run = files.cmdWrite },
+    .{ .name = "append",     .run = files.cmdAppend },
     .{ .name = "cd",         .run = files.cmdCd },
     .{ .name = "cp",         .run = files.cmdCopy },
     .{ .name = "hexdump",    .run = files.cmdHexdump },
@@ -113,25 +115,8 @@ pub fn run() void {
     kb.init();
     root.serial.serialWrite("[SHELL] run: keyboard ready\n");
 
-    pci.scan();
-
-    // Try to init virtio-blk disk
-    @import("drivers/virtio_blk.zig").init();
-
-    // Try to init SATA AHCI disks
-    _ = @import("drivers/ahci.zig").init();
-
-    // Init USB host controllers, root hubs, and devices (including USB mass storage)
-    usb_drv.init();
-
-    // Scan MBR & GPT partition tables on all block devices
-    @import("fs/partition.zig").scanAll();
-
-    // Auto-mount FAT16 if block device / partition available
-    @import("fs/fat16.zig").init();
-
-    mouse.init();
-
+    // Storage, USB, partitions, filesystems, and the logger are initialized
+    // once by the kernel boot path before the shell is entered.
     root.scheduler_ready = true;
 
     vga.clear();
@@ -256,6 +241,38 @@ fn runDhcp(_: []const u8) void {
 fn runArpcache(_: []const u8) void {
     arp_cache.printCache();
 }
+fn runKlog(args: []const u8) void {
+    if (eql(args, "flush")) {
+        klog.flush();
+        vga.write("  Kernel log flushed\n");
+        return;
+    }
+    if (eql(args, "clear")) {
+        if (klog.clear()) {
+            vga.write("  Kernel log cleared\n");
+        } else {
+            vga.write("  Kernel log is not enabled\n");
+        }
+        return;
+    }
+    if (eql(args, "dump")) {
+        if (klog.dump(4096) == 0) vga.write("  Kernel log is empty or unavailable\n");
+        return;
+    }
+
+    vga.write("  Kernel log: ");
+    vga.write(if (klog.isEnabled()) "enabled" else "disabled");
+    vga.write("\n    File: ");
+    vga.write(klog.path());
+    vga.write("\n    Buffered: ");
+    vga.writeDec(klog.bufferedBytes());
+    vga.write(" bytes, dropped: ");
+    vga.writeDec(klog.droppedBytes());
+    vga.write(", write errors: ");
+    vga.writeDec(klog.writeErrors());
+    vga.write("\n");
+}
+
 fn runUsb(args: []const u8) void {
     if (eql(args, "debug on")) {
         usb_drv.setHidDebug(true);
@@ -373,14 +390,17 @@ fn cmdEcho(args: []const u8) void {
     if (newline) vga.putChar('\n');
 }
 fn cmdHalt(_: []const u8) void {
+    klog.flush();
     vga.setColor(.light_red, .black);
     vga.write("\n  System halted.\n");
     root.serial.serialWrite("\n[BOOT] System halted by user.\n");
+    klog.flush();
     while (true) {
         asm volatile ("cli; hlt");
     }
 }
 fn cmdReboot(_: []const u8) void {
+    klog.flush();
     vga.setColor(.yellow, .black);
     vga.write("\n  Rebooting...\n");
     port_io.outb(0x92, 0x03);
@@ -857,6 +877,7 @@ fn printHelp(_: []const u8) void {
     vga.write("    acpi          ACPI tables (RSDP, MADT)\n");
     vga.write("    usb           USB controllers & devices status\n");
     vga.write("    usb debug on  trace HID reports/keys on serial\n");
+    vga.write("    klog          kernel log status/flush/dump/clear\n");
     vga.write("    usb storage   USB mass storage & disk status\n");
     vga.write("    usb wifi      USB Wi-Fi adapter status\n\n");
     vga.write("  Filesystem:\n");
@@ -867,6 +888,7 @@ fn printHelp(_: []const u8) void {
     vga.write("    rm <file>     Remove file\n");
     vga.write("    cp <s> <d>    Copy file\n");
     vga.write("    write <f> <t> Write text to file\n");
+    vga.write("    append <f> <t> Append text to file\n");
     vga.write("    hexdump <f>   Hex+ASCII file viewer\n");
     vga.write("    cd [path]     Change directory\n");
     vga.write("    nano <file>   Nano-style text editor\n");
@@ -1088,6 +1110,7 @@ fn readLineEnhanced(buf: []u8, max_len: usize) usize {
     var pos: usize = 0;
     history_pos = -1;
     while (pos < max_len) {
+        klog.service();
         // Keyboard first, serial console second: the latter lets tests and
         // remote users drive the shell through QEMU -serial stdio.
         const ch = kb.pollKey() orelse serialPollKey() orelse {

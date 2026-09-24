@@ -28,8 +28,10 @@ pub fn init() void {
     _ = scheduler.addKernelTask(&idleTask);
     _ = scheduler.addKernelTask(&helloTask);
 
-    const user_test_bin = @import("user_test_bin");
-    _ = scheduler.addElfUserTask(&user_test_bin.data);
+    if (@import("build_options").selftest) {
+        const user_test_bin = @import("user_test_bin");
+        _ = scheduler.addElfUserTask(&user_test_bin.data);
+    }
 
     vga.setColor(.magenta, .black);
     vga.write("[KERNEL] Kernel init done, ");

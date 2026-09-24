@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
+    const selftest = b.option(bool, "selftest", "Run the embedded ring-3 boot self-test") orelse false;
 
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
@@ -69,6 +70,8 @@ pub fn build(b: *std.Build) void {
     const tramp_out = run_bin2zig_t.addOutputFileArg("ap_tramp_bin.zig");
 
     // 4. Build kernel
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "selftest", selftest);
     const exe = b.addExecutable(.{
         .name = "kernel",
         .root_module = b.createModule(.{
@@ -81,6 +84,7 @@ pub fn build(b: *std.Build) void {
         .use_llvm = true,
     });
 
+    exe.root_module.addOptions("build_options", build_options);
     exe.root_module.addAssemblyFile(b.path("src/entry.S"));
     exe.root_module.addAssemblyFile(b.path("src/arch/isr.S"));
     exe.setLinkerScript(b.path("linker.ld"));

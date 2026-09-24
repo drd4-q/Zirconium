@@ -61,13 +61,15 @@ pub fn init() void {
     printIpSerial(gateway_ip);
     port.serialWrite("\n");
 
-    // Resolve the gateway once at init: every off-subnet packet needs its MAC,
-    // and doing it lazily meant the first SYN/DNS query went to the broadcast
-    // address (which QEMU's slirp silently drops).
-    if (resolveGateway()) {
-        port.serialWrite("[NET] Gateway MAC resolved\n");
-    } else {
-        port.serialWrite("[NET] Gateway ARP failed (will retry on demand)\n");
+    // Resolve the gateway during self-test builds so the legacy marker and
+    // QEMU slirp path remain deterministic. Production boots stay lazy: the
+    // first real packet calls ensureArp() and pays the wait only when needed.
+    if (@import("build_options").selftest) {
+        if (resolveGateway()) {
+            port.serialWrite("[NET] Gateway MAC resolved\n");
+        } else {
+            port.serialWrite("[NET] Gateway ARP failed (will retry on demand)\n");
+        }
     }
 }
 

@@ -330,7 +330,7 @@ def test_build_clean(ctx: TestContext) -> Tuple[str, str, Dict[str, Any]]:
     details = {}
     # 1. Test Debug build
     t0 = time.time()
-    res_debug = subprocess.run(["zig", "build"], cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    res_debug = subprocess.run(["zig", "build", "-Dselftest=true"], cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     details["debug_duration"] = round(time.time() - t0, 2)
     details["debug_exit"] = res_debug.returncode
     if res_debug.returncode != 0:
@@ -338,7 +338,7 @@ def test_build_clean(ctx: TestContext) -> Tuple[str, str, Dict[str, Any]]:
 
     # 2. Test ReleaseFast build
     t0 = time.time()
-    res_release = subprocess.run(["zig", "build", "-Drelease"], cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    res_release = subprocess.run(["zig", "build", "-Drelease", "-Dselftest=true"], cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     details["release_duration"] = round(time.time() - t0, 2)
     details["release_exit"] = res_release.returncode
     if res_release.returncode != 0:
@@ -758,6 +758,17 @@ def run_suite(
             t for t in tests_to_run
             if kw in t.test_id.lower() or kw in t.name.lower() or any(kw in f.lower() for f in t.features)
         ]
+
+    # Filtered runs (for example --tier 2) do not include TC-BUILD-01.  Keep
+    # their network/ring-3 baselines deterministic even when the last local
+    # build was a production image with the embedded self-test disabled.
+    if tests_to_run and not any(t.test_id == "TC-BUILD-01" for t in tests_to_run):
+        build = subprocess.run(
+            ["zig", "build", "-Drelease", "-Dselftest=true"],
+            cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        if build.returncode != 0 or not patch_kernel_iso():
+            print(f"[FAIL] Could not prepare selftest kernel: {build.stderr.decode(errors='ignore')[:300]}")
 
     print(f"Discovered {len(tests_to_run)} test cases matching filter criteria.")
     if selected_tier:

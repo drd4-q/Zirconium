@@ -17,6 +17,7 @@ pub const OpenFlags = struct {
     write: bool = false,
     create: bool = false,
     truncate: bool = false,
+    append: bool = false,
     directory: bool = false,
 };
 
@@ -95,7 +96,8 @@ pub fn init() void {
 }
 
 pub fn mount(name: []const u8, mount_point: []const u8, fs: *FileSystem) bool {
-    if (mount_count >= MAX_MOUNTS) return false;
+    if (mount_count >= MAX_MOUNTS or mount_point.len == 0 or mount_point.len > 63) return false;
+    if (isMountedAt(mount_point)) return false;
 
     @memset(&mounts[mount_count].name, 0);
     for (name, 0..) |ch, i| {
@@ -131,6 +133,16 @@ pub fn mount(name: []const u8, mount_point: []const u8, fs: *FileSystem) bool {
     return true;
 }
 
+pub fn isMountedAt(mount_point: []const u8) bool {
+    var i: usize = 0;
+    while (i < mount_count) : (i += 1) {
+        if (std.mem.eql(u8, mounts[i].mount_point[0..mounts[i].mount_point_len], mount_point)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn findMount(path: []const u8) ?*FileSystem {
     var best_len: usize = 0;
     var best_idx: usize = 0;
@@ -145,6 +157,7 @@ fn findMount(path: []const u8) ?*FileSystem {
                     break;
                 }
             }
+            if (matches and mp.len != 1 and path.len > mp.len and path[mp.len] != '/') matches = false;
             if (matches and mp.len > best_len) {
                 best_len = mp.len;
                 best_idx = i;
@@ -313,11 +326,22 @@ pub fn write(handle: *FileHandle, buf: []const u8) usize {
     return handle.fs.writeFn(handle.fs, handle, buf);
 }
 
-pub fn readdir(path: []const u8, entries: []DirEntry) usize {
+var readdir_scratch: [256]DirEntry = undefined;
+
+pub fn readdirFrom(path: []const u8, cursor: usize, entries: []DirEntry) usize {
+    if (entries.len == 0) return 0;
     const resolved = resolvePath(path);
     const fs = findMount(resolved) orelse return 0;
     const rel_path = makeRelPath(resolved, fs.mount_point_len);
-    return fs.readdirFn(fs, rel_path, entries);
+    const count = fs.readdirFn(fs, rel_path, &readdir_scratch);
+    if (cursor >= count) return 0;
+    const result_count = @min(entries.len, count - cursor);
+    @memcpy(entries[0..result_count], readdir_scratch[cursor .. cursor + result_count]);
+    return result_count;
+}
+
+pub fn readdir(path: []const u8, entries: []DirEntry) usize {
+    return readdirFrom(path, 0, entries);
 }
 
 pub fn mkdir(path: []const u8) bool {

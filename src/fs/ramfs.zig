@@ -132,8 +132,8 @@ fn ramfsOpen(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.
 
     // Root directory
     if (path.len == 1 and path[0] == '/') {
-        if (flags.create) {
-            // Can't create root
+        if (flags.create or flags.write) {
+            // Can't create or write the root directory
             return null;
         }
         const h = &open_scratch;
@@ -160,7 +160,7 @@ fn ramfsOpen(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.
         const h = &open_scratch;
         h.fs = fs;
         h.inode = idx;
-        h.offset = 0;
+        h.offset = if (flags.append and !flags.truncate) nodes[idx].size else 0;
         h.flags = flags;
         h.data = null;
         return h;

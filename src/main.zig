@@ -11,6 +11,7 @@ pub const kalloc = @import("kernel/kalloc.zig");
 pub const tty = @import("system/tty.zig");
 const kernel_init = @import("kernel/init.zig");
 const gdt = @import("arch/gdt.zig");
+const klog = @import("system/kernel_log.zig");
 
 const syscall = @import("kernel/syscall.zig");
 const winapi = @import("kernel/winapi.zig");
@@ -28,6 +29,7 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     serial.serialWrite("\n=== PANIC ===\n");
     serial.serialWrite(msg);
     serial.serialWrite("\n");
+    klog.flush();
     vga.setColor(.light_red, .black);
     vga.write("\n=== PANIC ===\n");
     vga.write(msg);
@@ -103,12 +105,26 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     @import("net/mod.zig").init();
     serial.serialWrite("[BOOT] Network init done\n");
 
-    // All PCI-backed devices init right after the single bus scan.
+    // Bring up all block-device providers before scanning partitions.  This
+    // is the single hardware-initialization pass; the shell no longer repeats
+    // PCI/storage discovery during boot.
     vga.write("[BOOT] Initializing storage and input...\n");
     @import("drivers/virtio_blk.zig").init();
-    @import("fs/fat16.zig").init();
+    _ = @import("drivers/ahci.zig").init();
     @import("drivers/usb.zig").init();
     @import("net/mod.zig").refreshUsbNic();
+    @import("fs/partition.zig").scanAll();
+    @import("fs/fat16.zig").init();
+    const fat32 = @import("fs/fat32.zig");
+    fat32.init();
+    if (fat32.isMounted()) {
+        _ = klog.init(fat32.mountPoint());
+    } else if (vfs.isMountedAt("/mnt/disk")) {
+        // FAT16 remains a supported fallback and can host a small log too.
+        _ = klog.init("/mnt/disk");
+    } else {
+        _ = klog.init("");
+    }
     @import("drivers/mouse.zig").init();
     vga.write("[BOOT] Storage and input initialized\n");
 

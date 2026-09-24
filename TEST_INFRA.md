@@ -250,3 +250,9 @@ python3 tools/e2e_test_suite.py -k wifi      # Wi-Fi test cases
 ```bash
 python3 tools/e2e_test_suite.py --all --json test_report.json
 ```
+
+### 5.6 FAT32 + Kernel Log Fixture
+```bash
+python3 tools/test_fat32_log.py
+```
+The test creates a temporary 1 GiB MBR/FAT32 image, boots it with QEMU, and verifies `KERNEL.LOG`, nested file creation, multi-cluster append/copy, and a file whose first cluster is above `0xFFFF`.

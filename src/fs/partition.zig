@@ -60,6 +60,14 @@ fn getPartitionFromDev(dev: *blockdev.BlockDevice) ?*Partition {
 }
 
 fn registerPartition(parent: *blockdev.BlockDevice, start_lba: u64, count: u64, part_num: usize) void {
+    const parent_sectors = parent.totalSectorsFn(parent);
+    if (count == 0 or start_lba >= parent_sectors) return;
+    if (count > parent_sectors - start_lba) return;
+    var existing: usize = 0;
+    while (existing < partition_count) : (existing += 1) {
+        const p = &partitions[existing];
+        if (p.parent_dev == parent and p.start_lba == start_lba and p.sector_count == count) return;
+    }
     if (partition_count >= MAX_PARTITIONS) return;
 
     const p = &partitions[partition_count];
@@ -98,6 +106,7 @@ pub fn scanAll() void {
     var i: usize = 0;
     while (i < orig_dev_count) : (i += 1) {
         const dev = blockdev.devices[i];
+        if (getPartitionFromDev(dev) != null) continue;
         scanDevice(dev);
     }
 }
@@ -157,7 +166,8 @@ fn scanGpt(dev: *blockdev.BlockDevice) void {
 
     const entry_lba = readU64(&sector_buf, 72);
     const num_entries = @min(readU32(&sector_buf, 80), 128);
-    const entry_size = @max(readU32(&sector_buf, 84), 128);
+    const entry_size = readU32(&sector_buf, 84);
+    if (entry_size == 0 or entry_size > 512) return;
 
     var cur_entry: usize = 0;
     var cur_sector = entry_lba;

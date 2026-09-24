@@ -157,7 +157,7 @@ def main():
     print(f"[TEST RUNNER] Project Root: {repo_root}")
 
     # 1. Build kernel (ReleaseFast, same as run.sh)
-    run_command(["zig", "build", "-Drelease"], cwd=repo_root)
+    run_command(["zig", "build", "-Drelease", "-Dselftest=true"], cwd=repo_root)
     patch_kernel_iso(repo_root)
 
     iso_path = os.path.join(repo_root, "kernel.iso")

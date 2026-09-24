@@ -593,7 +593,7 @@ var open_handle_used: [32]bool = [_]bool{false} ** 32;
 fn fat16Open(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.FileHandle {
     if (path.len <= 1) {
         // Root directory
-        if (flags.create) return null;
+        if (flags.create or flags.write) return null;
         root_handle = .{ .fs = fs, .inode = 0, .offset = 0, .flags = flags, .data = null };
         return &root_handle;
     }
@@ -651,11 +651,21 @@ fn fat16Open(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.
         }
     }
 
+    if (flags.create and flags.truncate and !file_cache[idx].is_dir) {
+        freeChain(file_cache[idx].first_cluster);
+        file_cache[idx].first_cluster = 0;
+        file_cache[idx].file_size = 0;
+        _ = updateFileEntry(&file_cache[idx]);
+    }
+
     // Find free handle slot
     var h: usize = 0;
     while (h < 32) : (h += 1) {
         if (!open_handle_used[h]) {
             open_handles[h] = .{ .fs = fs, .inode = idx, .offset = 0, .flags = flags, .data = null };
+            if (flags.append and !flags.truncate and !file_cache[idx].is_dir) {
+                open_handles[h].offset = file_cache[idx].file_size;
+            }
             open_handle_used[h] = true;
             return &open_handles[h];
         }

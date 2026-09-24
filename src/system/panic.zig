@@ -1,5 +1,6 @@
 const serial = @import("serial.zig");
 const vga = @import("vga.zig");
+const klog = @import("kernel_log.zig");
 
 pub fn printBacktrace(start_rbp: u64) void {
     serial.serialWrite("\n=== STACK TRACE ===\n");
@@ -54,7 +55,9 @@ fn announce(msg: []const u8, code: ?u64) void {
 
 fn dumpBacktraceAndHalt() noreturn {
     var current_rbp: u64 = 0;
-    asm volatile ("movq %%rbp, %[rbp]" : [rbp] "=r" (current_rbp));
+    asm volatile ("movq %%rbp, %[rbp]"
+        : [rbp] "=r" (current_rbp),
+    );
     printBacktrace(current_rbp);
     while (true) {
         asm volatile ("hlt");
@@ -64,11 +67,13 @@ fn dumpBacktraceAndHalt() noreturn {
 pub fn kernelPanic(msg: []const u8) noreturn {
     asm volatile ("cli");
     announce(msg, null);
+    klog.flush();
     dumpBacktraceAndHalt();
 }
 
 pub fn panicWithCode(msg: []const u8, code: u64) noreturn {
     asm volatile ("cli");
     announce(msg, code);
+    klog.flush();
     dumpBacktraceAndHalt();
 }
