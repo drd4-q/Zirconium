@@ -116,6 +116,8 @@ fn enumerateCompositeInterfaces(dev: *device.UsbDevice, c_idx: u8, p: u8, is_low
             dev_extra.xhci_root_port = dev.xhci_root_port;
             dev_extra.xhci_route = dev.xhci_route;
             dev_extra.xhci_hub_depth = dev.xhci_hub_depth;
+            dev_extra.xhci_hub_multi_tt = dev.xhci_hub_multi_tt;
+            dev_extra.xhci_hub_interface = dev.xhci_hub_interface;
 
             var found_ep = false;
             var ep_k: usize = 0;
@@ -652,7 +654,7 @@ pub fn init() void {
             const num_conn = hub.configureHubPorts(hub_dev.addr, hub_dev.ep0_max_packet, cfn, hub_ports[0..], &hub_num_ports);
             if (ctrl.ctrl_type == .xhci and hub_dev.xhci_slot_id != 0 and ctrl.inst_idx < xhci_count) {
                 const x = &xhci_instances[ctrl.inst_idx];
-                if (!x.markHub(hub_dev.xhci_slot_idx, hub_num_ports)) {
+                if (!x.markHub(hub_dev.xhci_slot_idx, hub_num_ports, hub_dev.speed == .high and hub_dev.xhci_hub_multi_tt)) {
                     serial.serialWrite("[XHCI] Hub context update failed\n");
                 }
             }
@@ -752,6 +754,7 @@ fn enumerateXhciHubChild(
         hub_dev.xhci_slot_id,
         hp.port,
         parent_is_hs_hub,
+        hub_dev.xhci_hub_multi_tt,
     )) {
         serial.serialWrite("[XHCI] Hub child Address Device failed\n");
         x.disableSlot(slot_id);

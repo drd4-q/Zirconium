@@ -1022,6 +1022,7 @@ pub const XhciController = struct {
             0,
             0,
             false,
+            false,
         );
     }
 
@@ -1035,6 +1036,7 @@ pub const XhciController = struct {
         parent_slot_id: u8,
         parent_port: u8,
         parent_is_hs_hub: bool,
+        parent_multi_tt: bool,
     ) bool {
         if (slot_idx >= self.slots.len) return false;
         const slot = &self.slots[slot_idx];
@@ -1048,8 +1050,10 @@ pub const XhciController = struct {
         self.setInputContextFlags(slot, (1 << 0) | (1 << 1)); // A0 + A1
 
         const slot_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + ctx_size));
-        slot_ctx[0] = (@as(u32, speed_code) << 20) |
+        var slot_info = (@as(u32, speed_code) << 20) |
             (slot.route_string & 0xFFFFF) | (1 << 27);
+        if (parent_is_hs_hub and parent_multi_tt) slot_info |= 1 << 25; // DEV_MTT
+        slot_ctx[0] = slot_info;
         slot_ctx[1] = @as(u32, slot.root_port & 0xFF) << 16;
         slot_ctx[2] = if (parent_is_hs_hub and (speed_code == 1 or speed_code == 2))
             (@as(u32, parent_slot_id) | (@as(u32, parent_port & 0xFF) << 8))
@@ -1078,7 +1082,7 @@ pub const XhciController = struct {
         return self.sendCommandRaw(@as(u64, slot.input_ctx_phys), 0, cmd_ctrl, null);
     }
 
-    pub fn markHub(self: *XhciController, slot_idx: usize, max_ports: u8) bool {
+    pub fn markHub(self: *XhciController, slot_idx: usize, max_ports: u8, multi_tt: bool) bool {
         if (slot_idx >= self.slots.len) return false;
         const slot = &self.slots[slot_idx];
         if (!slot.active) return false;
@@ -1088,6 +1092,11 @@ pub const XhciController = struct {
         self.setInputContextFlags(slot, 1 << 0); // A0
         const slot_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + ctx_size));
         slot_ctx[0] |= 1 << 26; // Hub
+        if (multi_tt) {
+            slot_ctx[0] |= 1 << 25; // DEV_MTT
+        } else {
+            slot_ctx[0] &= ~(@as(u32, 1) << 25);
+        }
         slot_ctx[1] = (slot_ctx[1] & 0x00FFFFFF) | (@as(u32, max_ports) << 24);
 
         const cmd_ctrl = (TRB_TYPE_EVAL_CONTEXT << 10) |

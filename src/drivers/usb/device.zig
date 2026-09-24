@@ -62,6 +62,8 @@ pub const UsbDevice = struct {
     xhci_root_port: u8 = 0,
     xhci_route: u32 = 0,
     xhci_hub_depth: u8 = 0,
+    xhci_hub_multi_tt: bool = false,
+    xhci_hub_interface: u8 = 0,
     xhci_intr_configured: bool = false,
     xhci_bulk_in_configured: bool = false,
     xhci_bulk_out_configured: bool = false,
@@ -160,6 +162,8 @@ pub fn enumerateDevice(
     const vendor_id = @as(u16, dev_desc[8]) | (@as(u16, dev_desc[9]) << 8);
     const product_id = @as(u16, dev_desc[10]) | (@as(u16, dev_desc[11]) << 8);
     const dev_class = dev_desc[4];
+    const dev_protocol = dev_desc[6];
+    dev_out.xhci_hub_multi_tt = dev_class == 0x09 and dev_protocol == 2;
 
     // Step 4: Read 9-byte Configuration Descriptor Header to get total length
     var cfg_hdr: [9]u8 = [_]u8{0} ** 9;
@@ -221,6 +225,9 @@ pub fn enumerateDevice(
                     .subclass_code = cfg_buf[off + 6],
                     .protocol_code = cfg_buf[off + 7],
                 };
+                if (current_iface.?.class_code == 0x09) {
+                    dev_out.xhci_hub_interface = current_iface.?.interface_num;
+                }
 
                 if (current_iface.?.class_code == 0x03) {
                     if (current_iface.?.protocol_code == 1) {
@@ -285,6 +292,26 @@ pub fn enumerateDevice(
     }
     serial.serialWrite("[USB] SET_CONFIGURATION OK\n");
     spinDelayMs(20);
+
+    if (dev_out.xhci_hub_multi_tt) {
+        // USB 2.0 MTT hubs expose TT-per-port as interface alternate setting
+        // 1.  Keep the default single-TT mode as a fallback if the hub rejects
+        // the request, but use MTT when the device accepts it.
+        const set_alt_pkt = UsbSetupPacket{
+            .bmRequestType = 0x01,
+            .bRequest = 0x0B, // SET_INTERFACE
+            .wValue = 1,
+            .wIndex = dev_out.xhci_hub_interface,
+            .wLength = 0,
+        };
+        if (ctrl_transfer_fn(new_addr, max_packet0, &set_alt_pkt, null, null)) {
+            serial.serialWrite("[USB] Hub TT mode: MTT (alternate 1)\n");
+        } else {
+            dev_out.xhci_hub_multi_tt = false;
+            serial.serialWrite("[USB] Hub TT mode: single-TT fallback\n");
+        }
+        spinDelayMs(5);
+    }
 
     // Step 8: Configure HID interfaces (Boot Protocol + Report on change)
     if (hid.isWirelessDongle(vendor_id, product_id)) {
