@@ -459,5 +459,13 @@ pub fn enumerateDevice(
     }
     serial.serialWrite(")\n");
 
+    if (primary_dtype == .hub) {
+        serial.serialWrite("[USB] Hub device protocol=");
+        serial.serialWriteDec(dev_protocol);
+        serial.serialWrite(" TT mode=");
+        serial.serialWrite(if (dev_out.xhci_hub_multi_tt) "MTT" else "single-TT");
+        serial.serialWrite("\n");
+    }
+
     return true;
 }

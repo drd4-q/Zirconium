@@ -836,12 +836,22 @@ fn configureXhciDeviceEndpoints(x: *xhci.XhciController, dev: *device.UsbDevice)
                 const ep_num = ep.epNumber();
                 if (x.configureInterruptEndpoint(slot_idx, ep_num, ep.max_packet_size, ep.interval_ms)) {
                     dev.xhci_intr_configured = true;
+                    const queue_dci: u8 = ep_num * 2 + 1;
                     x.queueInterruptTransfer(
                         slot_idx,
-                        ep_num * 2 + 1,
+                        queue_dci,
                         @intFromPtr(&dev.report_buf),
                         @intCast(@min(@max(ep.max_packet_size, 8), 64)),
                     );
+                    serial.serialWrite("[XHCI] HID endpoint queued id=");
+                    serial.serialWriteDec(dev.id);
+                    serial.serialWrite(" slot=");
+                    serial.serialWriteDec(dev.xhci_slot_id);
+                    serial.serialWrite(" dci=");
+                    serial.serialWriteDec(queue_dci);
+                    serial.serialWrite(" ep=");
+                    serial.serialWriteDec(ep_num);
+                    serial.serialWrite("\n");
                 } else {
                     serial.serialWrite("[XHCI] HID endpoint configuration failed at EP");
                     serial.serialWriteDec(ep_num);
@@ -918,6 +928,7 @@ fn processHidReport(dev: *device.UsbDevice, len: usize) void {
 
 var current_poll_xhci: ?*xhci.XhciController = null;
 var current_poll_ctrl_idx: u8 = 0;
+var xhci_hid_event_logged: bool = false;
 
 fn onXhciTransfer(slot_id: u8, dci: u8, rem_bytes: u32, comp_code: u32) void {
     if (current_poll_xhci) |x| {
@@ -928,6 +939,20 @@ fn onXhciTransfer(slot_id: u8, dci: u8, rem_bytes: u32, comp_code: u32) void {
                 d.xhci_intr_configured and d.ctrl_idx == current_poll_ctrl_idx and
                 d.xhci_slot_id == slot_id and (d.ep_in * 2 + 1) == dci)
             {
+                if (!xhci_hid_event_logged) {
+                    serial.serialWrite("[XHCI] HID event id=");
+                    serial.serialWriteDec(d.id);
+                    serial.serialWrite(" slot=");
+                    serial.serialWriteDec(slot_id);
+                    serial.serialWrite(" dci=");
+                    serial.serialWriteDec(dci);
+                    serial.serialWrite(" code=");
+                    serial.serialWriteDec(comp_code);
+                    serial.serialWrite(" residual=");
+                    serial.serialWriteDec(rem_bytes);
+                    serial.serialWrite("\n");
+                    xhci_hid_event_logged = true;
+                }
                 if (comp_code == 1 or comp_code == 13) {
                     const max_p = @min(@max(d.ep_max_packet, 8), 64);
                     const actual_len: usize = if (max_p >= rem_bytes) @as(usize, @intCast(max_p - rem_bytes)) else max_p;
