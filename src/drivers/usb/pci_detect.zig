@@ -106,10 +106,19 @@ pub fn scanPciControllers() usize {
                 mmio_base = readMmioBar(d, 0);
             } else if (ctype == .xhci) {
                 if (d.vendor_id == 0x8086) {
-                    // Linux usb_enable_intel_xhci_ports quirk:
-                    // Route all SuperSpeed and USB 2.0 ports to xHCI
-                    pci.writeConfig(d.bus, d.dev, d.func, 0xD8, 0xFFFFFFFF);
-                    pci.writeConfig(d.bus, d.dev, d.func, 0xD0, 0xFFFFFFFF);
+                    // Linux usb_enable_intel_xhci_ports(): route only the
+                    // ports advertised by the hardware masks.  Writing
+                    // 0xffffffff to the routing registers is not equivalent
+                    // and can leave physical USB2 ports without VBUS/data.
+                    const usb3_mask = pci.readConfig(d.bus, d.dev, d.func, 0xDC);
+                    pci.writeConfig(d.bus, d.dev, d.func, 0xD8, usb3_mask);
+                    const usb2_mask = pci.readConfig(d.bus, d.dev, d.func, 0xD4);
+                    pci.writeConfig(d.bus, d.dev, d.func, 0xD0, usb2_mask);
+                    serial.serialWrite("[USB] Intel xHCI port masks: USB2=0x");
+                    serial.serialWriteHex(usb2_mask);
+                    serial.serialWrite(" USB3=0x");
+                    serial.serialWriteHex(usb3_mask);
+                    serial.serialWrite("\n");
                 }
                 io_base = 0;
                 mmio_base = readMmioBar(d, 0);

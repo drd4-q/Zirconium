@@ -71,6 +71,10 @@ var xhci_count: usize = 0;
 // Re-export USB HID keycode translation from hid driver
 pub const usbKeyToAscii = hid.usbKeyToAscii;
 
+pub fn setHidDebug(enabled: bool) void {
+    hid_input.debug = enabled;
+}
+
 fn enumerateCompositeInterfaces(dev: *device.UsbDevice, c_idx: u8, p: u8, is_low_speed: bool, new_addr: u8) void {
     var if_idx: usize = 1;
     while (if_idx < dev.interface_count and usb_device_count < MAX_USB_DEVICES) : (if_idx += 1) {
@@ -271,6 +275,47 @@ fn xhciCtrlTransferWrapper(addr: u8, maxp0: u8, setup: *const UsbSetupPacket, do
     _ = addr;
     if (current_xhci_ctrl) |x| {
         return x.controlTransfer(current_xhci_slot_idx, maxp0, setup, dout, din);
+    }
+    return false;
+}
+
+fn setControlContext(dev: *device.UsbDevice) void {
+    if (dev.ctrl_idx >= controller_count) return;
+    const ctrl = &controllers[dev.ctrl_idx];
+    switch (ctrl.ctrl_type) {
+        .uhci => {
+            current_uhci_ctrl = if (ctrl.inst_idx < uhci_count) &uhci_instances[ctrl.inst_idx] else null;
+            current_uhci_low_speed = dev.low_speed;
+        },
+        .ehci => {
+            current_ehci_ctrl = if (ctrl.inst_idx < ehci_count) &ehci_instances[ctrl.inst_idx] else null;
+        },
+        .xhci => {
+            current_xhci_ctrl = if (ctrl.inst_idx < xhci_count) &xhci_instances[ctrl.inst_idx] else null;
+            current_xhci_slot_idx = dev.xhci_slot_idx;
+        },
+        else => {},
+    }
+}
+
+fn usbControlTransferByAddress(addr: u8, maxp0: u8, setup: *const UsbSetupPacket, dout: ?[]const u8, din: ?[]u8) bool {
+    var d_idx: usize = 0;
+    while (d_idx < usb_device_count) : (d_idx += 1) {
+        const dev = &usb_devices[d_idx];
+        if (!dev.active or dev.addr != addr or dev.ctrl_idx >= controller_count) continue;
+        const ctrl = &controllers[dev.ctrl_idx];
+        switch (ctrl.ctrl_type) {
+            .uhci => if (ctrl.inst_idx < uhci_count) {
+                return uhci_instances[ctrl.inst_idx].controlTransfer(dev.addr, dev.low_speed, maxp0, setup, dout, din);
+            },
+            .ehci => if (ctrl.inst_idx < ehci_count) {
+                return ehci_instances[ctrl.inst_idx].controlTransfer(dev.addr, maxp0, setup, dout, din);
+            },
+            .xhci => if (ctrl.inst_idx < xhci_count) {
+                return xhci_instances[ctrl.inst_idx].controlTransfer(dev.xhci_slot_idx, maxp0, setup, dout, din);
+            },
+            else => {},
+        }
     }
     return false;
 }
@@ -589,14 +634,16 @@ pub fn init() void {
             else => null,
         };
         if (ctrl_fn) |cfn| {
+            setControlContext(hub_dev);
             var hub_ports: [8]hub.HubPortInfo = undefined;
-            const num_conn = hub.configureHubPorts(hub_dev.addr, 8, cfn, hub_ports[0..]);
+            const num_conn = hub.configureHubPorts(hub_dev.addr, hub_dev.ep0_max_packet, usbControlTransferByAddress, hub_ports[0..]);
             var p_i: usize = 0;
             while (p_i < num_conn and usb_device_count < MAX_USB_DEVICES) : (p_i += 1) {
                 const hp = &hub_ports[p_i];
                 if (hp.connected and hp.enabled) {
                     const dev = &usb_devices[usb_device_count];
                     const new_addr: u8 = @intCast(usb_device_count + 1);
+                    setControlContext(hub_dev);
                     if (device.enumerateDevice(
                         hub_dev.ctrl_idx,
                         hp.port - 1,
@@ -706,6 +753,22 @@ fn configureXhciDeviceEndpoints(x: *xhci.XhciController, dev: *device.UsbDevice)
 
 fn processHidReport(dev: *device.UsbDevice, len: usize) void {
     if (len == 0 or len > dev.report_buf.len) return;
+
+    // Opt-in trace: `usb debug on` makes it possible to distinguish a lost
+    // HCD transfer from a HID decoding/input-ring problem on real hardware.
+    if (hid_input.debug and dev.dev_type == .keyboard) {
+        serial.serialWrite("[USB-HID] keyboard report addr=");
+        serial.serialWriteDec(dev.addr);
+        serial.serialWrite(" len=");
+        serial.serialWriteDec(len);
+        serial.serialWrite(" data=");
+        var trace_i: usize = 0;
+        while (trace_i < len) : (trace_i += 1) {
+            serial.serialWriteHex(dev.report_buf[trace_i]);
+            serial.serialWrite(" ");
+        }
+        serial.serialWrite("\n");
+    }
 
     hid_core.processRawDeviceReport(dev, len);
 
@@ -898,17 +961,25 @@ pub fn printUsbStatus(writeFn: *const fn (s: []const u8) void, writeDecFn: *cons
         var p: usize = 0;
         while (p < c.num_ports) : (p += 1) {
             const port = &c.ports[p];
+            const power_known = c.ctrl_type == .ehci or c.ctrl_type == .xhci;
             writeFn("      Port ");
             writeDecFn(port.port);
             writeFn(": ");
             if (port.connected) {
                 writeFn("[CONNECTED] ");
+                if (power_known) {
+                    writeFn(if (port.powered) "POWER=ON " else "POWER=OFF ");
+                } else {
+                    writeFn("POWER=N/A ");
+                }
                 writeFn(port.speed);
                 writeFn(" - ");
                 writeFn(port.device_desc);
                 writeFn("\n");
+            } else if (power_known) {
+                writeFn(if (port.powered) "[DISCONNECTED] POWER=ON (Empty)\n" else "[DISCONNECTED] POWER=OFF (Empty)\n");
             } else {
-                writeFn("[DISCONNECTED] (Empty)\n");
+                writeFn("[DISCONNECTED] POWER=N/A (Empty)\n");
             }
         }
         writeFn("\n");

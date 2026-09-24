@@ -257,6 +257,18 @@ fn runArpcache(_: []const u8) void {
     arp_cache.printCache();
 }
 fn runUsb(args: []const u8) void {
+    if (eql(args, "debug on")) {
+        usb_drv.setHidDebug(true);
+        vga.write("  USB HID debug: ON (raw reports and decoded keys on serial)\n");
+        root.serial.serialWrite("[USB-HID] debug=ON\n");
+        return;
+    } else if (eql(args, "debug off")) {
+        usb_drv.setHidDebug(false);
+        vga.write("  USB HID debug: OFF\n");
+        root.serial.serialWrite("[USB-HID] debug=OFF\n");
+        return;
+    }
+
     // Dispatch helper matching eql(cmd_name, "usb") and eql(cmd_name, "lsusb")
     if (eql(args, "wifi")) {
         usb_prog.runWifi();
@@ -844,6 +856,7 @@ fn printHelp(_: []const u8) void {
     vga.write("    smp/cpuinfo   SMP & per-CPU status\n");
     vga.write("    acpi          ACPI tables (RSDP, MADT)\n");
     vga.write("    usb           USB controllers & devices status\n");
+    vga.write("    usb debug on  trace HID reports/keys on serial\n");
     vga.write("    usb storage   USB mass storage & disk status\n");
     vga.write("    usb wifi      USB Wi-Fi adapter status\n\n");
     vga.write("  Filesystem:\n");

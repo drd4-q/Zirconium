@@ -106,6 +106,7 @@ pub const UsbPortStatus = struct {
     port: u8,
     connected: bool,
     enabled: bool,
+    powered: bool = true,
     speed: []const u8,
     device_desc: []const u8,
 };

@@ -231,23 +231,49 @@ pub const EhciController = struct {
 
         writeMmio32(self.op_regs + 0x18, async_qh_phys);
 
-        // Claim ports by setting CONFIGFLAG = 1
-        writeMmio32(self.op_regs + 0x40, 1);
+        // Linux starts the controller before driving PORTSC.PP.  Some
+        // controllers ignore power writes while the host is still stopped,
+        // which leaves the keyboard completely unpowered.
+        usbcmd = readMmio32(self.op_regs + 0x00);
+        writeMmio32(self.op_regs + 0x00, usbcmd | (1 << 0)); // Run first
+        spinDelayMs(5);
+        var run_wait: u32 = 0;
+        while (run_wait < 1000 and (readMmio32(self.op_regs + 0x04) & (1 << 12)) != 0) : (run_wait += 1) {
+            spinDelayMs(0);
+        }
+        if (run_wait >= 1000) {
+            serial.serialWrite("[EHCI] WARN: controller did not leave HALT state\n");
+        }
 
-        // Power on all ports (PORTSC.PP = 1)
+        // Claim the ports only after Run is visible.  Linux also delays the
+        // handoff briefly before enabling the async/periodic schedules.
+        writeMmio32(self.op_regs + 0x40, 1);
+        spinDelayMs(5);
+        usbcmd = readMmio32(self.op_regs + 0x00);
+        writeMmio32(self.op_regs + 0x00, usbcmd | (1 << 0) | (1 << 4) | (1 << 5));
+        // QEMU and a few older controllers do not report ASS/PSS in the
+        // operational status register until the first schedule entry is
+        // consumed, so do not treat those bits as a power-ready barrier.
+        spinDelayMs(1);
+
+        // Power each port and read the register back.  Keep the diagnostic
+        // explicit: a missing PP bit is a hardware/BIOS handoff problem, not
+        // a HID parsing problem.
         var p: u8 = 0;
         while (p < self.num_ports) : (p += 1) {
             const port_reg = self.op_regs + 0x44 + (@as(usize, p) * 4);
             const val = readMmio32(port_reg);
             writeMmio32(port_reg, val | (1 << 12)); // Port Power
+            const powered = readMmio32(port_reg);
+            if ((powered & (1 << 12)) == 0) {
+                serial.serialWrite("[EHCI] Port ");
+                serial.serialWriteDec(p + 1);
+                serial.serialWrite(": VBUS power did not latch\n");
+            }
         }
-        spinDelayMs(100);
+        spinDelayMs(20);
 
-        // Start Controller: Run (bit 0), Async Enable (bit 5), Periodic Enable (bit 4)
-        usbcmd = readMmio32(self.op_regs + 0x00);
-        writeMmio32(self.op_regs + 0x00, usbcmd | (1 << 0) | (1 << 4) | (1 << 5));
-
-        // Scan and initialize ports
+        // Scan and initialize ports after VBUS is actually enabled.
         self.checkPorts();
 
         return true;
@@ -273,6 +299,12 @@ pub const EhciController = struct {
         while (p < self.num_ports) : (p += 1) {
             const port_reg = self.op_regs + 0x44 + (@as(usize, p) * 4);
             var status = readMmio32(port_reg);
+            if ((status & (1 << 12)) == 0) {
+                writeMmio32(port_reg, (status & ~@as(u32, 1 << 2)) | (1 << 12));
+                spinDelayMs(2);
+                status = readMmio32(port_reg);
+            }
+
             const connected = (status & 0x01) != 0;
 
             if (connected) {
@@ -290,6 +322,7 @@ pub const EhciController = struct {
                         .port = p + 1,
                         .connected = false,
                         .enabled = false,
+                        .powered = (readMmio32(port_reg) & (1 << 12)) != 0,
                         .speed = "Low-Speed (1.5 Mbps)",
                         .device_desc = "Routed to Companion Controller",
                     };
@@ -312,6 +345,7 @@ pub const EhciController = struct {
                         .port = p + 1,
                         .connected = false,
                         .enabled = false,
+                        .powered = (readMmio32(port_reg) & (1 << 12)) != 0,
                         .speed = "Full-Speed (12 Mbps)",
                         .device_desc = "Routed to Companion Controller",
                     };
@@ -322,6 +356,7 @@ pub const EhciController = struct {
                     .port = p + 1,
                     .connected = true,
                     .enabled = enabled,
+                    .powered = (status & (1 << 12)) != 0,
                     .speed = "High-Speed (480 Mbps)",
                     .device_desc = "USB 2.0 High-Speed Device",
                 };
@@ -330,6 +365,7 @@ pub const EhciController = struct {
                     .port = p + 1,
                     .connected = false,
                     .enabled = false,
+                    .powered = (status & (1 << 12)) != 0,
                     .speed = "High-Speed (480 Mbps)",
                     .device_desc = "No device",
                 };

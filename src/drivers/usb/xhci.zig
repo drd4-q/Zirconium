@@ -436,29 +436,18 @@ pub const XhciController = struct {
         writeMmio64(intr0 + 0x18, @as(u64, self.event_ring_phys) | (1 << 3)); // ERDP (EHB bit 3)
         writeMmio32(intr0 + 0x00, 2); // IMAN: Interrupt Enable = 1
 
-        // ─── Power on root hub ports ────────────────────────────────
-        serial.serialWrite("[XHCI] Powering on ");
-        serial.serialWriteDec(self.num_ports);
-        serial.serialWrite(" root hub ports...\n");
-        var p: u8 = 0;
-        while (p < self.num_ports) : (p += 1) {
-            const portsc_addr = self.op_regs + 0x400 + (@as(usize, p) * 0x10);
-            const val = readMmio32(portsc_addr);
-            // Neutralize bits so we don't clear RW1C change bits, don't write 1 to PED (RW1CS),
-            // and assert Port Power (PP bit 9)
-            writeMmio32(portsc_addr, xhciPortStateToNeutral(val) | (1 << 9));
-        }
-        spinDelayMs(100);
-
-        // ─── Start controller ───────────────────────────────────────
+        // ─── Start controller before touching PORTSC.PP ─────────────
+        // Linux powers root ports only after the controller is running; some
+        // xHCI implementations ignore a PP write while HCH is still asserted.
         serial.serialWrite("[XHCI] Starting controller (USBCMD Run/IE)...\n");
         usbcmd = readMmio32(self.op_regs + 0x00);
         writeMmio32(self.op_regs + 0x00, usbcmd | (1 << 0) | (1 << 2));
+        spinDelayMs(5);
 
         var wait_run: u32 = 0;
         while (wait_run < 1000) : (wait_run += 1) {
             if ((readMmio32(self.op_regs + 0x04) & 1) == 0) break; // HCH == 0
-            spinDelayMs(1);
+            spinDelayMs(0);
         }
         if (wait_run >= 1000) {
             serial.serialWrite("[XHCI] WARN: Controller did not start (HCH still set) after 1s\n");
@@ -466,7 +455,26 @@ pub const XhciController = struct {
             serial.serialWrite("[XHCI] Controller running\n");
         }
 
-        // Scan ports and detect connections
+        // ─── Power on root hub ports and verify readback ────────────
+        serial.serialWrite("[XHCI] Powering on ");
+        serial.serialWriteDec(self.num_ports);
+        serial.serialWrite(" root hub ports...\n");
+        var p: u8 = 0;
+        while (p < self.num_ports) : (p += 1) {
+            const portsc_addr = self.op_regs + 0x400 + (@as(usize, p) * 0x10);
+            const val = readMmio32(portsc_addr);
+            // Neutralize RW1C/RW1S bits and assert Port Power (PP bit 9).
+            writeMmio32(portsc_addr, xhciPortStateToNeutral(val) | (1 << 9));
+            const powered = readMmio32(portsc_addr);
+            if ((powered & (1 << 9)) == 0) {
+                serial.serialWrite("[XHCI] Port ");
+                serial.serialWriteDec(p + 1);
+                serial.serialWrite(": VBUS power did not latch\n");
+            }
+        }
+        spinDelayMs(20);
+
+        // Scan ports and detect connections only after VBUS is enabled.
         self.checkPorts();
 
         serial.serialWrite("[XHCI] Init complete\n");
@@ -542,10 +550,17 @@ pub const XhciController = struct {
                     .port = p + 1,
                     .connected = false,
                     .enabled = false,
+                    .powered = false,
                     .speed = "Unknown",
                     .device_desc = "MMIO error",
                 };
                 continue;
+            }
+
+            if ((status & (1 << 9)) == 0) {
+                writeMmio32(portsc_addr, xhciPortStateToNeutral(status) | (1 << 9));
+                spinDelayMs(2);
+                status = readMmio32(portsc_addr);
             }
 
             const connected = (status & 0x01) != 0;
@@ -622,6 +637,7 @@ pub const XhciController = struct {
                     .port = p + 1,
                     .connected = true,
                     .enabled = enabled,
+                    .powered = (status & (1 << 9)) != 0,
                     .speed = speed_str,
                     .device_desc = desc_str,
                 };
@@ -630,6 +646,7 @@ pub const XhciController = struct {
                     .port = p + 1,
                     .connected = false,
                     .enabled = false,
+                    .powered = (status & (1 << 9)) != 0,
                     .speed = "SuperSpeed (5 Gbps)",
                     .device_desc = "No device",
                 };

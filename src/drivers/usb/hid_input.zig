@@ -1,6 +1,13 @@
 const std = @import("std");
+const root = @import("root");
+const serial = root.serial;
 const keyboard = @import("../keyboard.zig");
 const mouse = @import("../mouse.zig");
+
+/// Emit raw HID reports and decoded USB keys on the serial console when the
+/// user runs `usb debug on`.  It is intentionally opt-in because a keyboard
+/// can produce a report for every held/released key.
+pub var debug: bool = false;
 
 // USB HID Input Mapping (corresponds to Linux drivers/hid/hid-input.c)
 // Translates raw HID reports (Usage Page 0x07 Keyboard, Mouse REL_X/REL_Y)
@@ -160,6 +167,11 @@ pub fn handleKeyboardReport(
                 }
             } else if (hidUsageToAscii(key, shift, ctrl, caps_lock_state, num_lock_state)) |ch| {
                 keyboard.pushKey(ch);
+                if (debug) {
+                    serial.serialWrite("[USB-HID] key=");
+                    serial.serialWriteHex(ch);
+                    serial.serialWrite("\n");
+                }
             }
         }
     }

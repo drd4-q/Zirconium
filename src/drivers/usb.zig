@@ -116,6 +116,10 @@ pub fn printUsbStatus(writeFn: *const fn (s: []const u8) void, writeDecFn: *cons
     mod.printUsbStatus(writeFn, writeDecFn, writeHexFn);
 }
 
+pub fn setHidDebug(enabled: bool) void {
+    mod.setHidDebug(enabled);
+}
+
 pub const usbKeyToAscii = mod.usbKeyToAscii;
 pub const usbControlTransfer = mod.usbControlTransfer;
 pub const usbBulkTransfer = mod.usbBulkTransfer;

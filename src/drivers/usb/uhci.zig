@@ -112,7 +112,7 @@ pub const UhciController = struct {
     irq: u8,
     io_base: u16,
     num_ports: u8 = 2,
-    ports: [2]UsbPortStatus = undefined,
+    ports: [7]UsbPortStatus = undefined,
 
     // PMM DMA Memory
     frame_list_phys: usize = 0,
@@ -209,6 +209,20 @@ pub const UhciController = struct {
         // Start UHCI Schedule (Run = 1, Configured = 1, Max Packet 64 = 1)
         outw(self.io_base + 0x00, 0x00C1);
 
+        // Linux's uhci_count_ports(): the nominal two-port value is only a
+        // minimum; bit 7 is the UHCI "always set" signature for a real port.
+        // Missing ports 3..7 would otherwise look like an unpowered keyboard.
+        var detected_ports: u8 = 0;
+        while (detected_ports < 7) : (detected_ports += 1) {
+            const port_status = inw(self.io_base + 0x10 + (@as(u16, detected_ports) * 2));
+            if (port_status == 0xFFFF or (port_status & 0x0080) == 0) break;
+        }
+        if (detected_ports == 0) detected_ports = 2;
+        self.num_ports = detected_ports;
+        serial.serialWrite("[UHCI] Detected ");
+        serial.serialWriteDec(self.num_ports);
+        serial.serialWrite(" root port(s)\n");
+
         // Scan ports and detect connections
         self.checkPorts();
 
@@ -264,6 +278,7 @@ pub const UhciController = struct {
                     .port = p + 1,
                     .connected = true,
                     .enabled = enabled,
+                    .powered = false, // UHCI has no software VBUS/PP bit
                     .speed = if (low_speed) "Low-Speed (1.5 Mbps)" else "Full-Speed (12 Mbps)",
                     .device_desc = if (low_speed) "USB HID (Keyboard/Mouse)" else "USB Full-Speed Device",
                 };
@@ -272,6 +287,7 @@ pub const UhciController = struct {
                     .port = p + 1,
                     .connected = false,
                     .enabled = false,
+                    .powered = false, // UHCI has no software VBUS/PP bit
                     .speed = "Full-Speed (12 Mbps)",
                     .device_desc = "No device",
                 };
