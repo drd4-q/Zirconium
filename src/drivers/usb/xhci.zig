@@ -15,6 +15,10 @@ pub const XhciTrb = extern struct {
     control: u32 = 0, // Bit 0: Cycle bit, bits 15:10: Type
 };
 
+const MAX_PENDING_XHCI_EVENTS: usize = 256;
+const XHCI_LEGACY_DISABLE_SMI: u32 = (0x7 << 1) | (0xFF << 5) | (0x7 << 17);
+const XHCI_LEGACY_SMI_EVENTS: u32 = 0x7 << 29;
+
 pub const ErstEntry = extern struct {
     ring_segment_base_address: u64 = 0,
     ring_segment_size: u16 = 0,
@@ -53,6 +57,14 @@ inline fn readTrbControl(trb: *const XhciTrb) u32 {
 
 inline fn readTrbStatus(trb: *const XhciTrb) u32 {
     return @as(*const volatile u32, @ptrCast(&trb.status)).*;
+}
+
+inline fn snapshotTrb(trb: *const XhciTrb) XhciTrb {
+    return XhciTrb{
+        .parameter = @as(*const volatile u64, @ptrCast(&trb.parameter)).*,
+        .status = readTrbStatus(trb),
+        .control = readTrbControl(trb),
+    };
 }
 
 inline fn readMmio32(addr: usize) u32 {
@@ -176,6 +188,12 @@ pub const XhciController = struct {
     erst: *ErstEntry = undefined,
     event_dequeue: usize = 0,
     event_cycle: u1 = 1,
+    // Synchronous command/control/bulk waits must not discard transfer
+    // events belonging to an already-running interrupt endpoint.
+    pending_events: [MAX_PENDING_XHCI_EVENTS]XhciTrb = undefined,
+    pending_event_head: usize = 0,
+    pending_event_tail: usize = 0,
+    pending_event_count: usize = 0,
 
     scratchpad_array_phys: usize = 0,
     scratchpad_array_pages: usize = 0,
@@ -183,6 +201,60 @@ pub const XhciController = struct {
     scratchpad_count: usize = 0,
 
     dma_pool: dma.UsbDmaPool = dma.UsbDmaPool.init(),
+
+    fn queuePendingEvent(self: *XhciController, event: XhciTrb) void {
+        if (self.pending_event_count >= self.pending_events.len) {
+            // This should only be possible if the host has produced more
+            // events than the entire event ring while software is blocked.
+            // Do not overwrite an older HID report silently.
+            serial.serialWrite("[XHCI] pending event queue full\n");
+            return;
+        }
+        self.pending_events[self.pending_event_tail] = event;
+        self.pending_event_tail = (self.pending_event_tail + 1) % self.pending_events.len;
+        self.pending_event_count += 1;
+    }
+
+    fn popPendingEvent(self: *XhciController) ?XhciTrb {
+        if (self.pending_event_count == 0) return null;
+        const event = self.pending_events[self.pending_event_head];
+        self.pending_event_head = (self.pending_event_head + 1) % self.pending_events.len;
+        self.pending_event_count -= 1;
+        if (self.pending_event_count == 0) {
+            self.pending_event_head = 0;
+            self.pending_event_tail = 0;
+        }
+        return event;
+    }
+
+    fn takePendingTransfer(self: *XhciController, slot_id: u8, dci: u8) ?XhciTrb {
+        var relative: usize = 0;
+        while (relative < self.pending_event_count) : (relative += 1) {
+            var index = (self.pending_event_head + relative) % self.pending_events.len;
+            const event = self.pending_events[index];
+            const event_type = (event.control >> 10) & 0x3F;
+            const event_slot: u8 = @intCast((event.control >> 24) & 0xFF);
+            const event_dci: u8 = @intCast((event.control >> 16) & 0x1F);
+            if (event_type != TRB_TYPE_TRANSFER_EVENT or event_slot != slot_id or event_dci != dci) continue;
+
+            // Remove the matching entry while preserving the order of all
+            // other deferred events.
+            var move = relative;
+            while (move + 1 < self.pending_event_count) : (move += 1) {
+                const next = (index + 1) % self.pending_events.len;
+                self.pending_events[index] = self.pending_events[next];
+                index = next;
+            }
+            self.pending_event_tail = (self.pending_event_tail + self.pending_events.len - 1) % self.pending_events.len;
+            self.pending_event_count -= 1;
+            if (self.pending_event_count == 0) {
+                self.pending_event_head = 0;
+                self.pending_event_tail = 0;
+            }
+            return event;
+        }
+        return null;
+    }
 
     inline fn encodeTrbLength(_: *const XhciController, len: u32) u32 {
         return trbLength(len);
@@ -197,6 +269,9 @@ pub const XhciController = struct {
         self.device_id = pci_ctrl.device_id;
         self.irq = pci_ctrl.irq;
         self.mmio_base = pci_ctrl.mmio_base;
+        self.pending_event_head = 0;
+        self.pending_event_tail = 0;
+        self.pending_event_count = 0;
 
         serial.serialWrite("[XHCI] Init: PCI ");
         serial.serialWriteDec(pci_ctrl.bus);
@@ -304,8 +379,12 @@ pub const XhciController = struct {
                     } else {
                         serial.serialWrite("[XHCI] BIOS handoff OK\n");
                     }
-                    // Disable all BIOS SMIs (clear SMI enable bits 31..29, clear status bits 21..16)
-                    writeMmio32(cap_offset + 4, 0xE01F0000);
+                    // Disable the firmware SMI sources while preserving the
+                    // read-only status bits, then clear the RW1C event bits.
+                    var legctl = readMmio32(cap_offset + 4);
+                    legctl &= ~XHCI_LEGACY_DISABLE_SMI;
+                    legctl |= XHCI_LEGACY_SMI_EVENTS;
+                    writeMmio32(cap_offset + 4, legctl);
                     bios_handled = true;
                     break;
                 }
@@ -748,17 +827,12 @@ pub const XhciController = struct {
             const ev_cycle: u1 = @intCast(ev_ctrl & 1);
 
             if (ev_cycle == self.event_cycle) {
-                const ev_type = (ev_ctrl >> 10) & 0x3F;
-                const comp_code = (readTrbStatus(ev_trb) >> 24) & 0xFF;
-                const slot_id: u8 = @intCast((ev_ctrl >> 24) & 0xFF);
+                const event = snapshotTrb(ev_trb);
+                const ev_type = (event.control >> 10) & 0x3F;
+                const comp_code = (event.status >> 24) & 0xFF;
+                const slot_id: u8 = @intCast((event.control >> 24) & 0xFF);
 
-                self.event_dequeue += 1;
-                if (self.event_dequeue == 256) {
-                    self.event_dequeue = 0;
-                    self.event_cycle ^= 1;
-                }
-                const erdp_val = @as(u64, self.event_ring_phys + self.event_dequeue * @sizeOf(XhciTrb)) | (1 << 3);
-                writeMmio64(self.rt_regs + 0x38, erdp_val);
+                self.advanceEvent();
 
                 if (ev_type == TRB_TYPE_COMMAND_COMPLETION) {
                     if (out_slot_id) |s| {
@@ -770,6 +844,9 @@ pub const XhciController = struct {
                         serial.serialWrite("\n");
                     }
                     return comp_code == 1; // 1 = Success
+                }
+                if (ev_type == TRB_TYPE_TRANSFER_EVENT) {
+                    self.queuePendingEvent(event);
                 }
             }
             asm volatile ("pause");
@@ -1042,39 +1119,45 @@ pub const XhciController = struct {
 
         const start_tick = timer.ticks;
         var loop_spins: usize = 0;
+        var pending_event = self.takePendingTransfer(slot.slot_id, 1);
         while ((timer.ticks > 0 and timer.ticks - start_tick < 50) or (timer.ticks == 0 and loop_spins < 2_000_000)) : (loop_spins += 1) {
-            const ev_trb = &self.event_ring[self.event_dequeue];
-            const ev_ctrl = readTrbControl(ev_trb);
-            const ev_cycle: u1 = @intCast(ev_ctrl & 1);
-
-            if (ev_cycle == self.event_cycle) {
-                const ev_type = (ev_ctrl >> 10) & 0x3F;
-                const ev_slot = (ev_ctrl >> 24) & 0xFF;
-
-                self.event_dequeue += 1;
-                if (self.event_dequeue == 256) {
-                    self.event_dequeue = 0;
-                    self.event_cycle ^= 1;
+            var event: XhciTrb = undefined;
+            if (pending_event) |queued_event| {
+                event = queued_event;
+                pending_event = null;
+            } else {
+                const ev_trb = &self.event_ring[self.event_dequeue];
+                const ev_ctrl = readTrbControl(ev_trb);
+                const ev_cycle: u1 = @intCast(ev_ctrl & 1);
+                if (ev_cycle != self.event_cycle) {
+                    asm volatile ("pause");
+                    continue;
                 }
-                const erdp_val = @as(u64, self.event_ring_phys + self.event_dequeue * @sizeOf(XhciTrb)) | (1 << 3);
-                writeMmio64(self.rt_regs + 0x38, erdp_val);
 
-                if (ev_type == TRB_TYPE_TRANSFER_EVENT and ev_slot == slot.slot_id) {
-                    const comp_code = (readTrbStatus(ev_trb) >> 24) & 0xFF;
-                    if (comp_code == 1 or comp_code == 13) {
-                        if (is_in and data_in != null) {
-                            const copy_len = @min(data_len, data_in.?.len);
-                            @memcpy(data_in.?[0..copy_len], slot.ctrl_buf[0..copy_len]);
-                        }
-                        return true;
-                    }
-                    serial.serialWrite("[XHCI] Transfer failed with completion code: ");
-                    serial.serialWriteDec(comp_code);
-                    serial.serialWrite("\n");
-                    return false;
+                event = snapshotTrb(ev_trb);
+                const ev_type = (event.control >> 10) & 0x3F;
+                const ev_slot: u8 = @intCast((event.control >> 24) & 0xFF);
+                const ev_dci: u8 = @intCast((event.control >> 16) & 0x1F);
+                self.advanceEvent();
+                if (ev_type != TRB_TYPE_TRANSFER_EVENT or ev_slot != slot.slot_id or ev_dci != 1) {
+                    if (ev_type == TRB_TYPE_TRANSFER_EVENT) self.queuePendingEvent(event);
+                    asm volatile ("pause");
+                    continue;
                 }
             }
-            asm volatile ("pause");
+
+            const comp_code = (event.status >> 24) & 0xFF;
+            if (comp_code == 1 or comp_code == 13) {
+                if (is_in and data_in != null) {
+                    const copy_len = @min(data_len, data_in.?.len);
+                    @memcpy(data_in.?[0..copy_len], slot.ctrl_buf[0..copy_len]);
+                }
+                return true;
+            }
+            serial.serialWrite("[XHCI] Transfer failed with completion code: ");
+            serial.serialWriteDec(comp_code);
+            serial.serialWrite("\n");
+            return false;
         }
         serial.serialWrite("[XHCI] Control transfer timed out after 500ms\n");
         return false;
@@ -1359,42 +1442,53 @@ pub const XhciController = struct {
             const start_tick = timer.ticks;
             var spins: usize = 0;
             var completed = false;
+            var pending_event = self.takePendingTransfer(slot.slot_id, dci);
             while ((timer.ticks > 0 and timer.ticks -% start_tick < 50) or
                 (timer.ticks == 0 and spins < 2_000_000)) : (spins += 1)
             {
-                const ev = &self.event_ring[self.event_dequeue];
-                const ev_control = @as(*const volatile u32, @ptrCast(&ev.control)).*;
-                const ev_cycle: u1 = @intCast(ev_control & 1);
-                if (ev_cycle != self.event_cycle) {
-                    asm volatile ("pause");
-                    continue;
+                var event: XhciTrb = undefined;
+                if (pending_event) |queued_event| {
+                    event = queued_event;
+                    pending_event = null;
+                } else {
+                    const ev = &self.event_ring[self.event_dequeue];
+                    const ev_control = readTrbControl(ev);
+                    const ev_cycle: u1 = @intCast(ev_control & 1);
+                    if (ev_cycle != self.event_cycle) {
+                        asm volatile ("pause");
+                        continue;
+                    }
+
+                    event = snapshotTrb(ev);
+                    const ev_type = (event.control >> 10) & 0x3F;
+                    const ev_slot: u8 = @intCast((event.control >> 24) & 0xFF);
+                    const ev_dci: u8 = @intCast((event.control >> 16) & 0x1F);
+                    self.advanceEvent();
+                    if (ev_type != TRB_TYPE_TRANSFER_EVENT or ev_slot != slot.slot_id or ev_dci != dci) {
+                        if (ev_type == TRB_TYPE_TRANSFER_EVENT) self.queuePendingEvent(event);
+                        asm volatile ("pause");
+                        continue;
+                    }
                 }
 
-                const ev_status = @as(*const volatile u32, @ptrCast(&ev.status)).*;
-                const ev_type = (ev_control >> 10) & 0x3F;
-                const ev_slot: u8 = @intCast((ev_control >> 24) & 0xFF);
-                const ev_dci: u8 = @intCast((ev_control >> 16) & 0x1F);
-                self.advanceEvent();
-                if (ev_type == TRB_TYPE_TRANSFER_EVENT and ev_slot == slot.slot_id and ev_dci == dci) {
-                    const completion = (ev_status >> 24) & 0xFF;
-                    if (completion == 1 or completion == 13) {
-                        const residual: usize = @intCast(ev_status & 0xFFFFFF);
-                        const actual = chunk - @min(residual, chunk);
-                        if (is_in and actual > 0) {
-                            @memcpy(data[transferred .. transferred + actual], slot.bulk_buf[0..actual]);
-                        }
-                        transferred += actual;
-                        completed = true;
-                        if (actual < chunk) return transferred;
-                        break;
+                const ev_status = event.status;
+                const completion = (ev_status >> 24) & 0xFF;
+                if (completion == 1 or completion == 13) {
+                    const residual: usize = @intCast(ev_status & 0xFFFFFF);
+                    const actual = chunk - @min(residual, chunk);
+                    if (is_in and actual > 0) {
+                        @memcpy(data[transferred .. transferred + actual], slot.bulk_buf[0..actual]);
                     }
-                    const recovery_mp: u16 = if (is_in) slot.bulk_in_max_packet else slot.bulk_out_max_packet;
-                    if (!self.recoverBulkEndpoint(slot_idx, ep_num, is_in, recovery_mp)) {
-                        serial.serialWrite("[XHCI] bulk endpoint recovery failed\n");
-                    }
-                    return null;
+                    transferred += actual;
+                    completed = true;
+                    if (actual < chunk) return transferred;
+                    break;
                 }
-                asm volatile ("pause");
+                const recovery_mp: u16 = if (is_in) slot.bulk_in_max_packet else slot.bulk_out_max_packet;
+                if (!self.recoverBulkEndpoint(slot_idx, ep_num, is_in, recovery_mp)) {
+                    serial.serialWrite("[XHCI] bulk endpoint recovery failed\n");
+                }
+                return null;
             }
             if (!completed) {
                 serial.serialWrite("[XHCI] bulk transfer timeout dci=");
@@ -1461,26 +1555,33 @@ pub const XhciController = struct {
     }
 
     pub fn pollEvents(self: *XhciController, on_transfer: *const fn (slot_id: u8, dci: u8, rem_bytes: u32, comp_code: u32) void) void {
+        // Transfer events may have been deferred by a synchronous command,
+        // control, or bulk transfer.  Dispatch those before reading the
+        // hardware event ring so HID reports are not stranded in the queue.
+        while (self.popPendingEvent()) |event| {
+            const event_type = (event.control >> 10) & 0x3F;
+            if (event_type == TRB_TYPE_TRANSFER_EVENT) {
+                const event_slot: u8 = @intCast((event.control >> 24) & 0xFF);
+                const event_dci: u8 = @intCast((event.control >> 16) & 0x1F);
+                const event_status = event.status;
+                on_transfer(event_slot, event_dci, event_status & 0xFFFFFF, (event_status >> 24) & 0xFF);
+            }
+        }
+
         while (true) {
             const ev_trb = &self.event_ring[self.event_dequeue];
             const ev_ctrl = readTrbControl(ev_trb);
             const ev_cycle: u1 = @intCast(ev_ctrl & 1);
             if (ev_cycle != self.event_cycle) break;
 
-            const ev_type = (ev_ctrl >> 10) & 0x3F;
-            const ev_slot: u8 = @intCast((ev_ctrl >> 24) & 0xFF);
-            const ev_status_read = readTrbStatus(ev_trb);
-            const comp_code: u32 = (ev_status_read >> 24) & 0xFF;
-            const rem_bytes: u32 = ev_status_read & 0xFFFFFF;
-            const dci: u8 = @intCast((ev_ctrl >> 16) & 0x1F);
+            const event = snapshotTrb(ev_trb);
+            const ev_type = (event.control >> 10) & 0x3F;
+            const ev_slot: u8 = @intCast((event.control >> 24) & 0xFF);
+            const comp_code: u32 = (event.status >> 24) & 0xFF;
+            const rem_bytes: u32 = event.status & 0xFFFFFF;
+            const dci: u8 = @intCast((event.control >> 16) & 0x1F);
 
-            self.event_dequeue += 1;
-            if (self.event_dequeue == 256) {
-                self.event_dequeue = 0;
-                self.event_cycle ^= 1;
-            }
-            const erdp_val = @as(u64, self.event_ring_phys + self.event_dequeue * @sizeOf(XhciTrb)) | (1 << 3);
-            writeMmio64(self.rt_regs + 0x38, erdp_val);
+            self.advanceEvent();
 
             if (ev_type == TRB_TYPE_TRANSFER_EVENT) {
                 on_transfer(ev_slot, dci, rem_bytes, comp_code);

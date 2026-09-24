@@ -798,7 +798,10 @@ fn onXhciTransfer(slot_id: u8, dci: u8, rem_bytes: u32, comp_code: u32) void {
         var d_k: usize = 0;
         while (d_k < usb_device_count) : (d_k += 1) {
             var d = &usb_devices[d_k];
-            if (d.active and d.ctrl_idx == current_poll_ctrl_idx and d.xhci_slot_id == slot_id and (d.ep_in * 2 + 1) == dci) {
+            if (d.active and (d.dev_type == .keyboard or d.dev_type == .mouse) and
+                d.ctrl_idx == current_poll_ctrl_idx and d.xhci_slot_id == slot_id and
+                (d.ep_in * 2 + 1) == dci)
+            {
                 if (comp_code == 1 or comp_code == 13) {
                     const max_p = @min(@max(d.ep_max_packet, 8), 64);
                     const actual_len: usize = if (max_p >= rem_bytes) @as(usize, @intCast(max_p - rem_bytes)) else max_p;
