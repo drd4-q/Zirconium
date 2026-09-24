@@ -127,12 +127,19 @@ pub fn configureHubPorts(
     var p: u8 = 1;
     while (p <= num_ports and p <= out_ports.len) : (p += 1) {
         const pwr_pkt = makeSetPortFeaturePacket(p, PORT_FEAT_POWER);
-        _ = ctrl_transfer_fn(addr, maxp0, &pwr_pkt, null, null);
+        if (!ctrl_transfer_fn(addr, maxp0, &pwr_pkt, null, null)) {
+            serial.serialWrite("[HUB] Port ");
+            serial.serialWriteDec(p);
+            serial.serialWrite(": SET POWER failed\n");
+        }
     }
 
     // Power stabilization delay (mandatory on real hardware: VBUS ramp + device pullup)
     const delay = @max(pwr_good_time, 100);
     spinDelayMs(delay);
+    // Some external hubs report bPwrOn2PwrGood conservatively and need a
+    // little extra time before their downstream pull-ups become visible.
+    if (delay < 250) spinDelayMs(250 - delay);
 
     var connected_count: usize = 0;
     p = 1;
@@ -141,6 +148,14 @@ pub fn configureHubPorts(
         const st_pkt = makeGetPortStatusPacket(p);
         if (ctrl_transfer_fn(addr, maxp0, &st_pkt, null, &status_buf)) {
             const port_status = @as(u16, status_buf[0]) | (@as(u16, status_buf[1]) << 8);
+            const change_status = @as(u16, status_buf[2]) | (@as(u16, status_buf[3]) << 8);
+            serial.serialWrite("[HUB] Port ");
+            serial.serialWriteDec(p);
+            serial.serialWrite(" status=0x");
+            serial.serialWriteHex(port_status);
+            serial.serialWrite(" change=0x");
+            serial.serialWriteHex(change_status);
+            serial.serialWrite("\n");
             const connected = (port_status & 0x01) != 0;
 
             if (connected) {
@@ -150,12 +165,20 @@ pub fn configureHubPorts(
 
                 // Reset downstream port
                 const rst_pkt = makeSetPortFeaturePacket(p, PORT_FEAT_RESET);
-                _ = ctrl_transfer_fn(addr, maxp0, &rst_pkt, null, null);
+                if (!ctrl_transfer_fn(addr, maxp0, &rst_pkt, null, null)) {
+                    serial.serialWrite("[HUB] Port ");
+                    serial.serialWriteDec(p);
+                    serial.serialWrite(": SET RESET failed\n");
+                }
                 spinDelayMs(50);
 
                 // Clear reset change
                 const clr_pkt = makeClearPortFeaturePacket(p, PORT_FEAT_C_RESET);
-                _ = ctrl_transfer_fn(addr, maxp0, &clr_pkt, null, null);
+                if (!ctrl_transfer_fn(addr, maxp0, &clr_pkt, null, null)) {
+                    serial.serialWrite("[HUB] Port ");
+                    serial.serialWriteDec(p);
+                    serial.serialWrite(": CLEAR RESET CHANGE failed\n");
+                }
                 spinDelayMs(20);
 
                 // Read speed after reset
@@ -175,8 +198,21 @@ pub fn configureHubPorts(
                         .speed = speed,
                     };
                     connected_count += 1;
+                    serial.serialWrite("[HUB] Port ");
+                    serial.serialWriteDec(p);
+                    serial.serialWrite(": post-reset status=0x");
+                    serial.serialWriteHex(st2);
+                    serial.serialWrite("\n");
+                } else {
+                    serial.serialWrite("[HUB] Port ");
+                    serial.serialWriteDec(p);
+                    serial.serialWrite(": post-reset GET STATUS failed\n");
                 }
             }
+        } else {
+            serial.serialWrite("[HUB] Port ");
+            serial.serialWriteDec(p);
+            serial.serialWrite(": GET PORT STATUS failed\n");
         }
     }
 
