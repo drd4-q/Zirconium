@@ -78,13 +78,16 @@ inline fn writeMmio32(addr: usize, val: u32) void {
 }
 
 inline fn readMmio64(addr: usize) u64 {
-    const p: *const volatile u64 = @ptrFromInt(addr);
-    return p.*;
+    return @as(u64, readMmio32(addr)) |
+        (@as(u64, readMmio32(addr + 4)) << 32);
 }
 
 inline fn writeMmio64(addr: usize, val: u64) void {
-    const p: *volatile u64 = @ptrFromInt(addr);
-    p.* = val;
+    // xHCI registers with 64-bit fields are not required to support an
+    // indivisible 64-bit MMIO access.  Use the low/high dword form used by
+    // Linux and keep the ordering explicit for real controllers.
+    writeMmio32(addr, @truncate(val));
+    writeMmio32(addr + 4, @truncate(val >> 32));
 }
 
 inline fn readMmio8(addr: usize) u8 {
@@ -112,6 +115,10 @@ pub const XhciSlot = struct {
     slot_id: u8 = 0,
     port_idx: u8 = 0,
     speed_code: u8 = 0,
+    root_port: u8 = 0,
+    route_string: u32 = 0,
+    parent_slot_id: u8 = 0,
+    parent_port: u8 = 0,
 
     dev_ctx_phys: usize = 0,
     input_ctx_phys: usize = 0,
@@ -256,6 +263,35 @@ pub const XhciController = struct {
         return null;
     }
 
+    fn setInputContextFlags(self: *XhciController, slot: *XhciSlot, add_flags: u32) void {
+        const input_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys));
+        input_ctx[0] = 0; // Drop Context Flags
+        input_ctx[1] = add_flags; // Add Context Flags
+        // Bytes 8..31 of the Input Control Context are reserved in both
+        // 32-byte and 64-byte context modes.  The Slot Context starts at
+        // byte 32 or 64 respectively.
+        var i: usize = 2;
+        while (i < 8) : (i += 1) input_ctx[i] = 0;
+        _ = self;
+    }
+
+    fn copySlotContextToInput(self: *XhciController, slot: *XhciSlot) void {
+        const ctx_size: usize = if (self.csz_64) 64 else 32;
+        const input_slot = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + ctx_size));
+        const output_slot = @as([*]u32, @ptrFromInt(slot.dev_ctx_phys));
+        var i: usize = 0;
+        while (i < 8) : (i += 1) input_slot[i] = output_slot[i];
+    }
+
+    fn copyEndpointContextToInput(self: *XhciController, slot: *XhciSlot, dci: u8) void {
+        const ctx_size: usize = if (self.csz_64) 64 else 32;
+        const input_ep = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + (@as(usize, dci) + 1) * ctx_size));
+        const output_ep = @as([*]u32, @ptrFromInt(slot.dev_ctx_phys + (@as(usize, dci) + 1) * ctx_size));
+        const words: usize = ctx_size / 4;
+        var i: usize = 0;
+        while (i < words) : (i += 1) input_ep[i] = output_ep[i];
+    }
+
     inline fn encodeTrbLength(_: *const XhciController, len: u32) u32 {
         return trbLength(len);
     }
@@ -306,7 +342,7 @@ pub const XhciController = struct {
             return false;
         }
         self.max_slots = @intCast(hcs1 & 0xFF);
-        self.num_ports = @intCast(@min((hcs1 >> 24) & 0xFF, 32));
+        self.num_ports = @intCast(@min((hcs1 >> 24) & 0x7F, 32));
 
         serial.serialWrite("[XHCI] CAPLENGTH=");
         serial.serialWriteDec(cap_len);
@@ -323,6 +359,11 @@ pub const XhciController = struct {
         // Lo occupies bits 31:27.  The two fields are concatenated as a
         // 10-bit count (Hi << 5 | Lo).
         const max_scratchpads: usize = (((hcs2 >> 21) & 0x1F) << 5) | ((hcs2 >> 27) & 0x1F);
+        serial.serialWrite("[XHCI] HCSPARAMS2=0x");
+        serial.serialWriteHex(hcs2);
+        serial.serialWrite(" scratchpads=");
+        serial.serialWriteDec(max_scratchpads);
+        serial.serialWrite("\n");
 
         const hcc1 = readMmio32(self.mmio_base + 0x10);
         self.csz_64 = (hcc1 & (1 << 2)) != 0;
@@ -972,25 +1013,48 @@ pub const XhciController = struct {
     }
 
     pub fn addressDevice(self: *XhciController, slot_idx: usize, port_idx: u8, speed_code: u8) bool {
+        return self.addressDeviceWithRoute(
+            slot_idx,
+            port_idx,
+            speed_code,
+            @as(u8, port_idx + 1),
+            0,
+            0,
+            0,
+            false,
+        );
+    }
+
+    pub fn addressDeviceWithRoute(
+        self: *XhciController,
+        slot_idx: usize,
+        port_idx: u8,
+        speed_code: u8,
+        root_port: u8,
+        route_string: u32,
+        parent_slot_id: u8,
+        parent_port: u8,
+        parent_is_hs_hub: bool,
+    ) bool {
         if (slot_idx >= self.slots.len) return false;
         const slot = &self.slots[slot_idx];
+        slot.port_idx = port_idx;
+        slot.root_port = root_port;
+        slot.route_string = route_string & 0xFFFFF;
+        slot.parent_slot_id = parent_slot_id;
+        slot.parent_port = parent_port;
         const ctx_size: usize = if (self.csz_64) 64 else 32;
-        const input_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys));
 
-        if (self.csz_64) {
-            input_ctx[0] = 0; // Drop Context Flags Low
-            input_ctx[1] = 0; // Drop Context Flags High
-            input_ctx[2] = (1 << 0) | (1 << 1); // Add Context Flags Low: Slot (A0) + EP0 (A1)
-            input_ctx[3] = 0; // Add Context Flags High
-        } else {
-            input_ctx[0] = 0; // Drop Context Flags
-            input_ctx[1] = (1 << 0) | (1 << 1); // Add Context Flags: Slot (A0) + EP0 (A1)
-        }
+        self.setInputContextFlags(slot, (1 << 0) | (1 << 1)); // A0 + A1
 
         const slot_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + ctx_size));
-        slot_ctx[0] = (@as(u32, speed_code) << 20) | (1 << 27);
-        slot_ctx[1] = @as(u32, port_idx + 1) << 16;
-        slot_ctx[2] = 0;
+        slot_ctx[0] = (@as(u32, speed_code) << 20) |
+            (slot.route_string & 0xFFFFF) | (1 << 27);
+        slot_ctx[1] = @as(u32, slot.root_port & 0xFF) << 16;
+        slot_ctx[2] = if (parent_is_hs_hub and (speed_code == 1 or speed_code == 2))
+            (@as(u32, parent_slot_id) | (@as(u32, parent_port & 0xFF) << 8))
+        else
+            0;
         slot_ctx[3] = 0;
 
         const ep0_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + 2 * ctx_size));
@@ -1014,26 +1078,52 @@ pub const XhciController = struct {
         return self.sendCommandRaw(@as(u64, slot.input_ctx_phys), 0, cmd_ctrl, null);
     }
 
+    pub fn markHub(self: *XhciController, slot_idx: usize, max_ports: u8) bool {
+        if (slot_idx >= self.slots.len) return false;
+        const slot = &self.slots[slot_idx];
+        if (!slot.active) return false;
+
+        const ctx_size: usize = if (self.csz_64) 64 else 32;
+        self.copySlotContextToInput(slot);
+        self.setInputContextFlags(slot, 1 << 0); // A0
+        const slot_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + ctx_size));
+        slot_ctx[0] |= 1 << 26; // Hub
+        slot_ctx[1] = (slot_ctx[1] & 0x00FFFFFF) | (@as(u32, max_ports) << 24);
+
+        const cmd_ctrl = (TRB_TYPE_EVAL_CONTEXT << 10) |
+            (@as(u32, slot.slot_id) << 24) | @as(u32, self.cmd_cycle);
+        return self.sendCommandRaw(@as(u64, slot.input_ctx_phys), 0, cmd_ctrl, null);
+    }
+
+    pub fn assignedAddress(self: *XhciController, slot_idx: usize) ?u8 {
+        if (slot_idx >= self.slots.len) return null;
+        const slot = &self.slots[slot_idx];
+        if (!slot.active or slot.dev_ctx_phys == 0) return null;
+        const output_slot = @as([*]u32, @ptrFromInt(slot.dev_ctx_phys));
+        const address: u8 = @intCast(output_slot[3] & 0xFF);
+        return if (address == 0) null else address;
+    }
+
     pub fn updateEp0MaxPacket(self: *XhciController, slot_idx: usize, max_packet: u8) bool {
         if (slot_idx >= self.slots.len or max_packet == 0) return false;
         const slot = &self.slots[slot_idx];
         if (!slot.active) return false;
 
         const ctx_size: usize = if (self.csz_64) 64 else 32;
-        const input_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys));
-        const add_mask: u32 = 0x3; // A0 (slot) + A1 (EP0)
-        if (self.csz_64) {
-            input_ctx[0] = 0;
-            input_ctx[1] = 0;
-            input_ctx[2] = add_mask;
-            input_ctx[3] = 0;
-        } else {
-            input_ctx[0] = 0;
-            input_ctx[1] = add_mask;
-        }
-        const ep0_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + 2 * ctx_size));
         const mps: u32 = @min(@max(max_packet, 8), 512);
-        ep0_ctx[1] = (4 << 3) | (3 << 1) | (mps << 16);
+        const output_ep0 = @as([*]u32, @ptrFromInt(slot.dev_ctx_phys + ctx_size));
+        const current_mps = (output_ep0[1] >> 16) & 0xFFFF;
+        if (current_mps == mps) return true;
+
+        // Evaluate only EP0 (A1).  Reuse the xHC-owned output contexts so
+        // the current slot state, address, and EP0 dequeue pointer survive
+        // the context update.
+        self.copySlotContextToInput(slot);
+        self.copyEndpointContextToInput(slot, 1);
+        self.setInputContextFlags(slot, 1 << 1);
+        const ep0_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + 2 * ctx_size));
+        ep0_ctx[0] &= ~@as(u32, 0x7);
+        ep0_ctx[1] = (ep0_ctx[1] & ~@as(u32, 0xFFFF0000)) | (mps << 16);
 
         const cmd_ctrl = (TRB_TYPE_EVAL_CONTEXT << 10) |
             (@as(u32, slot.slot_id) << 24) | @as(u32, self.cmd_cycle);
@@ -1178,25 +1268,12 @@ pub const XhciController = struct {
         const dci: u8 = ep_num * 2 + 1;
 
         const use_second = (slot.intr_dci != 0 and slot.intr_dci != dci);
-        if (use_second) {
-            slot.intr2_dci = dci;
-        } else {
-            slot.intr_dci = dci;
-        }
         const ring_phys = if (use_second) slot.intr2_ring_phys else slot.intr_ring_phys;
 
-        const input_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys));
         const add_mask: u32 = (1 << 0) | (@as(u32, 1) << @as(u5, @intCast(dci)));
-
-        if (self.csz_64) {
-            input_ctx[0] = 0; // Drop Context Flags Low
-            input_ctx[1] = 0; // Drop Context Flags High
-            input_ctx[2] = add_mask; // Add Context Flags Low: Slot (A0) + Endpoint (Adci)
-            input_ctx[3] = 0; // Add Context Flags High
-        } else {
-            input_ctx[0] = 0; // Drop Context Flags
-            input_ctx[1] = add_mask; // Add Context Flags
-        }
+        self.copySlotContextToInput(slot);
+        self.copyEndpointContextToInput(slot, dci);
+        self.setInputContextFlags(slot, add_mask);
 
         const slot_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + ctx_size));
         const curr_entries = (slot_ctx[0] >> 27) & 0x1F;
@@ -1221,6 +1298,13 @@ pub const XhciController = struct {
 
         const cmd_ctrl = (TRB_TYPE_CONFIG_ENDPOINT << 10) | (@as(u32, slot.slot_id) << 24) | @as(u32, self.cmd_cycle);
         const ok = self.sendCommandRaw(@as(u64, slot.input_ctx_phys), 0, cmd_ctrl, null);
+        if (ok) {
+            if (use_second) {
+                slot.intr2_dci = dci;
+            } else {
+                slot.intr_dci = dci;
+            }
+        }
         if (!ok) {
             serial.serialWrite("[XHCI] Configure Endpoint failed for DCI=");
             serial.serialWriteDec(dci);
@@ -1245,17 +1329,10 @@ pub const XhciController = struct {
         const ring_phys = if (is_in) slot.bulk_in_ring_phys else slot.bulk_out_ring_phys;
         if (ring_phys == 0) return false;
 
-        const input_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys));
         const add_mask: u32 = 1 | (@as(u32, 1) << @as(u5, @intCast(dci)));
-        if (self.csz_64) {
-            input_ctx[0] = 0;
-            input_ctx[1] = 0;
-            input_ctx[2] = add_mask;
-            input_ctx[3] = 0;
-        } else {
-            input_ctx[0] = 0;
-            input_ctx[1] = add_mask;
-        }
+        self.copySlotContextToInput(slot);
+        self.copyEndpointContextToInput(slot, dci);
+        self.setInputContextFlags(slot, add_mask);
 
         const slot_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + ctx_size));
         const entries = @max((slot_ctx[0] >> 27) & 0x1F, dci);
@@ -1270,6 +1347,23 @@ pub const XhciController = struct {
         ep_ctx[3] = @as(u32, @intCast(ring_phys >> 32));
         ep_ctx[4] = max_p;
 
+        const cmd_ctrl = (TRB_TYPE_CONFIG_ENDPOINT << 10) |
+            (@as(u32, slot.slot_id) << 24) | @as(u32, self.cmd_cycle);
+        const ok = self.sendCommandRaw(@as(u64, slot.input_ctx_phys), 0, cmd_ctrl, null);
+        if (!ok) {
+            if (is_in) {
+                slot.bulk_in_dci = 0;
+                slot.bulk_in_max_packet = 0;
+            } else {
+                slot.bulk_out_dci = 0;
+                slot.bulk_out_max_packet = 0;
+            }
+            serial.serialWrite("[XHCI] Configure bulk endpoint failed for DCI=");
+            serial.serialWriteDec(dci);
+            serial.serialWrite("\n");
+            return false;
+        }
+
         if (is_in) {
             slot.bulk_in_dci = dci;
             slot.bulk_in_max_packet = @intCast(max_p);
@@ -1281,16 +1375,7 @@ pub const XhciController = struct {
             slot.bulk_out_enqueue = 0;
             slot.bulk_out_cycle = 1;
         }
-
-        const cmd_ctrl = (TRB_TYPE_CONFIG_ENDPOINT << 10) |
-            (@as(u32, slot.slot_id) << 24) | @as(u32, self.cmd_cycle);
-        const ok = self.sendCommandRaw(@as(u64, slot.input_ctx_phys), 0, cmd_ctrl, null);
-        if (!ok) {
-            serial.serialWrite("[XHCI] Configure bulk endpoint failed for DCI=");
-            serial.serialWriteDec(dci);
-            serial.serialWrite("\n");
-        }
-        return ok;
+        return true;
     }
 
     pub fn configureBulkEndpoints(
@@ -1308,21 +1393,16 @@ pub const XhciController = struct {
         const ctx_size: usize = if (self.csz_64) 64 else 32;
         const dci_in: u8 = ep_in_num * 2 + 1;
         const dci_out: u8 = ep_out_num * 2;
-        const input_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys));
         const add_mask: u32 = 1 | (@as(u32, 1) << @as(u5, @intCast(dci_in))) |
             (@as(u32, 1) << @as(u5, @intCast(dci_out)));
-        if (self.csz_64) {
-            input_ctx[0] = 0;
-            input_ctx[1] = 0;
-            input_ctx[2] = add_mask;
-            input_ctx[3] = 0;
-        } else {
-            input_ctx[0] = 0;
-            input_ctx[1] = add_mask;
-        }
+        self.copySlotContextToInput(slot);
+        self.copyEndpointContextToInput(slot, dci_in);
+        self.copyEndpointContextToInput(slot, dci_out);
+        self.setInputContextFlags(slot, add_mask);
 
         const slot_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + ctx_size));
-        const entries = @max((slot_ctx[0] >> 27) & 0x1F, @as(u32, dci_out));
+        const current_entries = (slot_ctx[0] >> 27) & 0x1F;
+        const entries = @max(current_entries, @as(u32, @max(dci_in, dci_out)));
         slot_ctx[0] = (slot_ctx[0] & ~@as(u32, 0x1F << 27)) | (entries << 27);
 
         const ep_in_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + (@as(usize, dci_in) + 1) * ctx_size));
@@ -1340,6 +1420,20 @@ pub const XhciController = struct {
         ep_out_ctx[3] = @as(u32, @intCast(slot.bulk_out_ring_phys >> 32));
         ep_out_ctx[4] = max_out;
 
+        const cmd_ctrl = (TRB_TYPE_CONFIG_ENDPOINT << 10) |
+            (@as(u32, slot.slot_id) << 24) | @as(u32, self.cmd_cycle);
+        const ok = self.sendCommandRaw(@as(u64, slot.input_ctx_phys), 0, cmd_ctrl, null);
+        if (!ok) {
+            // Do not expose an endpoint to bulkTransfer until the xHC has
+            // accepted its context.
+            slot.bulk_in_dci = 0;
+            slot.bulk_out_dci = 0;
+            slot.bulk_in_max_packet = 0;
+            slot.bulk_out_max_packet = 0;
+            serial.serialWrite("[XHCI] Configure bulk endpoints failed\n");
+            return false;
+        }
+
         slot.bulk_in_dci = dci_in;
         slot.bulk_out_dci = dci_out;
         slot.bulk_in_max_packet = @intCast(max_in);
@@ -1348,10 +1442,7 @@ pub const XhciController = struct {
         slot.bulk_out_enqueue = 0;
         slot.bulk_in_cycle = 1;
         slot.bulk_out_cycle = 1;
-
-        const cmd_ctrl = (TRB_TYPE_CONFIG_ENDPOINT << 10) |
-            (@as(u32, slot.slot_id) << 24) | @as(u32, self.cmd_cycle);
-        return self.sendCommandRaw(@as(u64, slot.input_ctx_phys), 0, cmd_ctrl, null);
+        return true;
     }
 
     pub fn resetEndpoint(self: *XhciController, slot_idx: usize, dci: u8) bool {

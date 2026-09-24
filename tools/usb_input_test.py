@@ -7,7 +7,7 @@ then require the kernel's opt-in serial trace to contain both a raw report and
 decoded ``keyboard.pushKey()`` values.
 
 Usage:
-    python3 tools/usb_input_test.py [uhci|ehci|xhci|all]
+    python3 tools/usb_input_test.py [uhci|ehci|xhci|xhci-hub|all]
 """
 from __future__ import annotations
 
@@ -120,6 +120,12 @@ def run_profile(profile: str, base_port: int) -> str:
             "-device", "qemu-xhci,id=xhci",
             "-device", "usb-kbd,bus=xhci.0,port=1,display=video0",
         ]
+    elif profile == "xhci-hub":
+        devices = [
+            "-device", "qemu-xhci,id=xhci",
+            "-device", "usb-hub,id=hub,bus=xhci.0,port=1",
+            "-device", "usb-kbd,bus=xhci.0,port=1.1,display=video0",
+        ]
     else:
         raise ValueError(profile)
 
@@ -200,9 +206,9 @@ def run_profile(profile: str, base_port: int) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("profile", nargs="?", choices=("uhci", "ehci", "xhci", "all"), default="all")
+    parser.add_argument("profile", nargs="?", choices=("uhci", "ehci", "xhci", "xhci-hub", "all"), default="all")
     args = parser.parse_args()
-    profiles = ("uhci", "ehci", "xhci") if args.profile == "all" else (args.profile,)
+    profiles = ("uhci", "ehci", "xhci", "xhci-hub") if args.profile == "all" else (args.profile,)
     base_port = 4600 + (os.getpid() % 200) * 4
     try:
         for index, profile in enumerate(profiles):

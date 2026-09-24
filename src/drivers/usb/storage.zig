@@ -36,6 +36,12 @@ pub const UsbStorageDrive = struct {
 pub var storage_drives: [MAX_STORAGE_DRIVES]UsbStorageDrive = undefined;
 pub var storage_drive_count: usize = 0;
 
+fn fixedText(buf: []const u8) []const u8 {
+    var len: usize = 0;
+    while (len < buf.len and buf[len] != 0) : (len += 1) {}
+    return buf[0..len];
+}
+
 fn spinDelayMs(ms: u32) void {
     if (timer.ticks > 0) {
         const needed: u64 = if (ms == 0) 0 else ((@as(u64, ms) + 9) / 10);
@@ -415,9 +421,9 @@ pub fn initDrive(dev: *device.UsbDevice) bool {
     // Serial & console announcement
     const size_mb = (sdev.total_sectors * sdev.sector_size) / (1024 * 1024);
     serial.serialWrite("[USB-STORAGE] Initialized USB Drive: ");
-    serial.serialWrite(&sdev.vendor);
+    serial.serialWrite(fixedText(sdev.vendor[0..]));
     serial.serialWrite(" ");
-    serial.serialWrite(&sdev.product);
+    serial.serialWrite(fixedText(sdev.product[0..]));
     serial.serialWrite(" (");
     serial.serialWriteDec(sdev.total_sectors);
     serial.serialWrite(" sectors, ");
@@ -452,7 +458,9 @@ pub fn init() usize {
             }
         }
 
-        if (is_storage and dev.ep_bulk_in != 0 and dev.ep_bulk_out != 0) {
+        const xhci_endpoints_ready = dev.xhci_slot_id == 0 or
+            (dev.xhci_bulk_in_configured and dev.xhci_bulk_out_configured);
+        if (is_storage and dev.ep_bulk_in != 0 and dev.ep_bulk_out != 0 and xhci_endpoints_ready) {
             if (initDrive(dev)) {
                 initialized_count += 1;
             }
@@ -486,15 +494,15 @@ pub fn printStatus(
         writeFn("):\n");
 
         writeFn("    Vendor:       ");
-        writeFn(&d.vendor);
+        writeFn(fixedText(d.vendor[0..]));
         writeFn("\n");
 
         writeFn("    Product:      ");
-        writeFn(&d.product);
+        writeFn(fixedText(d.product[0..]));
         writeFn("\n");
 
         writeFn("    Revision:     ");
-        writeFn(&d.revision);
+        writeFn(fixedText(d.revision[0..]));
         writeFn("\n");
 
         writeFn("    Capacity:     ");

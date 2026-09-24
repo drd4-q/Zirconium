@@ -53,6 +53,12 @@ pub const UsbDevice = struct {
     caps_lock: bool = false,
     xhci_slot_id: u8 = 0,
     xhci_slot_idx: u8 = 0,
+    // Topology used to address an xHCI device below an external hub.
+    xhci_parent_slot_id: u8 = 0,
+    xhci_parent_port: u8 = 0,
+    xhci_root_port: u8 = 0,
+    xhci_route: u32 = 0,
+    xhci_hub_depth: u8 = 0,
     xhci_intr_configured: bool = false,
     xhci_bulk_in_configured: bool = false,
     xhci_bulk_out_configured: bool = false,

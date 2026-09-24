@@ -98,6 +98,11 @@ fn enumerateCompositeInterfaces(dev: *device.UsbDevice, c_idx: u8, p: u8, is_low
             dev_extra.is_wireless = dev.is_wireless;
             dev_extra.xhci_slot_id = dev.xhci_slot_id;
             dev_extra.xhci_slot_idx = dev.xhci_slot_idx;
+            dev_extra.xhci_parent_slot_id = dev.xhci_parent_slot_id;
+            dev_extra.xhci_parent_port = dev.xhci_parent_port;
+            dev_extra.xhci_root_port = dev.xhci_root_port;
+            dev_extra.xhci_route = dev.xhci_route;
+            dev_extra.xhci_hub_depth = dev.xhci_hub_depth;
 
             var found_ep = false;
             var ep_k: usize = 0;
@@ -443,8 +448,12 @@ pub fn init() void {
                                                 current_xhci_slot_idx = slot_idx;
 
                                                 var dev = &usb_devices[usb_device_count];
+                                                dev.* = .{};
                                                 dev.xhci_slot_id = slot_id;
                                                 dev.xhci_slot_idx = @intCast(slot_idx);
+                                                dev.xhci_root_port = p + 1;
+                                                dev.xhci_route = 0;
+                                                dev.xhci_hub_depth = 0;
 
                                                 const is_low_speed = (speed_code == 2);
                                                 const dev_speed: UsbSpeed = if (is_low_speed)
@@ -455,7 +464,7 @@ pub fn init() void {
                                                     .super_speed
                                                 else
                                                     .full;
-                                                const new_addr: u8 = @intCast(usb_device_count + 1);
+                                                const new_addr: u8 = x.assignedAddress(slot_idx) orelse @intCast(usb_device_count + 1);
 
                                                 if (device.enumerateDevice(
                                                     c_idx,
@@ -474,7 +483,9 @@ pub fn init() void {
 
                                                     // Configure endpoints from the parsed interface class. HID gets interrupt-IN
                                                     // queues; storage and Wi-Fi get bulk endpoints.
-                                                    _ = x.updateEp0MaxPacket(slot_idx, dev.ep0_max_packet);
+                                                    if (!x.updateEp0MaxPacket(slot_idx, dev.ep0_max_packet)) {
+                                                        serial.serialWrite("[XHCI] EP0 max-packet update failed\n");
+                                                    }
                                                     configureXhciDeviceEndpoints(x, dev);
 
                                                     // Configure composite interface records as well.
@@ -636,13 +647,41 @@ pub fn init() void {
         if (ctrl_fn) |cfn| {
             setControlContext(hub_dev);
             var hub_ports: [8]hub.HubPortInfo = undefined;
-            const num_conn = hub.configureHubPorts(hub_dev.addr, hub_dev.ep0_max_packet, usbControlTransferByAddress, hub_ports[0..]);
+            var hub_num_ports: u8 = 0;
+            const num_conn = hub.configureHubPorts(hub_dev.addr, hub_dev.ep0_max_packet, usbControlTransferByAddress, hub_ports[0..], &hub_num_ports);
+            if (ctrl.ctrl_type == .xhci and hub_dev.xhci_slot_id != 0 and ctrl.inst_idx < xhci_count) {
+                const x = &xhci_instances[ctrl.inst_idx];
+                if (!x.markHub(hub_dev.xhci_slot_idx, hub_num_ports)) {
+                    serial.serialWrite("[XHCI] Hub context update failed\n");
+                }
+            }
             var p_i: usize = 0;
             while (p_i < num_conn and usb_device_count < MAX_USB_DEVICES) : (p_i += 1) {
                 const hp = &hub_ports[p_i];
-                if (hp.connected and hp.enabled) {
-                    const dev = &usb_devices[usb_device_count];
+                if (!hp.connected or !hp.enabled) continue;
+
+                const dev = &usb_devices[usb_device_count];
+                if (ctrl.ctrl_type == .xhci and hub_dev.xhci_slot_id != 0 and ctrl.inst_idx < xhci_count) {
+                    const x = &xhci_instances[ctrl.inst_idx];
+                    const shift: u5 = @intCast(@min(@as(usize, hub_dev.xhci_hub_depth) * 4, 19));
+                    const port_route: u32 = @as(u32, @min(hp.port, 15)) << shift;
+                    const route = hub_dev.xhci_route | port_route;
+                    if (enumerateXhciHubChild(x, hub_dev, hp, dev, route, hub_dev.xhci_hub_depth + 1)) {
+                        usb_device_count += 1;
+                        const extra_start = usb_device_count;
+                        enumerateCompositeInterfaces(dev, hub_dev.ctrl_idx, hp.port - 1, hp.speed == .low, dev.addr);
+                        if (!x.updateEp0MaxPacket(dev.xhci_slot_idx, dev.ep0_max_packet)) {
+                            serial.serialWrite("[XHCI] child EP0 max-packet update failed\n");
+                        }
+                        configureXhciDeviceEndpoints(x, dev);
+                        var extra_i = extra_start;
+                        while (extra_i < usb_device_count) : (extra_i += 1) {
+                            configureXhciDeviceEndpoints(x, &usb_devices[extra_i]);
+                        }
+                    }
+                } else {
                     const new_addr: u8 = @intCast(usb_device_count + 1);
+                    dev.* = .{};
                     setControlContext(hub_dev);
                     if (device.enumerateDevice(
                         hub_dev.ctrl_idx,
@@ -655,9 +694,6 @@ pub fn init() void {
                         false,
                     )) {
                         usb_device_count += 1;
-                        if (dev.dev_type == .keyboard or dev.dev_type == .mouse) {
-                            _ = hid_core.registerHidDevice(usb_device_count - 1, dev, dev.interface_num, dev.dev_type);
-                        }
                     }
                 }
             }
@@ -669,6 +705,88 @@ pub fn init() void {
         serial.serialWriteDec(storage_count);
         serial.serialWrite(" drive(s) online\n");
     }
+}
+
+fn enumerateXhciHubChild(
+    x: *xhci.XhciController,
+    hub_dev: *device.UsbDevice,
+    hp: *hub.HubPortInfo,
+    dev: *device.UsbDevice,
+    route_string: u32,
+    hub_depth: u8,
+) bool {
+    const speed_code: u8 = switch (hp.speed) {
+        .low => 2,
+        .full => 1,
+        .high => 3,
+        .super_speed => 4,
+        .super_speed_plus => 5,
+    };
+    const root_port: u8 = if (hub_dev.xhci_root_port != 0) hub_dev.xhci_root_port else hub_dev.port;
+    if (root_port == 0) return false;
+
+    const slot_id = x.enableSlot() orelse return false;
+    const slot_idx = x.allocSlot(slot_id, root_port - 1, speed_code) orelse {
+        x.disableSlot(slot_id);
+        return false;
+    };
+
+    const parent_is_hs_hub = hub_dev.speed == .high;
+    serial.serialWrite("[XHCI] Hub child address: root=");
+    serial.serialWriteDec(root_port);
+    serial.serialWrite(" route=0x");
+    serial.serialWriteHex(route_string);
+    serial.serialWrite(" parent_slot=");
+    serial.serialWriteDec(hub_dev.xhci_slot_id);
+    serial.serialWrite(" parent_port=");
+    serial.serialWriteDec(hp.port);
+    serial.serialWrite("\n");
+    if (!x.addressDeviceWithRoute(
+        slot_idx,
+        root_port - 1,
+        speed_code,
+        root_port,
+        route_string,
+        hub_dev.xhci_slot_id,
+        hp.port,
+        parent_is_hs_hub,
+    )) {
+        serial.serialWrite("[XHCI] Hub child Address Device failed\n");
+        x.disableSlot(slot_id);
+        return false;
+    }
+
+    const assigned_addr = x.assignedAddress(slot_idx) orelse {
+        serial.serialWrite("[XHCI] Hub child has no assigned USB address\n");
+        x.disableSlot(slot_id);
+        return false;
+    };
+
+    dev.* = .{};
+    dev.xhci_slot_id = slot_id;
+    dev.xhci_slot_idx = @intCast(slot_idx);
+    dev.xhci_parent_slot_id = hub_dev.xhci_slot_id;
+    dev.xhci_parent_port = hp.port;
+    dev.xhci_root_port = root_port;
+    dev.xhci_route = route_string;
+    dev.xhci_hub_depth = hub_depth;
+    current_xhci_ctrl = x;
+    current_xhci_slot_idx = slot_idx;
+
+    if (!device.enumerateDevice(
+        hub_dev.ctrl_idx,
+        root_port - 1,
+        hp.speed == .low,
+        hp.speed,
+        dev,
+        assigned_addr,
+        xhciCtrlTransferWrapper,
+        true,
+    )) {
+        x.disableSlot(slot_id);
+        return false;
+    }
+    return true;
 }
 
 fn configureXhciDeviceEndpoints(x: *xhci.XhciController, dev: *device.UsbDevice) void {
@@ -799,8 +917,8 @@ fn onXhciTransfer(slot_id: u8, dci: u8, rem_bytes: u32, comp_code: u32) void {
         while (d_k < usb_device_count) : (d_k += 1) {
             var d = &usb_devices[d_k];
             if (d.active and (d.dev_type == .keyboard or d.dev_type == .mouse) and
-                d.ctrl_idx == current_poll_ctrl_idx and d.xhci_slot_id == slot_id and
-                (d.ep_in * 2 + 1) == dci)
+                d.xhci_intr_configured and d.ctrl_idx == current_poll_ctrl_idx and
+                d.xhci_slot_id == slot_id and (d.ep_in * 2 + 1) == dci)
             {
                 if (comp_code == 1 or comp_code == 13) {
                     const max_p = @min(@max(d.ep_max_packet, 8), 64);

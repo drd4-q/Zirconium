@@ -100,6 +100,7 @@ pub fn configureHubPorts(
     maxp0: u8,
     ctrl_transfer_fn: *const fn (addr: u8, maxp0: u8, setup: *const types.UsbSetupPacket, dout: ?[]const u8, din: ?[]u8) bool,
     out_ports: []HubPortInfo,
+    out_num_ports: ?*u8,
 ) usize {
     serial.serialWrite("[HUB] Querying Hub Descriptor for addr=");
     serial.serialWriteDec(addr);
@@ -113,6 +114,7 @@ pub fn configureHubPorts(
     }
 
     const num_ports = hub_desc[2];
+    if (out_num_ports) |out| out.* = num_ports;
     const pwr_good_time: u32 = @as(u32, hub_desc[5]) * 2; // bPwrOn2PwrGood is in 2ms units
 
     serial.serialWrite("[HUB] Found ");
