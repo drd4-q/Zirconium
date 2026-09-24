@@ -35,12 +35,12 @@ pub const TRB_TYPE_EVAL_CONTEXT: u32 = 13;
 pub const TRB_TYPE_RESET_ENDPOINT: u32 = 14;
 pub const TRB_TYPE_TRANSFER_EVENT: u32 = 32;
 
-// xHCI specifies transfer length in status[30:16].  QEMU's xHCI model (and
-// a few older hosts) still samples status[16:0], so populate both views while
-// the controller model is being used by the test harness.  The low copy is
-// reserved on real hardware and is ignored there.
+// Normal/Setup/Data/Status TRBs carry Transfer Length in the low 17 bits
+// of the status dword.  Bits 17:21 are TD Size; bits 22:31 are the
+// interrupter target.  The event TRB is different: its transfer length is
+// the low 24 bits, and is decoded separately when polling events.
 inline fn trbLength(len: u32) u32 {
-    return (len << 16) | (len & 0x1FFFF);
+    return len & 0x1FFFF;
 }
 pub const TRB_TYPE_COMMAND_COMPLETION: u32 = 33;
 const MAX_SCRATCHPADS: usize = 1024;
@@ -158,7 +158,6 @@ pub const XhciController = struct {
     num_ports: u8 = 0,
     max_slots: u8 = 0,
     csz_64: bool = false,
-    qemu_length_compat: bool = false,
     ports: [32]UsbPortStatus = undefined,
     slots: [16]XhciSlot = [_]XhciSlot{.{}} ** 16,
 
@@ -185,11 +184,8 @@ pub const XhciController = struct {
 
     dma_pool: dma.UsbDmaPool = dma.UsbDmaPool.init(),
 
-    inline fn encodeTrbLength(self: *const XhciController, len: u32) u32 {
-        // QEMU's legacy xHCI model consumes the low 17 bits.  Real xHCI
-        // controllers use status[30:16]; populate both for the latter and
-        // keep the QEMU-compatible encoding for the former.
-        return if (self.qemu_length_compat) len & 0x1FFFF else trbLength(len);
+    inline fn encodeTrbLength(_: *const XhciController, len: u32) u32 {
+        return trbLength(len);
     }
 
     pub fn init(self: *XhciController, pci_ctrl: *const pci_detect.PciUsbController, id: u8) bool {
@@ -199,7 +195,6 @@ pub const XhciController = struct {
         self.func = pci_ctrl.func;
         self.vendor_id = pci_ctrl.vendor_id;
         self.device_id = pci_ctrl.device_id;
-        self.qemu_length_compat = self.vendor_id == 0x1B36 or self.vendor_id == 0x1033;
         self.irq = pci_ctrl.irq;
         self.mmio_base = pci_ctrl.mmio_base;
 
@@ -249,9 +244,10 @@ pub const XhciController = struct {
         serial.serialWrite("\n");
 
         const hcs2 = readMmio32(self.mmio_base + 0x08);
-        // HCSPARAMS2: Max Scratchpad Bypass Hi is bits 31:27, Lo is 26:22.
-        // Bit 21 belongs to ERST Max and must not inflate the scratchpad array.
-        const max_scratchpads: usize = (((hcs2 >> 27) & 0x1F) << 5) | ((hcs2 >> 22) & 0x1F);
+        // HCSPARAMS2: Max Scratchpad Bypass Hi occupies bits 25:21 and
+        // Lo occupies bits 31:27.  The two fields are concatenated as a
+        // 10-bit count (Hi << 5 | Lo).
+        const max_scratchpads: usize = (((hcs2 >> 21) & 0x1F) << 5) | ((hcs2 >> 27) & 0x1F);
 
         const hcc1 = readMmio32(self.mmio_base + 0x10);
         self.csz_64 = (hcc1 & (1 << 2)) != 0;
@@ -711,6 +707,10 @@ pub const XhciController = struct {
     pub fn ringDoorbell(self: *XhciController, target_slot: u8, target_endpoint: u8) void {
         const db_addr = self.db_regs + (@as(usize, target_slot) * 4);
         writeMmio32(db_addr, @as(u32, target_endpoint));
+        // Doorbells are posted MMIO writes.  A readback forces the preceding
+        // TRB/context writes to be visible before the controller consumes the
+        // ring, which real AMD/ASMedia controllers require.
+        _ = readMmio32(db_addr);
     }
 
     fn advanceEvent(self: *XhciController) void {
