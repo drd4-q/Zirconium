@@ -43,6 +43,8 @@ inline fn trbLength(len: u32) u32 {
     return (len << 16) | (len & 0x1FFFF);
 }
 pub const TRB_TYPE_COMMAND_COMPLETION: u32 = 33;
+const MAX_SCRATCHPADS: usize = 1024;
+const SCRATCHPAD_ENTRY_SIZE: usize = 8;
 pub const TRB_TYPE_PORT_STATUS_CHANGE: u32 = 34;
 
 inline fn readTrbControl(trb: *const XhciTrb) u32 {
@@ -177,7 +179,8 @@ pub const XhciController = struct {
     event_cycle: u1 = 1,
 
     scratchpad_array_phys: usize = 0,
-    scratchpad_pages: [128]usize = [_]usize{0} ** 128,
+    scratchpad_array_pages: usize = 0,
+    scratchpad_pages: [MAX_SCRATCHPADS]usize = [_]usize{0} ** MAX_SCRATCHPADS,
     scratchpad_count: usize = 0,
 
     dma_pool: dma.UsbDmaPool = dma.UsbDmaPool.init(),
@@ -246,7 +249,9 @@ pub const XhciController = struct {
         serial.serialWrite("\n");
 
         const hcs2 = readMmio32(self.mmio_base + 0x08);
-        const max_scratchpads: usize = (((hcs2 >> 27) & 0x1F) << 5) | ((hcs2 >> 21) & 0x1F);
+        // HCSPARAMS2: Max Scratchpad Bypass Hi is bits 31:27, Lo is 26:22.
+        // Bit 21 belongs to ERST Max and must not inflate the scratchpad array.
+        const max_scratchpads: usize = (((hcs2 >> 27) & 0x1F) << 5) | ((hcs2 >> 22) & 0x1F);
 
         const hcc1 = readMmio32(self.mmio_base + 0x10);
         self.csz_64 = (hcc1 & (1 << 2)) != 0;
@@ -368,22 +373,33 @@ pub const XhciController = struct {
         self.dcbaa_phys = dcbaa_page;
         self.dcbaa = @ptrCast(@alignCast(@as([*]u64, @ptrFromInt(dcbaa_page))));
 
-        // Setup scratchpad buffers if required
+        // Setup scratchpad buffers if required.  The DCBAA scratchpad array
+        // itself is an array of 64-bit pointers, not a single 4 KiB page.
         if (max_scratchpads > 0) {
-            self.scratchpad_count = @min(max_scratchpads, 128);
+            self.scratchpad_count = @min(max_scratchpads, MAX_SCRATCHPADS);
             serial.serialWrite("[XHCI] Scratchpads requested: ");
             serial.serialWriteDec(max_scratchpads);
             serial.serialWrite(", allocating: ");
             serial.serialWriteDec(self.scratchpad_count);
             serial.serialWrite(" page(s)\n");
 
-            const sp_array_page = dma.allocPage() orelse return false;
-            self.scratchpad_array_phys = sp_array_page;
-            const sp_array: [*]u64 = @ptrFromInt(sp_array_page);
+            const array_bytes = self.scratchpad_count * SCRATCHPAD_ENTRY_SIZE;
+            self.scratchpad_array_pages = (array_bytes + dma.PAGE_SIZE - 1) / dma.PAGE_SIZE;
+            const sp_array_base = dma.allocPages(self.scratchpad_array_pages) orelse {
+                serial.serialWrite("[XHCI] FAIL: Could not allocate scratchpad array\n");
+                self.deinit();
+                return false;
+            };
+            self.scratchpad_array_phys = sp_array_base;
+            const sp_array: [*]u64 = @ptrFromInt(sp_array_base);
 
             var s: usize = 0;
             while (s < self.scratchpad_count) : (s += 1) {
-                const sp_buf = dma.allocPage() orelse break;
+                const sp_buf = dma.allocPage() orelse {
+                    serial.serialWrite("[XHCI] FAIL: Could not allocate scratchpad buffer\n");
+                    self.deinit();
+                    return false;
+                };
                 self.scratchpad_pages[s] = sp_buf;
                 sp_array[s] = @as(u64, sp_buf);
             }
@@ -508,9 +524,11 @@ pub const XhciController = struct {
             }
         }
         if (self.scratchpad_array_phys != 0) {
-            dma.freePage(self.scratchpad_array_phys);
+            dma.freePages(self.scratchpad_array_phys, self.scratchpad_array_pages);
             self.scratchpad_array_phys = 0;
+            self.scratchpad_array_pages = 0;
         }
+        self.scratchpad_count = 0;
         var sl: usize = 0;
         while (sl < self.slots.len) : (sl += 1) {
             if (self.slots[sl].active) {
