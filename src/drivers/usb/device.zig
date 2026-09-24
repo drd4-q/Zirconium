@@ -21,6 +21,9 @@ pub const EhciQtd = ehci.EhciQtd;
 pub const MAX_DEVICE_INTERFACES: usize = types.MAX_DEVICE_INTERFACES;
 
 pub const UsbDevice = struct {
+    // Global software instance ID.  Unlike addr, this is unique across all
+    // host controllers; addr remains controller-local and is assigned by xHCI.
+    id: u32 = 0,
     active: bool = false,
     ctrl_idx: u8 = 0,
     port: u8 = 0,
@@ -413,7 +416,9 @@ pub fn enumerateDevice(
     // Write log markers
     serial.serialWrite("[USB] Registered ");
     serial.serialWrite(primary_dtype.name());
-    serial.serialWrite(" at Addr ");
+    serial.serialWrite(" at ID ");
+    serial.serialWriteDec(dev_out.id);
+    serial.serialWrite(" Addr ");
     serial.serialWriteDec(new_addr);
     serial.serialWrite(" (Vendor=0x");
     serial.serialWriteHex(vendor_id);

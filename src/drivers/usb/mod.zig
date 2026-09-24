@@ -56,6 +56,18 @@ pub var controller_count: usize = 0;
 pub var usb_devices: [MAX_USB_DEVICES]UsbDevice = undefined;
 pub var usb_device_count: usize = 0;
 
+// Monotonic software ID shared by every host controller.  USB addresses are
+// controller-local (and xHCI chooses them), so they cannot be used as a
+// kernel-wide device identifier.
+var next_usb_device_id: u32 = 1;
+
+fn allocateUsbDeviceId() u32 {
+    const id = next_usb_device_id;
+    next_usb_device_id +%= 1;
+    if (next_usb_device_id == 0) next_usb_device_id = 1;
+    return id;
+}
+
 var initialized: bool = false;
 
 // Driver instances
@@ -82,6 +94,7 @@ fn enumerateCompositeInterfaces(dev: *device.UsbDevice, c_idx: u8, p: u8, is_low
         if (iface.class_code == 0x03) {
             var dev_extra = &usb_devices[usb_device_count];
             dev_extra.* = .{};
+            dev_extra.id = dev.id;
             dev_extra.active = true;
             dev_extra.ctrl_idx = c_idx;
             dev_extra.port = p + 1;
@@ -132,7 +145,9 @@ fn enumerateCompositeInterfaces(dev: *device.UsbDevice, c_idx: u8, p: u8, is_low
 
             serial.serialWrite("[USB] Registered ");
             serial.serialWrite(dev_extra.dev_type.name());
-            serial.serialWrite(" at Addr ");
+            serial.serialWrite(" at ID ");
+            serial.serialWriteDec(dev_extra.id);
+            serial.serialWrite(" Addr ");
             serial.serialWriteDec(new_addr);
             serial.serialWrite(" (Vendor=0x");
             serial.serialWriteHex(dev.vendor_id);
@@ -330,6 +345,7 @@ pub fn init() void {
 
     controller_count = 0;
     usb_device_count = 0;
+    next_usb_device_id = 1;
     uhci_count = 0;
     ehci_count = 0;
     xhci_count = 0;
@@ -370,6 +386,8 @@ pub fn init() void {
                                     current_uhci_low_speed = is_low_speed;
 
                                     var dev = &usb_devices[usb_device_count];
+                                    dev.* = .{};
+                                    dev.id = allocateUsbDeviceId();
                                     const new_addr: u8 = @intCast(usb_device_count + 1);
                                     if (device.enumerateDevice(
                                         c_idx,
@@ -406,6 +424,8 @@ pub fn init() void {
                                 if (usb_device_count < MAX_USB_DEVICES) {
                                     current_ehci_ctrl = e;
                                     var dev = &usb_devices[usb_device_count];
+                                    dev.* = .{};
+                                    dev.id = allocateUsbDeviceId();
                                     const new_addr: u8 = @intCast(usb_device_count + 1);
                                     if (device.enumerateDevice(
                                         c_idx,
@@ -449,6 +469,7 @@ pub fn init() void {
 
                                                 var dev = &usb_devices[usb_device_count];
                                                 dev.* = .{};
+                                                dev.id = allocateUsbDeviceId();
                                                 dev.xhci_slot_id = slot_id;
                                                 dev.xhci_slot_idx = @intCast(slot_idx);
                                                 dev.xhci_root_port = p + 1;
@@ -563,6 +584,8 @@ pub fn init() void {
                         current_uhci_low_speed = is_low_speed;
 
                         var dev = &usb_devices[usb_device_count];
+                        dev.* = .{};
+                        dev.id = allocateUsbDeviceId();
                         const new_addr: u8 = @intCast(usb_device_count + 1);
                         if (device.enumerateDevice(
                             c_idx,
@@ -682,6 +705,7 @@ pub fn init() void {
                 } else {
                     const new_addr: u8 = @intCast(usb_device_count + 1);
                     dev.* = .{};
+                    dev.id = allocateUsbDeviceId();
                     setControlContext(hub_dev);
                     if (device.enumerateDevice(
                         hub_dev.ctrl_idx,
@@ -763,6 +787,7 @@ fn enumerateXhciHubChild(
     };
 
     dev.* = .{};
+    dev.id = allocateUsbDeviceId();
     dev.xhci_slot_id = slot_id;
     dev.xhci_slot_idx = @intCast(slot_idx);
     dev.xhci_parent_slot_id = hub_dev.xhci_slot_id;
@@ -875,7 +900,9 @@ fn processHidReport(dev: *device.UsbDevice, len: usize) void {
     // Opt-in trace: `usb debug on` makes it possible to distinguish a lost
     // HCD transfer from a HID decoding/input-ring problem on real hardware.
     if (hid_input.debug and dev.dev_type == .keyboard) {
-        serial.serialWrite("[USB-HID] keyboard report addr=");
+        serial.serialWrite("[USB-HID] keyboard report id=");
+        serial.serialWriteDec(dev.id);
+        serial.serialWrite(" addr=");
         serial.serialWriteDec(dev.addr);
         serial.serialWrite(" len=");
         serial.serialWriteDec(len);
@@ -1113,13 +1140,13 @@ pub fn printUsbStatus(writeFn: *const fn (s: []const u8) void, writeDecFn: *cons
         var d_idx: usize = 0;
         while (d_idx < usb_device_count) : (d_idx += 1) {
             const d = &usb_devices[d_idx];
-            writeFn("  Device #");
-            writeDecFn(d_idx + 1);
+            writeFn("  Device ID: ");
+            writeDecFn(d.id);
             writeFn(": ");
             writeFn(d.dev_type.name());
             writeFn("\n");
 
-            writeFn("    Address:      ");
+            writeFn("    USB Address:   ");
             writeDecFn(d.addr);
             writeFn(" (Controller #");
             writeDecFn(d.ctrl_idx);
