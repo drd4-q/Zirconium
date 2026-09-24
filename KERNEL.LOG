@@ -1,0 +1,240 @@
+[BOOT] Kernel loaded
+[BOOT] GDT initialized with ring 3 segments
+[FB] LFB 1024x768x32 @0x0000007FE0000000
+[BOOT] Framebuffer active
+[SYSTEM] Initializing...
+[SYSTEM] Multiboot verified OK
+[SYSTEM] PIC initialized
+[IDT] Zeroing entries...
+[IDT] Setting ISR entries 0-31...
+[IDT] Setting IRQ entries 32-47...
+[IDT] Setting syscall gate 0x80...
+[IDT] Loading IDT register...
+[IDT] IDT loaded OK
+[SYSTEM] IDT loaded (256 entries)
+[SYSTEM] Enabling interrupts...
+[SYSTEM] Interrupts enabled
+[SYSTEM] System init complete
+[BOOT] System init done
+[SYSCALL64] syscall/sysret enabled, LSTAR=0x0000000000101315
+[MEM] Physical memory manager initialized
+[MEM] Total pages: 8516480, free: 8362995
+[VMM] Virtual memory manager initialized
+[VMM] CR3=0x00000000004DB000
+[KHEAP] Initialized at 0x0000000001A78000 size=131072 bytes
+[VFS] Initialized
+[RAMFS] Initialized with root, /dev, /tmp, /etc
+[VFS] Mounted ramfs at /
+[SEED] procfs-lite files created in ramfs
+[KERNEL] Initializing kernel...
+[SCHED] Scheduler initialized
+[APIC] Local APIC timer initialized at 0x00000000FEE00000 (Vector 32, Periodic 100 Hz)
+[SCHED] Kernel task 0 registered, entry=0x0000000000251730
+[SCHED] Kernel task 1 registered, entry=0x00000000002507E0
+[KERNEL] Kernel init done, 0000000000000002 tasks loaded
+[BOOT] Kernel init done
+[RTL8169] Found Realtek NIC 0x10EC:0x0000000000008168
+[RTL8169] MMIO base: 0x00000000FC504000
+[RTL8169] MAC: 04:7C:16:B9:E2:8C
+[RTL8169] Driver initialized successfully
+[NET] IP: 10.0.2.15 GW: 10.0.2.2
+[BOOT] Network init done
+[VIRTIO-BLK] No virtio-blk device found
+[AHCI] Found SATA AHCI controller on PCI 2:0
+[AHCI] ABAR base: 0x00000000FC680000
+[AHCI] Implemented ports bitmap: 0x000000000000003F
+[AHCI] Port 1: SATA drive detected, initializing...
+[AHCI] Drive registered as ahci0 (1907729 MB)
+[AHCI] Detected 1 SATA drive(s)
+[USB] Scanning PCI for USB host controllers...
+[USB] Found xHCI (USB 3.0) Controller at PCI 2:0 (Vendor=0x0000000000001022 Device=0x00000000000043EE)
+[USB] Found xHCI (USB 3.0) Controller at PCI 43:0 (Vendor=0x00000000000010DE Device=0x0000000000001ADA)
+[USB] Found xHCI (USB 3.0) Controller at PCI 45:0 (Vendor=0x0000000000001022 Device=0x000000000000149C)
+[XHCI] Init: PCI 2:0.0 MMIO=0x00000000FC6A0000
+[XHCI] CAPLENGTH=32 OP_REGS=0x00000000FC6A0020 MAX_SLOTS=127 NUM_PORTS=14
+[XHCI] HCSPARAMS2=0x00000000FC0000FA scratchpads=31
+[XHCI] HCC1=0x000000000200EF81 CSZ64=no XECP=0x0000000000000200
+[XHCI] BIOS handoff: searching extended capabilities...
+[XHCI] Found USBLEGSUP at offset 0x0000000000000800
+[XHCI] BIOS handoff OK
+[XHCI] Halting controller...
+[XHCI] Resetting controller (HCRST)...
+[XHCI] Waiting for CNR to clear...
+[XHCI] Configured 16 device slots
+[XHCI] Scratchpads requested: 31, allocating: 31 page(s)
+[XHCI] Starting controller (USBCMD Run/IE)...
+[XHCI] Controller running
+[XHCI] Powering on 14 root hub ports...
+[XHCI] Port 1 PORTSC=0x0000000000201203
+[XHCI] Port 1: ENABLED, Speed=SuperSpeed (5 Gbps)
+[XHCI] Port 2 PORTSC=0x00000000000002A0
+[XHCI] Port 3 PORTSC=0x00000000000002A0
+[XHCI] Port 4 PORTSC=0x00000000000002A0
+[XHCI] Port 5 PORTSC=0x00000000000002A0
+[XHCI] Port 6 PORTSC=0x00000000000002A0
+[XHCI] Port 7 PORTSC=0x00000000000002A0
+[XHCI] Port 8 PORTSC=0x00000000000002A0
+[XHCI] Port 9 PORTSC=0x00000000000002A0
+[XHCI] Port 10 PORTSC=0x00000000000002A0
+[XHCI] Port 11 PORTSC=0x00000000000002A0
+[XHCI] Port 12 PORTSC=0x00000000000202E1
+[XHCI] Port 12: Connected but not enabled, resetting...
+[XHCI] Port 12: ENABLED, Speed=Full-Speed (12 Mbps)
+[XHCI] Port 13 PORTSC=0x00000000000002A0
+[XHCI] Port 14 PORTSC=0x00000000000002A0
+[XHCI] Init complete
+[USB] SET_CONFIGURATION OK
+[USB] Registered USB Mass Storage at ID 1 Addr 1 (Vendor=0x00000000000031C0 Product=0x0000000000001234 EP_IN=1 EP_OUT=2)
+[USB] SET_CONFIGURATION OK
+[USB] Registered Generic USB Device at ID 2 Addr 2 (Vendor=0x0000000000000000 Product=0x0000000000000000 EP_IN=1)
+[XHCI] Init: PCI 43:0.2 MMIO=0x0000007FF2000000
+[XHCI] CAPLENGTH=32 OP_REGS=0x0000007FF2000020 MAX_SLOTS=36 NUM_PORTS=6
+[XHCI] HCSPARAMS2=0x000000001C00002A scratchpads=3
+[XHCI] HCC1=0x000000000180FF05 CSZ64=yes XECP=0x0000000000000180
+[XHCI] BIOS handoff: searching extended capabilities...
+[XHCI] Found USBLEGSUP at offset 0x0000000000000600
+[XHCI] BIOS handoff OK
+[XHCI] Halting controller...
+[XHCI] Resetting controller (HCRST)...
+[XHCI] Waiting for CNR to clear...
+[XHCI] Configured 16 device slots
+[XHCI] Scratchpads requested: 3, allocating: 3 page(s)
+[XHCI] Starting controller (USBCMD Run/IE)...
+[XHCI] Controller running
+[XHCI] Powering on 6 root hub ports...
+[XHCI] Port 1 PORTSC=0x00000000000002A0
+[XHCI] Port 2 PORTSC=0x00000000000002A0
+[XHCI] Port 3 PORTSC=0x00000000000002A0
+[XHCI] Port 4 PORTSC=0x00000000000002A0
+[XHCI] Port 5 PORTSC=0x00000000000002A0
+[XHCI] Port 6 PORTSC=0x00000000000002A0
+[XHCI] Init complete
+[XHCI] Init: PCI 45:0.3 MMIO=0x00000000FC200000
+[XHCI] CAPLENGTH=32 OP_REGS=0x00000000FC200020 MAX_SLOTS=64 NUM_PORTS=8
+[XHCI] HCSPARAMS2=0x00000000140000F1 scratchpads=2
+[XHCI] HCC1=0x000000000278FFE5 CSZ64=yes XECP=0x0000000000000278
+[XHCI] BIOS handoff: searching extended capabilities...
+[XHCI] Found USBLEGSUP at offset 0x00000000000009E0
+[XHCI] BIOS handoff OK
+[XHCI] Halting controller...
+[XHCI] Resetting controller (HCRST)...
+[XHCI] Waiting for CNR to clear...
+[XHCI] Configured 16 device slots
+[XHCI] Scratchpads requested: 2, allocating: 2 page(s)
+[XHCI] Starting controller (USBCMD Run/IE)...
+[XHCI] Controller running
+[XHCI] Powering on 8 root hub ports...
+[XHCI] Port 1 PORTSC=0x00000000000002A0
+[XHCI] Port 2 PORTSC=0x00000000000206E1
+[XHCI] Port 2: Connected but not enabled, resetting...
+[XHCI] Port 2: ENABLED, Speed=High-Speed (480 Mbps)
+[XHCI] Port 3 PORTSC=0x00000000000002A0
+[XHCI] Port 4 PORTSC=0x00000000000002A0
+[XHCI] Port 5 PORTSC=0x00000000000002A0
+[XHCI] Port 6 PORTSC=0x00000000000002A0
+[XHCI] Port 7 PORTSC=0x00000000000002A0
+[XHCI] Port 8 PORTSC=0x00000000000002A0
+[XHCI] Init complete
+[USB] SET_CONFIGURATION OK
+[USB] Registered USB Hub at ID 3 Addr 1 (Vendor=0x0000000000001A40 Product=0x0000000000000101 EP_IN=1)
+[USB] Hub device protocol=1 TT mode=single-TT
+[USB] Subsystem initialized with 3 controller(s), 3 active USB device(s).
+[HUB] Querying Hub Descriptor for addr=1...
+[HUB] Found 4 downstream ports, power-on delay: 100 ms
+[HUB] Port 1 status=0x0000000000000101 change=0x0000000000000001
+[HUB] Port 1: device connected, issuing reset...
+[HUB] Port 1: post-reset status=0x0000000000000103
+[HUB] Port 2 status=0x0000000000000101 change=0x0000000000000001
+[HUB] Port 2: device connected, issuing reset...
+[HUB] Port 2: post-reset status=0x0000000000000103
+[HUB] Port 3 status=0x0000000000000100 change=0x0000000000000000
+[HUB] Port 4 status=0x0000000000000100 change=0x0000000000000000
+[XHCI] Hub child address: root=2 route=0x0000000000000001 parent_slot=1 parent_port=1
+[USB] SET_CONFIGURATION OK
+[USB] Registered Generic USB Device at ID 4 Addr 2 (Vendor=0x0000000000000000 Product=0x0000000000000000 EP_IN=1)
+[XHCI] Hub child address: root=2 route=0x0000000000000002 parent_slot=1 parent_port=2
+[USB] SET_CONFIGURATION OK
+[USB] Registered USB Keyboard (HID Boot) at ID 5 Addr 3 (Vendor=0x00000000000025A7 Product=0x000000000000FA70 EP_IN=1)
+[USB] Registered USB Mouse (HID Boot) at ID 5 Addr 3 (Vendor=0x00000000000025A7 Product=0x000000000000FA70 EP_IN=2)
+[XHCI] HID endpoint queued id=5 slot=3 dci=3 ep=1
+[XHCI] HID endpoint queued id=5 slot=3 dci=5 ep=2
+[USB-STORAGE] Initialized USB Drive: Generic  Mass Storage     (31129600 sectors, 15200 MB, sector size 512 bytes)
+[PART] Registered partition usb-disk0p1 (LBA 2048..31064056, 15166 MB)
+[PART] Registered partition usb-disk0p2 (LBA 31064056..31129592, 32 MB)
+[USB] USB Mass Storage initialized: 1 drive(s) online
+[GPT] Valid GPT header detected on device
+[PART] Registered partition ahci0p1 (LBA 34..32768, 15 MB)
+[PART] Registered partition ahci0p2 (LBA 32768..2240790528, 1094120 MB)
+[PART] Registered partition ahci0p3 (LBA 3221258240..3223259136, 977 MB)
+[PART] Registered partition ahci0p4 (LBA 3336994816..3349071872, 5897 MB)
+[PART] Registered partition ahci0p5 (LBA 3349071872..3907028992, 272440 MB)
+[PART] Registered partition ahci0p6 (LBA 2240790528..3221258240, 478744 MB)
+[FAT16] FAT16 found on usb-disk0p2! Sectors/cluster=1, FAT size=254, root entries=512, total sectors=65536
+[VFS] Mounted fat16 at /mnt/disk
+[FAT16] Auto-mounted at /mnt/disk
+[VFS] Mounted fat32 at /log
+[FAT32] Mounted at /log
+[FAT32] ahci0p4 sectors/cluster=8 FAT sectors=11776 root cluster=2 label=ZLOG
+[KLOG] Enabled on /log/KERNEL.LOG
+[USB] post-init summary: controllers=3, devices=6, pci_devices=39
+[MOUSE] No PS/2 mouse detected
+[SMP] Detecting CPUs via ACPI...
+[ACPI] RSDP at 0x00000000000F0010, revision 2, LAPIC base 0x00000000FEE00000
+[ACPI] CPU 16 LAPIC ID: 0, 2, 4, 6, 8, 10, 12, 14, 1, 3, 5, 7, 9, 11, 13, 15
+[SMP] BSP LAPIC ID 0, starting APs...
+[SMP] Booting AP 1 (LAPIC ID 2)...
+[SMP] AP CPU 1 online, LAPIC ID 0000000000000002
+[SMP] AP 1 confirmed online (online=1)
+[SMP] Booting AP 2 (LAPIC ID 4)...
+[SMP] AP CPU 2 online, LAPIC ID 0000000000000004
+[SMP] AP 2 confirmed online (online=2)
+[SMP] Booting AP 3 (LAPIC ID 6)...
+[SMP] AP CPU 3 online, LAPIC ID 0000000000000006
+[SMP] AP 3 confirmed online (online=3)
+[SMP] Booting AP 4 (LAPIC ID 8)...
+[SMP] AP CPU 4 online, LAPIC ID 0000000000000008
+[SMP] AP 4 confirmed online (online=4)
+[SMP] Booting AP 5 (LAPIC ID 10)...
+[SMP] AP CPU 5 online, LAPIC ID 000000000000000A
+[SMP] AP 5 confirmed online (online=5)
+[SMP] Booting AP 6 (LAPIC ID 12)...
+[SMP] AP CPU 6 online, LAPIC ID 000000000000000C
+[SMP] AP 6 confirmed online (online=6)
+[SMP] Booting AP 7 (LAPIC ID 14)...
+[SMP] AP CPU 7 online, LAPIC ID 000000000000000E
+[SMP] AP 7 confirmed online (online=7)
+[SMP] Booting AP 8 (LAPIC ID 1)...
+[SMP] AP CPU 8 online, LAPIC ID 0000000000000001
+[SMP] AP 8 confirmed online (online=8)
+[SMP] Booting AP 9 (LAPIC ID 3)...
+[SMP] AP CPU 9 online, LAPIC ID 0000000000000003
+[SMP] AP 9 confirmed online (online=9)
+[SMP] Booting AP 10 (LAPIC ID 5)...
+[SMP] AP CPU 10 online, LAPIC ID 0000000000000005
+[SMP] AP 10 confirmed online (online=10)
+[SMP] Booting AP 11 (LAPIC ID 7)...
+[SMP] AP CPU 11 online, LAPIC ID 0000000000000007
+[SMP] AP 11 confirmed online (online=11)
+[SMP] Booting AP 12 (LAPIC ID 9)...
+[SMP] AP CPU 12 online, LAPIC ID 0000000000000009
+[SMP] AP 12 confirmed online (online=12)
+[SMP] Booting AP 13 (LAPIC ID 11)...
+[SMP] AP CPU 13 online, LAPIC ID 000000000000000B
+[SMP] AP 13 confirmed online (online=13)
+[SMP] Booting AP 14 (LAPIC ID 13)...
+[SMP] AP CPU 14 online, LAPIC ID 000000000000000D
+[SMP] AP 14 confirmed online (online=14)
+[SMP] Booting AP 15 (LAPIC ID 15)...
+[SMP] AP CPU 15 online, LAPIC ID 000000000000000F
+[SMP] AP 15 confirmed online (online=15)
+[SMP] SMP online: 15 AP(s), 16 CPU(s) total
+[SCHED] Running all tasks...
+[TASK] Idle task is running
+[TASK] Hello from kernel task!
+[BOOT] Scheduler completed
+[BOOT] USB init done
+[BOOT] Launching Shell
+[SHELL] run: enter
+[SHELL] run: keyboard ready
+
+[SERIAL] zirc> 
