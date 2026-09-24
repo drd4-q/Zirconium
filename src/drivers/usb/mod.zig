@@ -318,28 +318,6 @@ fn setControlContext(dev: *device.UsbDevice) void {
     }
 }
 
-fn usbControlTransferByAddress(addr: u8, maxp0: u8, setup: *const UsbSetupPacket, dout: ?[]const u8, din: ?[]u8) bool {
-    var d_idx: usize = 0;
-    while (d_idx < usb_device_count) : (d_idx += 1) {
-        const dev = &usb_devices[d_idx];
-        if (!dev.active or dev.addr != addr or dev.ctrl_idx >= controller_count) continue;
-        const ctrl = &controllers[dev.ctrl_idx];
-        switch (ctrl.ctrl_type) {
-            .uhci => if (ctrl.inst_idx < uhci_count) {
-                return uhci_instances[ctrl.inst_idx].controlTransfer(dev.addr, dev.low_speed, maxp0, setup, dout, din);
-            },
-            .ehci => if (ctrl.inst_idx < ehci_count) {
-                return ehci_instances[ctrl.inst_idx].controlTransfer(dev.addr, maxp0, setup, dout, din);
-            },
-            .xhci => if (ctrl.inst_idx < xhci_count) {
-                return xhci_instances[ctrl.inst_idx].controlTransfer(dev.xhci_slot_idx, maxp0, setup, dout, din);
-            },
-            else => {},
-        }
-    }
-    return false;
-}
-
 pub fn init() void {
     if (initialized) return;
 
@@ -1184,51 +1162,69 @@ pub fn printUsbStatus(writeFn: *const fn (s: []const u8) void, writeDecFn: *cons
 
 // ─── Generic USB Transfer Helpers ──────────────────────────────────────────
 
-/// Perform a USB control transfer. Routes through the target device's controller
-/// or falls back to the first active controller.
-pub fn usbControlTransfer(addr: u8, maxp0: u8, setup: *const types.UsbSetupPacket, dout: ?[]const u8, din: ?[]u8) bool {
-    if (!initialized) return false;
-
-    // Check if target device is known
+fn findUsbDeviceById(id: u32) ?*device.UsbDevice {
     var d_idx: usize = 0;
     while (d_idx < usb_device_count) : (d_idx += 1) {
         const dev = &usb_devices[d_idx];
-        if (dev.active and dev.addr == addr) {
-            const ctrl = &controllers[dev.ctrl_idx];
-            switch (ctrl.ctrl_type) {
-                .uhci => {
-                    if (ctrl.inst_idx < uhci_count) {
-                        return uhci_instances[ctrl.inst_idx].controlTransfer(addr, dev.low_speed, maxp0, setup, dout, din);
-                    }
-                },
-                .ehci => {
-                    if (ctrl.inst_idx < ehci_count) {
-                        return ehci_instances[ctrl.inst_idx].controlTransfer(addr, maxp0, setup, dout, din);
-                    }
-                },
-                .xhci => {
-                    if (ctrl.inst_idx < xhci_count) {
-                        return xhci_instances[ctrl.inst_idx].controlTransfer(dev.xhci_slot_idx, maxp0, setup, dout, din);
-                    }
-                },
-                else => {},
-            }
+        if (dev.active and dev.id == id) return dev;
+    }
+    return null;
+}
+
+fn findUniqueUsbDeviceByAddress(addr: u8) ?*device.UsbDevice {
+    var found: ?*device.UsbDevice = null;
+    var d_idx: usize = 0;
+    while (d_idx < usb_device_count) : (d_idx += 1) {
+        const dev = &usb_devices[d_idx];
+        if (!dev.active or dev.addr != addr) continue;
+        if (found) |previous| {
+            // Composite interfaces share an ID/address and are harmless.  A
+            // match on different IDs means the legacy address-only API is
+            // ambiguous and must not guess a controller.
+            if (previous.id != dev.id or previous.ctrl_idx != dev.ctrl_idx) return null;
+        } else {
+            found = dev;
         }
     }
+    return found;
+}
 
-    // Fallback to UHCI
-    if (uhci_count > 0) {
-        current_uhci_ctrl = &uhci_instances[0];
-        current_uhci_low_speed = false;
-        return uhci_instances[0].controlTransfer(addr, false, maxp0, setup, dout, din);
+fn usbControlTransferForDevice(
+    dev: *device.UsbDevice,
+    maxp0: u8,
+    setup: *const types.UsbSetupPacket,
+    dout: ?[]const u8,
+    din: ?[]u8,
+) bool {
+    if (!initialized or !dev.active or dev.ctrl_idx >= controller_count) return false;
+    const ctrl = &controllers[dev.ctrl_idx];
+    switch (ctrl.ctrl_type) {
+        .uhci => if (ctrl.inst_idx < uhci_count) {
+            return uhci_instances[ctrl.inst_idx].controlTransfer(dev.addr, dev.low_speed, maxp0, setup, dout, din);
+        },
+        .ehci => if (ctrl.inst_idx < ehci_count) {
+            return ehci_instances[ctrl.inst_idx].controlTransfer(dev.addr, maxp0, setup, dout, din);
+        },
+        .xhci => if (ctrl.inst_idx < xhci_count) {
+            return xhci_instances[ctrl.inst_idx].controlTransfer(dev.xhci_slot_idx, maxp0, setup, dout, din);
+        },
+        else => {},
     }
-
-    // Fallback to EHCI
-    if (ehci_count > 0) {
-        return ehci_instances[0].controlTransfer(addr, maxp0, setup, dout, din);
-    }
-
     return false;
+}
+
+/// Perform a control transfer using the kernel-global device ID.  The ID
+/// resolves the owning controller and, for xHCI, the device slot.
+pub fn usbControlTransferById(id: u32, maxp0: u8, setup: *const types.UsbSetupPacket, dout: ?[]const u8, din: ?[]u8) bool {
+    const dev = findUsbDeviceById(id) orelse return false;
+    return usbControlTransferForDevice(dev, maxp0, setup, dout, din);
+}
+
+/// Legacy address-based entry point.  It is accepted only when the address
+/// identifies one physical device; callers should prefer usbControlTransferById.
+pub fn usbControlTransfer(addr: u8, maxp0: u8, setup: *const types.UsbSetupPacket, dout: ?[]const u8, din: ?[]u8) bool {
+    const dev = findUniqueUsbDeviceByAddress(addr) orelse return false;
+    return usbControlTransferForDevice(dev, maxp0, setup, dout, din);
 }
 
 /// Perform a USB bulk transfer (IN or OUT) to a specific device endpoint.
@@ -1275,6 +1271,19 @@ pub fn usbBulkTransfer(
     return null;
 }
 
+/// Perform a bulk OUT transfer using the kernel-global device ID.
+pub fn usbBulkOutTransferById(id: u32, ep: u8, data: []const u8) bool {
+    const dev = findUsbDeviceById(id) orelse return false;
+    const result = usbBulkTransfer(dev, ep, false, @constCast(data));
+    return result != null and result.? == data.len;
+}
+
+/// Perform a bulk IN transfer using the kernel-global device ID.
+pub fn usbBulkInTransferById(id: u32, ep: u8, buf: []u8) ?usize {
+    const dev = findUsbDeviceById(id) orelse return null;
+    return usbBulkTransfer(dev, ep, true, buf);
+}
+
 /// Reset and re-enable an xHCI bulk endpoint after a stall.
 pub fn recoverXhciBulkEndpoint(dev: *device.UsbDevice, ep_num: u8, is_in: bool) bool {
     if (dev.xhci_slot_id == 0 or dev.ctrl_idx >= controller_count) return false;
@@ -1311,7 +1320,7 @@ pub fn usbClearHalt(dev: *device.UsbDevice, ep_num: u8, is_in: bool) bool {
         .wLength = 0,
     };
     const maxp0: u8 = @min(dev.ep0_max_packet, 64);
-    const ok = usbControlTransfer(dev.addr, maxp0, &clear_pkt, null, null);
+    const ok = usbControlTransferById(dev.id, maxp0, &clear_pkt, null, null);
     if (ok and dev.xhci_slot_id != 0) {
         if (ep_num == dev.ep_in and (dev.dev_type == .keyboard or dev.dev_type == .mouse)) {
             _ = recoverXhciInterruptEndpoint(dev, ep_num);
@@ -1324,54 +1333,15 @@ pub fn usbClearHalt(dev: *device.UsbDevice, ep_num: u8, is_in: bool) bool {
     return ok;
 }
 
-/// Perform a USB bulk OUT transfer.
+/// Legacy address-based bulk OUT entry point.  Prefer the ID-based variant.
 pub fn usbBulkOutTransfer(addr: u8, ep: u8, data: []const u8) bool {
-    if (!initialized) return false;
-    var d_idx: usize = 0;
-    while (d_idx < usb_device_count) : (d_idx += 1) {
-        const dev = &usb_devices[d_idx];
-        if (dev.active and dev.addr == addr) {
-            const mut_data = @constCast(data);
-            const res = usbBulkTransfer(dev, ep, false, mut_data);
-            return res != null and res.? == data.len;
-        }
-    }
-
-    // Fallback if device address not registered
-    if (uhci_count > 0) {
-        var dummy_toggle: u1 = 0;
-        const mut_data = @constCast(data);
-        const res = uhci_instances[0].bulkTransfer(addr, ep, false, &dummy_toggle, 64, mut_data);
-        return res != null and res.? == data.len;
-    }
-    if (ehci_count > 0) {
-        var dummy_toggle: u1 = 0;
-        const mut_data = @constCast(data);
-        const res = ehci_instances[0].bulkTransfer(addr, ep, false, &dummy_toggle, 512, mut_data);
-        return res != null and res.? == data.len;
-    }
-    return false;
+    const dev = findUniqueUsbDeviceByAddress(addr) orelse return false;
+    const result = usbBulkTransfer(dev, ep, false, @constCast(data));
+    return result != null and result.? == data.len;
 }
 
-/// Perform a USB bulk IN transfer.
+/// Legacy address-based bulk IN entry point.  Prefer the ID-based variant.
 pub fn usbBulkInTransfer(addr: u8, ep: u8, buf: []u8) ?usize {
-    if (!initialized) return null;
-    var d_idx: usize = 0;
-    while (d_idx < usb_device_count) : (d_idx += 1) {
-        const dev = &usb_devices[d_idx];
-        if (dev.active and dev.addr == addr) {
-            return usbBulkTransfer(dev, ep, true, buf);
-        }
-    }
-
-    // Fallback if device address not registered
-    if (uhci_count > 0) {
-        var dummy_toggle: u1 = 0;
-        return uhci_instances[0].bulkTransfer(addr, ep, true, &dummy_toggle, 64, buf);
-    }
-    if (ehci_count > 0) {
-        var dummy_toggle: u1 = 0;
-        return ehci_instances[0].bulkTransfer(addr, ep, true, &dummy_toggle, 512, buf);
-    }
-    return null;
+    const dev = findUniqueUsbDeviceByAddress(addr) orelse return null;
+    return usbBulkTransfer(dev, ep, true, buf);
 }

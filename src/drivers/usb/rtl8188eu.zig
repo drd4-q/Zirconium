@@ -109,8 +109,8 @@ fn usbControlTransfer(
     // IN buffer makes Realtek chips reject register writes.
     const mod = @import("mod.zig");
     const is_in = (request_type & 0x80) != 0;
-    return mod.usbControlTransfer(
-        dev.addr,
+    return mod.usbControlTransferById(
+        dev.id,
         @min(dev.ep0_max_packet, 64),
         &pkt,
         if (is_in) null else data,
@@ -656,14 +656,14 @@ fn usbBulkOut(data: []const u8) bool {
     // Build a bulk OUT request via the controller driver
     // We use the USB mod's bulk transfer interface
     const mod = @import("mod.zig");
-    return mod.usbBulkOutTransfer(usb_device.?.addr, bulk_out_ep, data);
+    return mod.usbBulkOutTransferById(usb_device.?.id, bulk_out_ep, data);
 }
 
 fn usbBulkIn(buf: []u8) ?usize {
     if (usb_device == null) return null;
 
     const mod = @import("mod.zig");
-    return mod.usbBulkInTransfer(usb_device.?.addr, bulk_in_ep, buf);
+    return mod.usbBulkInTransferById(usb_device.?.id, bulk_in_ep, buf);
 }
 
 // ─── Diagnostics ─────────────────────────────────────────────────────

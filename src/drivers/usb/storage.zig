@@ -72,7 +72,7 @@ pub fn botResetRecovery(sdev: *UsbStorageDrive) bool {
         .wLength = 0,
     };
     const maxp0: u8 = @min(dev.ep0_max_packet, 64);
-    _ = mod.usbControlTransfer(dev.addr, maxp0, &reset_pkt, null, null);
+    _ = mod.usbControlTransferById(dev.id, maxp0, &reset_pkt, null, null);
     if (dev.xhci_slot_id != 0) {
         if (dev.ep_bulk_in != 0) _ = mod.recoverXhciBulkEndpoint(dev, dev.ep_bulk_in, true);
         if (dev.ep_bulk_out != 0) _ = mod.recoverXhciBulkEndpoint(dev, dev.ep_bulk_out, false);
@@ -373,7 +373,7 @@ pub fn initDrive(dev: *device.UsbDevice) bool {
     };
     var max_lun_buf: [1]u8 = [_]u8{0};
     const maxp0: u8 = @min(dev.ep0_max_packet, 64);
-    if (mod.usbControlTransfer(dev.addr, maxp0, &get_max_lun_pkt, null, &max_lun_buf)) {
+    if (mod.usbControlTransferById(dev.id, maxp0, &get_max_lun_pkt, null, &max_lun_buf)) {
         sdev.lun = max_lun_buf[0] & 0x0F; // Primary LUN
     } else {
         // Some single-LUN devices stall this request per spec; clear halt and continue

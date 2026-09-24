@@ -15,6 +15,7 @@ pub const MAX_HID_INSTANCES: usize = 16;
 
 pub const HidDevice = struct {
     active: bool = false,
+    id: u32 = 0,
     dev_idx: usize = 0,
     ctrl_idx: u8 = 0,
     addr: u8 = 0,
@@ -58,10 +59,10 @@ pub fn setDeviceLeds(hid_dev: *HidDevice, num_lock: bool, caps_lock: bool, scrol
 
     const pkt = usbhid.makeSetReportPacket(hid_dev.interface_num, usbhid.REPORT_TYPE_OUTPUT, 0, 1);
     const max_p0: u8 = @min(hid_dev.ep0_max_packet, 64);
-    var ok = mod.usbControlTransfer(hid_dev.addr, max_p0, &pkt, &led_data, null);
+    var ok = mod.usbControlTransferById(hid_dev.id, max_p0, &pkt, &led_data, null);
     if (!ok and hid_dev.is_wireless) {
         const pkt_id1 = usbhid.makeSetReportPacket(hid_dev.interface_num, usbhid.REPORT_TYPE_OUTPUT, 1, 1);
-        ok = mod.usbControlTransfer(hid_dev.addr, max_p0, &pkt_id1, &led_data, null);
+        ok = mod.usbControlTransferById(hid_dev.id, max_p0, &pkt_id1, &led_data, null);
     }
     if (ok) {
         hid_dev.num_lock = num_lock;
@@ -89,6 +90,7 @@ pub fn registerHidDevice(dev_idx: usize, dev: *device.UsbDevice, iface_num: u8, 
     var inst = &hid_instances[hid_instance_count];
     inst.* = .{
         .active = true,
+        .id = dev.id,
         .dev_idx = dev_idx,
         .ctrl_idx = dev.ctrl_idx,
         .addr = dev.addr,
@@ -105,11 +107,11 @@ pub fn registerHidDevice(dev_idx: usize, dev: *device.UsbDevice, iface_num: u8, 
     // 1. SET_PROTOCOL: Boot Protocol (0)
     const max_p0: u8 = @min(dev.ep0_max_packet, 64);
     const set_proto_pkt = usbhid.makeSetProtocolPacket(iface_num, usbhid.PROTOCOL_BOOT);
-    _ = mod.usbControlTransfer(dev.addr, max_p0, &set_proto_pkt, null, null);
+    _ = mod.usbControlTransferById(dev.id, max_p0, &set_proto_pkt, null, null);
 
     // 2. SET_IDLE: Report on change (0)
     const set_idle_pkt = usbhid.makeSetIdlePacket(iface_num, 0, 0);
-    _ = mod.usbControlTransfer(dev.addr, max_p0, &set_idle_pkt, null, null);
+    _ = mod.usbControlTransferById(dev.id, max_p0, &set_idle_pkt, null, null);
 
     // 3. Set default LEDs on keyboard (turn on NumPad LED by default)
     if (dev_type == .keyboard) {
