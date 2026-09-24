@@ -648,7 +648,7 @@ pub fn init() void {
             setControlContext(hub_dev);
             var hub_ports: [8]hub.HubPortInfo = undefined;
             var hub_num_ports: u8 = 0;
-            const num_conn = hub.configureHubPorts(hub_dev.addr, hub_dev.ep0_max_packet, usbControlTransferByAddress, hub_ports[0..], &hub_num_ports);
+            const num_conn = hub.configureHubPorts(hub_dev.addr, hub_dev.ep0_max_packet, cfn, hub_ports[0..], &hub_num_ports);
             if (ctrl.ctrl_type == .xhci and hub_dev.xhci_slot_id != 0 and ctrl.inst_idx < xhci_count) {
                 const x = &xhci_instances[ctrl.inst_idx];
                 if (!x.markHub(hub_dev.xhci_slot_idx, hub_num_ports)) {
