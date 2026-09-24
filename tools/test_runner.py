@@ -32,11 +32,9 @@ def find_qemu():
             return cand
     return "qemu-system-x86_64"
 
-def find_iso_kernel_offset(iso_data):
-    """Return (sector_offset, slot_bytes) of KERNEL.BIN inside the ISO, or (None, 0)."""
+def find_iso_kernel_record(iso_data):
+    """Return (extent_offset, directory_record_offset, file_size, slot_bytes)."""
     def rec_name(rec):
-        # ISO level-1 names may be upper- or lowercase depending on the
-        # mkrescue implementation, and may carry a ';1' version suffix.
         return rec[33:33 + rec[32]].decode('ascii', 'ignore').upper().rstrip(';1').rstrip('.')
 
     try:
@@ -62,7 +60,8 @@ def find_iso_kernel_offset(iso_data):
             offset += length
 
         if boot_extent and boot_size:
-            boot_data = iso_data[boot_extent*2048 : boot_extent*2048 + boot_size]
+            boot_start = boot_extent * 2048
+            boot_data = iso_data[boot_start : boot_start + boot_size]
             offset = 0
             while offset < len(boot_data):
                 length = boot_data[offset]
@@ -72,15 +71,21 @@ def find_iso_kernel_offset(iso_data):
                 rec = boot_data[offset:offset+length]
                 if rec_name(rec) == 'KERNEL.BIN':
                     extent = int.from_bytes(rec[2:6], 'little')
-                    # ISO-9660 directory record: size is stored twice,
-                    # little-endian at [10:14] and big-endian at [14:18].
                     data_len = int.from_bytes(rec[14:18], 'big')
                     slot_bytes = ((data_len + 2047) & ~2047)
-                    return extent * 2048, slot_bytes
+                    return extent * 2048, boot_start + offset, data_len, slot_bytes
                 offset += length
     except Exception:
         pass
-    return None, 0
+    return None
+
+
+def find_iso_kernel_offset(iso_data):
+    """Return (sector_offset, slot_bytes) of KERNEL.BIN inside the ISO."""
+    record = find_iso_kernel_record(iso_data)
+    if record is None:
+        return None, 0
+    return record[0], record[3]
 
 def build_fresh_iso(repo_root):
     """Create a kernel.iso from scratch (grub-mkrescue) when in-place patching won't fit."""
@@ -99,7 +104,7 @@ def build_fresh_iso(repo_root):
         )
         if res.returncode == 0:
             print(f"[TEST RUNNER] Built fresh kernel.iso with grub-mkrescue")
-            return
+            return True
     except Exception:
         pass
 
@@ -117,7 +122,7 @@ def build_fresh_iso(repo_root):
         if res.returncode == 0 and os.path.exists(os.path.join(temp_dir, "kernel.iso")):
             shutil.copy2(os.path.join(temp_dir, "kernel.iso"), iso_path)
             print(f"[TEST RUNNER] Built fresh kernel.iso with WSL grub-mkrescue")
-            return
+            return True
     except Exception:
         pass
 
@@ -139,18 +144,23 @@ def patch_kernel_iso(repo_root):
     with open(iso_path, "rb") as f:
         iso_data = f.read()
 
-    sec_offset, slot_bytes = find_iso_kernel_offset(iso_data)
-    if sec_offset is not None and slot_bytes >= len(k_data):
-        iso_data = bytearray(iso_data)
-        iso_data[sec_offset:sec_offset+len(k_data)] = k_data
-        with open(iso_path, "wb") as f:
-            f.write(iso_data)
-        print(f"[TEST RUNNER] Dynamic ISO Patcher: Updated kernel.bin ({len(k_data)} bytes) at ISO offset {hex(sec_offset)}")
-        return True
-
-    print(f"[TEST RUNNER] kernel.bin ({len(k_data)} bytes) does not fit ISO slot ({slot_bytes} bytes); rebuilding ISO")
-    build_fresh_iso(repo_root)
-    return True
+    record = find_iso_kernel_record(iso_data)
+    if record is not None:
+        sec_offset, record_offset, old_file_size, slot_bytes = record
+        if slot_bytes >= len(k_data) and old_file_size >= len(k_data):
+            iso_data = bytearray(iso_data)
+            iso_data[sec_offset:sec_offset+len(k_data)] = k_data
+            new_size = len(k_data).to_bytes(4, 'big')
+            iso_data[record_offset+10:record_offset+14] = new_size[::-1]
+            iso_data[record_offset+14:record_offset+18] = new_size
+            with open(iso_path, "wb") as f:
+                f.write(iso_data)
+            print(f"[TEST RUNNER] Dynamic ISO Patcher: Updated kernel.bin ({len(k_data)} bytes) and ISO directory record")
+            return True
+        print(f"[TEST RUNNER] kernel.bin ({len(k_data)} bytes) does not fit ISO record ({old_file_size}/{slot_bytes} bytes); rebuilding ISO")
+    else:
+        print("[TEST RUNNER] KERNEL.BIN ISO record not found; rebuilding ISO")
+    return build_fresh_iso(repo_root)
 
 def main():
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

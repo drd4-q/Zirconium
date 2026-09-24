@@ -23,6 +23,7 @@ const ATTR_LONG_NAME: u8 = 0x0F;
 const FAT32_EOC: u32 = 0x0FFFFFFF;
 const FAT32_MASK: u32 = 0x0FFFFFFF;
 const MAX_U32: u64 = 0xFFFFFFFF;
+const VOLUME_LABEL_LEN: usize = 11;
 
 const RawEntry = [DIR_ENTRY_SIZE]u8;
 
@@ -63,6 +64,7 @@ var data_start_sector: u64 = 0;
 var root_cluster: u32 = 0;
 var cluster_count: u32 = 0;
 var next_alloc_hint: u32 = 2;
+var volume_label: [VOLUME_LABEL_LEN]u8 = [_]u8{' '} ** VOLUME_LABEL_LEN;
 
 var file_cache: [MAX_FAT32_FILES]FileInfo = [_]FileInfo{.{}} ** MAX_FAT32_FILES;
 var file_count: usize = 0;
@@ -120,6 +122,7 @@ fn parseBootSector(buf: *const [SECTOR_SIZE]u8) bool {
     fat_size_sectors = readU32(buf, 36);
     total_sectors = if (total16 != 0) total16 else readU32(buf, 32);
     root_cluster = readU32(buf, 44);
+    volume_label = buf[71..82].*;
 
     // FAT32 has no fixed root directory and normally has zero root entries.
     if (bytes_per_sector != SECTOR_SIZE or sectors_per_cluster == 0 or
@@ -281,6 +284,12 @@ fn namesEqual(left: []const u8, right: []const u8) bool {
         if (a != b and lower(a) != lower(b)) return false;
     }
     return true;
+}
+
+fn isLogVolume() bool {
+    var len: usize = 0;
+    while (len < volume_label.len and volume_label[len] != ' ' and volume_label[len] != 0) : (len += 1) {}
+    return namesEqual(volume_label[0..len], "ZLOG");
 }
 
 fn validShortChar(ch: u8) bool {
@@ -841,7 +850,7 @@ fn mountFs(fs_name: []const u8, mount_point: []const u8) bool {
     return true;
 }
 
-fn tryMount(dev: *blockdev.BlockDevice, mount_point: []const u8) bool {
+fn probeVolume(dev: *blockdev.BlockDevice) bool {
     if (dev.sector_size != SECTOR_SIZE) return false;
     fat_dev = dev;
     var buf: [SECTOR_SIZE]u8 = undefined;
@@ -849,6 +858,11 @@ fn tryMount(dev: *blockdev.BlockDevice, mount_point: []const u8) bool {
         fat_dev = null;
         return false;
     }
+    return true;
+}
+
+fn tryMount(dev: *blockdev.BlockDevice, mount_point: []const u8) bool {
+    if (!probeVolume(dev)) return false;
     if (!mountFs("fat32", mount_point)) {
         fat_dev = null;
         return false;
@@ -861,26 +875,43 @@ fn tryMount(dev: *blockdev.BlockDevice, mount_point: []const u8) bool {
     serial.serialWriteDec(fat_size_sectors);
     serial.serialWrite(" root cluster=");
     serial.serialWriteDec(root_cluster);
+    if (isLogVolume()) serial.serialWrite(" label=ZLOG");
     serial.serialWrite("\n");
     return true;
 }
 
 pub fn init() void {
     if (fs_mounted) return;
-    var mounted: usize = 0;
+    var fallback_dev: ?*blockdev.BlockDevice = null;
+    var fallback_point: []const u8 = "";
     var i: usize = 0;
     while (i < blockdev.device_count) : (i += 1) {
         const dev = blockdev.devices[i];
-        const point: []const u8 = if (!vfs.isMountedAt("/mnt/disk") and mounted == 0)
+        const point: ?[]const u8 = if (!vfs.isMountedAt("/mnt/disk"))
             "/mnt/disk"
+        else if (!vfs.isMountedAt("/log"))
+            "/log"
         else
-            "/log";
-        if (tryMount(dev, point)) {
-            mounted += 1;
-            break; // MVP has one static FAT32 volume state
+            null;
+        if (point == null or !probeVolume(dev)) continue;
+
+        // Prefer a deliberately labelled log volume. If no label exists,
+        // retain the first valid FAT32 volume for backwards compatibility.
+        if (isLogVolume()) {
+            fallback_dev = dev;
+            fallback_point = point.?;
+            break;
+        }
+        if (fallback_dev == null) {
+            fallback_dev = dev;
+            fallback_point = point.?;
         }
     }
-    if (mounted == 0) serial.serialWrite("[FAT32] No FAT32 filesystem found\n");
+
+    if (fallback_dev) |dev| {
+        if (tryMount(dev, fallback_point)) return;
+    }
+    serial.serialWrite("[FAT32] No FAT32 filesystem found\n");
 }
 
 pub fn isMounted() bool {

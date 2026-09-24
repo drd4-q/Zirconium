@@ -117,31 +117,10 @@ def build_fresh_iso() -> bool:
         return False
 
 def patch_kernel_iso() -> bool:
-    """Overwrite kernel.bin in kernel.iso if it fits; else rebuild fresh."""
+    """Rebuild the ISO so its directory record always matches the kernel size."""
     bin_path = os.path.join(REPO_ROOT, "zig-out", "bin", "kernel")
-    iso_path = os.path.join(REPO_ROOT, "kernel.iso")
-
     if not os.path.exists(bin_path):
         return False
-    if not os.path.exists(iso_path):
-        return build_fresh_iso()
-
-    try:
-        with open(bin_path, "rb") as f:
-            k_data = f.read()
-        with open(iso_path, "rb") as f:
-            iso_data = f.read()
-
-        sec_offset, slot_bytes = find_iso_kernel_offset(iso_data)
-        if sec_offset is not None and slot_bytes >= len(k_data):
-            iso_data_ba = bytearray(iso_data)
-            iso_data_ba[sec_offset:sec_offset + len(k_data)] = k_data
-            with open(iso_path, "wb") as f:
-                f.write(iso_data_ba)
-            return True
-    except Exception:
-        pass
-
     return build_fresh_iso()
 
 class QemuRunner:
