@@ -888,6 +888,23 @@ fn configureXhciDeviceEndpoints(x: *xhci.XhciController, dev: *device.UsbDevice)
 fn processHidReport(dev: *device.UsbDevice, len: usize) void {
     if (len == 0 or len > dev.report_buf.len) return;
 
+    if (dev.dev_type == .mouse and !usb_mouse_report_logged) {
+        serial.serialWrite("[USB-HID] First mouse report id=");
+        serial.serialWriteDec(dev.id);
+        serial.serialWrite(" addr=");
+        serial.serialWriteDec(dev.addr);
+        serial.serialWrite(" len=");
+        serial.serialWriteDec(len);
+        serial.serialWrite(" data=");
+        var mouse_trace_i: usize = 0;
+        while (mouse_trace_i < len) : (mouse_trace_i += 1) {
+            serial.serialWriteHex(dev.report_buf[mouse_trace_i]);
+            serial.serialWrite(" ");
+        }
+        serial.serialWrite("\n");
+        usb_mouse_report_logged = true;
+    }
+
     // Opt-in trace: `usb debug on` makes it possible to distinguish a lost
     // HCD transfer from a HID decoding/input-ring problem on real hardware.
     if (hid_input.debug and dev.dev_type == .keyboard) {
@@ -929,6 +946,8 @@ fn processHidReport(dev: *device.UsbDevice, len: usize) void {
 var current_poll_xhci: ?*xhci.XhciController = null;
 var current_poll_ctrl_idx: u8 = 0;
 var xhci_hid_event_logged: bool = false;
+var xhci_mouse_event_logged: bool = false;
+var usb_mouse_report_logged: bool = false;
 
 fn onXhciTransfer(slot_id: u8, dci: u8, rem_bytes: u32, comp_code: u32) void {
     if (current_poll_xhci) |x| {
@@ -939,6 +958,20 @@ fn onXhciTransfer(slot_id: u8, dci: u8, rem_bytes: u32, comp_code: u32) void {
                 d.xhci_intr_configured and d.ctrl_idx == current_poll_ctrl_idx and
                 d.xhci_slot_id == slot_id and (d.ep_in * 2 + 1) == dci)
             {
+                if (d.dev_type == .mouse and !xhci_mouse_event_logged) {
+                    serial.serialWrite("[XHCI] First mouse event id=");
+                    serial.serialWriteDec(d.id);
+                    serial.serialWrite(" slot=");
+                    serial.serialWriteDec(slot_id);
+                    serial.serialWrite(" dci=");
+                    serial.serialWriteDec(dci);
+                    serial.serialWrite(" code=");
+                    serial.serialWriteDec(comp_code);
+                    serial.serialWrite(" residual=");
+                    serial.serialWriteDec(rem_bytes);
+                    serial.serialWrite("\n");
+                    xhci_mouse_event_logged = true;
+                }
                 if (!xhci_hid_event_logged) {
                     serial.serialWrite("[XHCI] HID event id=");
                     serial.serialWriteDec(d.id);
