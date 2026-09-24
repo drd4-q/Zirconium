@@ -8,6 +8,7 @@ Bare-metal x86_64 OS kernel in Zig: Multiboot/GRUB boot, identity-mapped 2 MB pa
 zig build                          # Debug production kernel → zig-out/bin/kernel
 zig build -Drelease                # ReleaseFast production kernel
 zig build -Drelease -Dselftest=true # ReleaseFast with the embedded ring-3 self-test
+./build_iso.sh                     # production kernel + ISO, without QEMU/disk setup
 ./run.sh                           # build -Drelease → grub-mkrescue ISO → QEMU (gtk)
 ./run.sh --vnc       # VNC on host port 5901 instead of gtk
 ./run.sh --gdb       # QEMU -s -S; attach gdb to localhost:1234
