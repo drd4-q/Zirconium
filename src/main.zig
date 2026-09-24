@@ -125,6 +125,14 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     } else {
         _ = klog.init("");
     }
+    const usb_state = @import("drivers/usb.zig");
+    serial.serialWrite("[USB] post-init summary: controllers=");
+    serial.serialWriteDec(usb_state.getControllerCount());
+    serial.serialWrite(", devices=");
+    serial.serialWriteDec(usb_state.getDeviceCount());
+    serial.serialWrite(", pci_devices=");
+    serial.serialWriteDec(pci.device_count);
+    serial.serialWrite("\n");
     @import("drivers/mouse.zig").init();
     vga.write("[BOOT] Storage and input initialized\n");
 
