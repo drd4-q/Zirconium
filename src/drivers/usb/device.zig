@@ -50,7 +50,9 @@ pub const UsbDevice = struct {
     td: UhciTd align(16) = .{},
     ehci_qh: EhciQh align(32) = .{},
     ehci_qtd: EhciQtd align(32) = .{},
-    report_buf: [64]u8 align(16) = [_]u8{0} ** 64,
+    // xHCI DMA buffers must not cross a 64 KiB boundary.  Page alignment
+    // keeps every 64-byte HID report wholly inside one 64 KiB window.
+    report_buf: [64]u8 align(4096) = [_]u8{0} ** 64,
     prev_report: [64]u8 = [_]u8{0} ** 64,
     packet_count: u32 = 0,
     caps_lock: bool = false,

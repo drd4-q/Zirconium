@@ -771,6 +771,12 @@ pub fn run() void {
     mouse.debug_log = false;
 
     while (true) {
+        // Poll USB HID independently of the keyboard ring.  A composite
+        // receiver can have a key queued while its mouse endpoint is also
+        // completing; relying on keyboard.pollKey() alone can starve mouse
+        // state in the GUI loop.
+        mouse.poll();
+
         if (kb.pollKey()) |k| {
             if (k == 0x1B) break; // Esc quits GUI
 

@@ -567,6 +567,11 @@ fn showAcpi(_: []const u8) void {
 }
 
 fn showMouse(_: []const u8) void {
+    // Drain pending xHCI/UHCI HID completions before reporting state.  The
+    // interactive command may be invoked while the keyboard ring is empty,
+    // and the mouse path must not depend on a prior keyboard poll.
+    mouse.poll();
+
     vga.setColor(.cyan, .black);
     vga.write("\n  === Mouse Info ===\n\n");
     vga.setColor(.white, .black);
