@@ -843,6 +843,7 @@ fn configureXhciDeviceEndpoints(x: *xhci.XhciController, dev: *device.UsbDevice)
                         @intFromPtr(&dev.report_buf),
                         @intCast(@min(@max(ep.max_packet_size, 8), 64)),
                     );
+                    x.logEndpointContext(slot_idx, queue_dci);
                     serial.serialWrite("[XHCI] HID endpoint queued id=");
                     serial.serialWriteDec(dev.id);
                     serial.serialWrite(" slot=");

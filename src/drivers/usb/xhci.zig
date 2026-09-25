@@ -267,12 +267,12 @@ pub const XhciController = struct {
         const input_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys));
         input_ctx[0] = 0; // Drop Context Flags
         input_ctx[1] = add_flags; // Add Context Flags
-        // Bytes 8..31 of the Input Control Context are reserved in both
-        // 32-byte and 64-byte context modes.  The Slot Context starts at
-        // byte 32 or 64 respectively.
+        // The remainder of the Input Control Context is reserved in both
+        // 32-byte and 64-byte context modes. Clear the full context so a
+        // 64-byte-mode controller never observes stale reserved dwords.
+        const ctx_size: usize = if (self.csz_64) 64 else 32;
         var i: usize = 2;
-        while (i < 8) : (i += 1) input_ctx[i] = 0;
-        _ = self;
+        while (i < ctx_size / 4) : (i += 1) input_ctx[i] = 0;
     }
 
     fn copySlotContextToInput(self: *XhciController, slot: *XhciSlot) void {
@@ -552,6 +552,13 @@ pub const XhciController = struct {
         self.event_ring = @ptrCast(@alignCast(@as([*]XhciTrb, @ptrFromInt(event_page))));
         self.event_dequeue = 0;
         self.event_cycle = 1;
+        // Event Ring Segments must terminate in a Link TRB.  The software
+        // dequeue pointer wraps at the same boundary and maintains the cycle.
+        self.event_ring[255] = XhciTrb{
+            .parameter = @as(u64, self.event_ring_phys),
+            .status = 0,
+            .control = (TRB_TYPE_LINK << 10) | (1 << 1),
+        };
 
         const erst_page = dma.allocPage() orelse return false;
         self.erst_phys = erst_page;
@@ -834,8 +841,11 @@ pub const XhciController = struct {
     }
 
     fn advanceEvent(self: *XhciController) void {
+        // Index 255 is the Event Ring Link TRB, not an event slot.  Wrap to
+        // index 0 and toggle the software cycle exactly as the HC follows
+        // that Link TRB.
         self.event_dequeue += 1;
-        if (self.event_dequeue == 256) {
+        if (self.event_dequeue == 255) {
             self.event_dequeue = 0;
             self.event_cycle ^= 1;
         }
@@ -909,6 +919,12 @@ pub const XhciController = struct {
             return null;
         }
         if (slot_id == 0 or slot_id > self.max_slots) return null;
+        if (slot_id >= self.slots.len or slot_id >= self.dcbaa.len) {
+            serial.serialWrite("[XHCI] Refusing out-of-range slot ID ");
+            serial.serialWriteDec(slot_id);
+            serial.serialWrite("\n");
+            return null;
+        }
         return slot_id;
     }
 
@@ -1108,9 +1124,42 @@ pub const XhciController = struct {
         if (slot_idx >= self.slots.len) return null;
         const slot = &self.slots[slot_idx];
         if (!slot.active or slot.dev_ctx_phys == 0) return null;
+        // An Output Device Context starts directly with the Slot Context;
+        // unlike an Input Device Context it has no Output Control Context.
         const output_slot = @as([*]u32, @ptrFromInt(slot.dev_ctx_phys));
         const address: u8 = @intCast(output_slot[3] & 0xFF);
         return if (address == 0) null else address;
+    }
+
+    pub fn logEndpointContext(self: *XhciController, slot_idx: usize, dci: u8) void {
+        if (slot_idx >= self.slots.len) return;
+        const slot = &self.slots[slot_idx];
+        if (!slot.active or slot.dev_ctx_phys == 0) return;
+
+        const ctx_size: usize = if (self.csz_64) 64 else 32;
+        const output_slot = @as([*]u32, @ptrFromInt(slot.dev_ctx_phys));
+        const output_ep = @as([*]u32, @ptrFromInt(slot.dev_ctx_phys + (@as(usize, dci) + 1) * ctx_size));
+        const ep_state = output_ep[0] & 0x7;
+        const ep_type = (output_ep[1] >> 3) & 0x7;
+        const max_packet = (output_ep[1] >> 16) & 0xFFFF;
+        const deq = @as(u64, output_ep[2]) | (@as(u64, output_ep[3]) << 32);
+        const entries = (output_slot[0] >> 27) & 0x1F;
+
+        serial.serialWrite("[XHCI] Output EP slot=");
+        serial.serialWriteDec(slot.slot_id);
+        serial.serialWrite(" dci=");
+        serial.serialWriteDec(dci);
+        serial.serialWrite(" state=");
+        serial.serialWriteDec(ep_state);
+        serial.serialWrite(" type=");
+        serial.serialWriteDec(ep_type);
+        serial.serialWrite(" mps=");
+        serial.serialWriteDec(max_packet);
+        serial.serialWrite(" entries=");
+        serial.serialWriteDec(entries);
+        serial.serialWrite(" deq=0x");
+        serial.serialWriteHex(deq);
+        serial.serialWrite("\n");
     }
 
     pub fn updateEp0MaxPacket(self: *XhciController, slot_idx: usize, max_packet: u8) bool {
@@ -1308,10 +1357,19 @@ pub const XhciController = struct {
         const cmd_ctrl = (TRB_TYPE_CONFIG_ENDPOINT << 10) | (@as(u32, slot.slot_id) << 24) | @as(u32, self.cmd_cycle);
         const ok = self.sendCommandRaw(@as(u64, slot.input_ctx_phys), 0, cmd_ctrl, null);
         if (ok) {
+            // Configure Endpoint programs the hardware dequeue pointer back
+            // to TRB 0 with DCS=1.  Reset the matching software ring state or
+            // a recovery will enqueue at a stale index/cycle forever.
             if (use_second) {
                 slot.intr2_dci = dci;
+                slot.intr2_ring[15].control = (TRB_TYPE_LINK << 10) | (1 << 1);
+                slot.intr2_enqueue = 0;
+                slot.intr2_cycle = 1;
             } else {
                 slot.intr_dci = dci;
+                slot.intr_ring[15].control = (TRB_TYPE_LINK << 10) | (1 << 1);
+                slot.intr_enqueue = 0;
+                slot.intr_cycle = 1;
             }
         }
         if (!ok) {

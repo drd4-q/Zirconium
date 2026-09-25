@@ -252,7 +252,10 @@ pub fn enumerateDevice(
                 if (iface.endpoint_count < types.MAX_DEVICE_ENDPOINTS) {
                     const ep_addr = cfg_buf[off + 2];
                     const ep_attr = cfg_buf[off + 3];
-                    const max_pkt = @as(u16, cfg_buf[off + 4]) | (@as(u16, cfg_buf[off + 5]) << 8);
+                    const raw_max_pkt = @as(u16, cfg_buf[off + 4]) | (@as(u16, cfg_buf[off + 5]) << 8);
+                    // Bits 12:11 encode additional transaction opportunities
+                    // for high-bandwidth periodic endpoints, not bytes.
+                    const max_pkt = raw_max_pkt & 0x07FF;
                     const interval = cfg_buf[off + 6];
 
                     const t_type: types.UsbTransferType = switch (ep_attr & 3) {
