@@ -1138,7 +1138,10 @@ pub const XhciController = struct {
 
         const ctx_size: usize = if (self.csz_64) 64 else 32;
         const output_slot = @as([*]u32, @ptrFromInt(slot.dev_ctx_phys));
-        const output_ep = @as([*]u32, @ptrFromInt(slot.dev_ctx_phys + (@as(usize, dci) + 1) * ctx_size));
+        // Output Device Context has no leading Output Control Context, so
+        // DCI N is at context offset N (the Input Context needs the extra
+        // control/slot offset instead).
+        const output_ep = @as([*]u32, @ptrFromInt(slot.dev_ctx_phys + @as(usize, dci) * ctx_size));
         const ep_state = output_ep[0] & 0x7;
         const ep_type = (output_ep[1] >> 3) & 0x7;
         const max_packet = (output_ep[1] >> 16) & 0xFFFF;
