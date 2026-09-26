@@ -105,9 +105,10 @@ fn printInfo() void {
 
     vga.setColor(.white, .black);
     vga.write("  Real hardware modes are chosen in the boot menu:\n");
-    vga.write("    \"1024x768x32\"  - deterministic, same on every machine\n");
-    vga.write("    \"native / high\" - highest 32bpp mode the panel reports\n");
-    vga.write("    \"Text Mode\"    - VGA text fallback\n");
+    vga.write("    \"keep current mode\" - reuse whatever is already set\n");
+    vga.write("    \"1024x768x32\"       - deterministic\n");
+    vga.write("    \"native / high\"     - longest 32bpp chain first\n");
+    vga.write("    \"VGA text\"          - Legacy fallback (invisible under UEFI)\n");
     vga.write("  The kernel has no runtime VBE mode setter yet, so\n");
     vga.write("  `resolution` only rescales the viewport inside this mode.\n\n");
     vga.write("  Usage: screen [info|redraw|refresh|clear]\n\n");
