@@ -314,6 +314,7 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
 
     active = true;
     clearMirror();
+    probeLfb(serial);
 
     serial.serialWrite("[FB] pitch=");
     serial.serialWriteDec(fb_pitch);
@@ -328,6 +329,46 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
     serial.serialWrite(" mbi_flags=0x");
     serial.serialWriteHex(flags);
     serial.serialWrite("\n");
+}
+
+/// Touch every page of the reported LFB and read one pixel back, before
+/// anything else draws.  A bootloader can hand out an address that is not
+/// identity-mapped or not backed at all, and the failure mode is a silent
+/// triple fault with a black screen - this turns that into one serial line.
+/// Runs before the shell, so it lands in the persistent kernel log even when
+/// the display is unusable.
+fn probeLfb(serial: @TypeOf(@import("serial.zig"))) void {
+    const total = @as(u64, fb_pitch) * fb_height;
+    if (fb_pitch == 0 or fb_pitch > fb_width * fb_bytes_pp) {
+        serial.serialWrite("[FB] probe SKIP: implausible pitch ");
+        serial.serialWriteDec(fb_pitch);
+        serial.serialWrite(" for width ");
+        serial.serialWriteDec(fb_width);
+        serial.serialWrite("\n");
+        return;
+    }
+    const step: u64 = 4096;
+    var off: u64 = 0;
+    while (off < total) : (off += step) {
+        const p: [*]volatile u8 = @ptrFromInt(fb_addr + off);
+        p[0] = p[0];
+    }
+    // Read/write round trip on a pixel we are about to clear anyway.
+    const probe_rgb: u32 = 0x00A55A3C;
+    lfbPut(0, 0, probe_rgb);
+    const back = lfbGet(0, 0);
+    serial.serialWrite("[FB] probe ");
+    if ((back & 0xFFFFFF) == (probe_rgb & 0xFFFFFF)) {
+        serial.serialWrite("OK, LFB is mapped and writable (");
+    } else {
+        serial.serialWrite("MISMATCH, expected ");
+        serial.serialWriteHex(probe_rgb);
+        serial.serialWrite(" got ");
+        serial.serialWriteHex(back);
+        serial.serialWrite(" (");
+    }
+    serial.serialWriteDec(total);
+    serial.serialWrite(" bytes)\n");
 }
 
 /// Real hardware geometry reported by the bootloader.  fb_width/fb_height are
