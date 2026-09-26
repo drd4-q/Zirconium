@@ -23,6 +23,7 @@ const arp_cache = @import("net/arp_cache.zig");
 const dhcp_mod = @import("net/dhcp.zig");
 const dns_mod = @import("net/dns.zig");
 const files = @import("programs/files.zig");
+const screen_prog = @import("programs/screen.zig");
 const nano_prog = @import("programs/nano.zig");
 const vfs = @import("fs/vfs.zig");
 const smp = @import("arch/smp.zig");
@@ -80,6 +81,8 @@ const command_table = [_]CmdEntry{
     .{ .name = "unset",      .run = cmdUnset },
     .{ .name = "env",        .run = cmdEnv },
     .{ .name = "mouse",      .run = showMouse },
+    .{ .name = "screen",     .run = screen_prog.run },
+    .{ .name = "video",      .run = screen_prog.run },
     .{ .name = "resolution", .run = cmdResolution },
     .{ .name = "gui",        .run = cmdGui },
     .{ .name = "dhcp",       .run = runDhcp },
@@ -634,7 +637,14 @@ fn cmdResolution(args: []const u8) void {
         vga.setColor(.cyan, .black);
         vga.write("\n  === Resolution ===\n\n");
         vga.setColor(.white, .black);
-        vga.write("  Current: ");
+        vga.write("  Boot mode: ");
+        vga.writeDec(vga_fb.boot_width);
+        vga.write("x");
+        vga.writeDec(vga_fb.boot_height);
+        vga.write("x");
+        vga.writeDec(vga_fb.fb_bpp);
+        vga.write("   (hardware mode, chosen in the boot menu)\n");
+        vga.write("  Viewport:  ");
         vga.writeDec(vga_fb.fb_width);
         vga.write("x");
         vga.writeDec(vga_fb.fb_height);
@@ -642,13 +652,21 @@ fn cmdResolution(args: []const u8) void {
         vga.writeDec(vga_fb.cols);
         vga.write("x");
         vga.writeDec(vga_fb.rows);
-        vga.write(" chars)\n\n");
+        vga.write(" chars)\n");
+        if (vga_fb.viewport_scaled) {
+            vga.setColor(.yellow, .black);
+            vga.write("  Viewport is scaled inside the boot mode.\n");
+            vga.setColor(.white, .black);
+        }
+        vga.write("\n  The kernel cannot reprogram the video mode at runtime, so\n");
+        vga.write("  this only rescales the drawable viewport. Requests larger\n");
+        vga.write("  than the boot mode are clamped. For a real mode change pick\n");
+        vga.write("  another entry in the boot menu, then `screen info`.\n\n");
         vga.write("  Usage: resolution <width>x<height>\n");
         vga.write("  Examples:\n");
         vga.write("    resolution 640x480\n");
         vga.write("    resolution 800x600\n");
-        vga.write("    resolution 1024x768\n");
-        vga.write("    resolution 1280x720\n\n");
+        vga.write("    resolution 1024x768\n\n");
         return;
     }
 
@@ -675,18 +693,28 @@ fn cmdResolution(args: []const u8) void {
         return;
     }
 
-    vga.setResolution(w, h);
-    vga.clear();
-    vga.setColor(.light_green, .black);
-    vga.write("  Resolution: ");
-    vga.writeDec(w);
+    const exact = vga_fb.setViewport(w, h);
+    if (exact) {
+        vga.setColor(.light_green, .black);
+    } else {
+        vga.setColor(.yellow, .black);
+    }
+    vga.write("  Viewport: ");
+    vga.writeDec(vga_fb.fb_width);
     vga.write("x");
-    vga.writeDec(h);
+    vga.writeDec(vga_fb.fb_height);
     vga.write(" (");
     vga.writeDec(vga_fb.cols);
     vga.write("x");
     vga.writeDec(vga_fb.rows);
-    vga.write(" chars)\n");
+    vga.write(" chars) inside ");
+    vga.writeDec(vga_fb.boot_width);
+    vga.write("x");
+    vga.writeDec(vga_fb.boot_height);
+    if (!exact) {
+        vga.write("  [clamped to the boot mode]");
+    }
+    vga.write("\n");
     vga.setColor(.white, .black);
 }
 
@@ -902,8 +930,12 @@ fn printHelp(_: []const u8) void {
     vga.write("    mount         List mounted filesystems\n\n");
     vga.write("  Input:\n");
     vga.write("    mouse         Show mouse info\n");
-    vga.write("    gui           Window manager demo (framebuffer)\n");
-    vga.write("    resolution    Change screen resolution (framebuffer)\n\n");
+    vga.write("    gui           Window manager demo (framebuffer)\n\n");
+    vga.write("  Display:\n");
+    vga.write("    screen        Framebuffer info (mode/pitch/grid)\n");
+    vga.write("    screen redraw Repaint the text console\n");
+    vga.write("    screen refresh  Force a full LFB refresh\n");
+    vga.write("    resolution    Rescale the viewport inside the boot mode\n\n");
     vga.write("  Keys: Tab=complete, Up/Down=history, PgUp/PgDn=scroll\n\n");
 }
 

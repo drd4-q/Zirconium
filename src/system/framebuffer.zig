@@ -7,6 +7,10 @@ const root = @import("root");
 // redraws visible as flicker.
 var shadow: [*]u32 = undefined;
 var shadow_pixels: usize = 0;
+/// Width the current shadow allocation was sized for.  Every shadow row is
+/// indexed with the *current* fb_width, so a viewport change invalidates the
+/// buffer unless the stride is re-synced.
+var shadow_stride_px: u32 = 0;
 var dirty_x0: u32 = 0;
 var dirty_y0: u32 = 0;
 var dirty_x1: u32 = 0;
@@ -17,6 +21,9 @@ var has_dirty: bool = false;
 // plus common QEMU default modes like 1280x800 (GRUB may pick these on boot).
 // Covers every resolution up to 4K (3840x2160)
 const MAX_SHADOW_PIXELS: usize = 3840 * 2160;
+
+/// Upper bound of the identity map built by src/entry.S (64 PDs x 2 MB pages).
+const MAX_IDENTITY_MAP_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 // Static preallocated early shadow buffer for boot/init (1024x768x32bpp).
 // Guarantees instant zero-lag drawing during early kernel initialization before PMM is online.
@@ -30,6 +37,14 @@ var early_pt_used: usize = 0;
 
 fn mapFbRange(paddr: u64, size: u64) void {
     if (paddr == 0 or size == 0) return;
+    // entry.S identity-maps only the first 64 GB with its static tables.  A
+    // framebuffer beyond that would be silently aliased somewhere else; refuse
+    // instead of corrupting unrelated memory.
+    if (paddr + size > MAX_IDENTITY_MAP_BYTES) {
+        const serial = @import("serial.zig");
+        serial.serialWrite("[FB] LFB range exceeds the 64 GB identity map; refusing to map\n");
+        return;
+    }
     const cr3 = asm volatile ("movq %%cr3, %[ret]" : [ret] "=r" (-> u64));
     const pml4: [*]u64 = @ptrFromInt(cr3 & 0x000FFFFFFFFFF000);
 
@@ -68,41 +83,50 @@ fn mapFbRange(paddr: u64, size: u64) void {
     }
 }
 
-fn ensureShadow() bool {
-    if (shadow_pixels != 0) {
-        const needed_pixels = @as(u64, fb_width) * fb_height;
-        if (using_early_shadow and needed_pixels > EARLY_SHADOW_MAX and root.pmm.free_pages > 0) {
-            const bytes = (needed_pixels * 4 + 4095) & ~@as(u64, 4095);
-            const pages = @as(usize, @intCast(bytes / 4096));
-            if (root.pmm.allocPages(pages)) |phys| {
-                shadow = @ptrFromInt(phys);
-                shadow_pixels = @intCast(needed_pixels);
-                using_early_shadow = false;
-                @memset(shadow[0..shadow_pixels], 0);
-            }
-        }
-        return true;
-    }
-    // If resolution fits inside early static shadow buffer, activate it immediately
-    const pixels = @as(u64, fb_width) * fb_height;
-    if (pixels > 0 and pixels <= EARLY_SHADOW_MAX) {
-        shadow = &early_shadow;
-        shadow_pixels = @intCast(pixels);
-        using_early_shadow = true;
-        @memset(shadow[0..shadow_pixels], 0);
-        return true;
-    }
-
-    if (root.pmm.free_pages == 0) return false;
-    if (pixels == 0 or pixels > MAX_SHADOW_PIXELS) return false;
+fn allocShadow(pixels: u64) bool {
     const bytes = (pixels * 4 + 4095) & ~@as(u64, 4095);
     const pages = @as(usize, @intCast(bytes / 4096));
     const phys = root.pmm.allocPages(pages) orelse return false;
     shadow = @ptrFromInt(phys);
     shadow_pixels = @intCast(pixels);
+    shadow_stride_px = fb_width;
     using_early_shadow = false;
     @memset(shadow[0..shadow_pixels], 0);
     return true;
+}
+
+fn ensureShadow() bool {
+    const needed = @as(u64, fb_width) * fb_height;
+    if (needed == 0 or needed > MAX_SHADOW_PIXELS) return false;
+
+    if (shadow_pixels == 0) {
+        // First activation. The static early buffer covers boot and every mode
+        // up to 1024x768 without needing the PMM.
+        if (needed <= EARLY_SHADOW_MAX) {
+            shadow = &early_shadow;
+            shadow_pixels = @intCast(needed);
+            shadow_stride_px = fb_width;
+            using_early_shadow = true;
+            @memset(shadow[0..shadow_pixels], 0);
+            return true;
+        }
+        if (root.pmm.free_pages == 0) return false;
+        return allocShadow(needed);
+    }
+
+    if (shadow_stride_px == fb_width and needed <= shadow_pixels) return true;
+
+    // The viewport changed. Re-stride in place when the existing allocation is
+    // still large enough, otherwise get a bigger one from the PMM.  Keeping the
+    // old buffer on PMM failure is safe: every write is bounded by
+    // fb_width/fb_height, so a stale stride is never indexed out of range.
+    if (needed <= shadow_pixels) {
+        shadow_stride_px = fb_width;
+        @memset(shadow[0..@intCast(needed)], 0);
+        return true;
+    }
+    if (using_early_shadow and root.pmm.free_pages == 0) return false;
+    return allocShadow(needed);
 }
 
 pub var fb_addr: u64 = 0;
@@ -249,6 +273,13 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
     serial.serialWriteHex(@truncate(fb_addr));
     serial.serialWrite("\n");
 
+    // Remember the real hardware geometry. fb_width/fb_height double as the
+    // drawable viewport (see setViewport) and must never exceed these.
+    boot_width = fb_width;
+    boot_height = fb_height;
+    boot_pitch = fb_pitch;
+    viewport_scaled = false;
+
     // Ensure framebuffer range is identity-mapped in page tables (crucial if fb_addr >= 8GB)
     const total_fb_bytes = @as(u64, fb_pitch) * fb_height;
     mapFbRange(fb_addr, total_fb_bytes);
@@ -260,12 +291,49 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
 
     active = true;
     clearMirror();
+
+    serial.serialWrite("[FB] pitch=");
+    serial.serialWriteDec(fb_pitch);
+    serial.serialWrite(" stride=");
+    serial.serialWriteDec(fb_bytes_pp);
+    serial.serialWrite("B type=");
+    serial.serialWriteDec(fb_type);
+    serial.serialWrite(" grid=");
+    serial.serialWriteDec(cols);
+    serial.serialWrite("x");
+    serial.serialWriteDec(rows);
+    serial.serialWrite("\n");
 }
 
-pub fn setResolution(new_w: u32, new_h: u32) void {
-    if (!active) return;
-    fb_width = new_w;
-    fb_height = new_h;
+/// Real hardware geometry reported by the bootloader.  fb_width/fb_height are
+/// the current viewport and are always clamped to these.
+pub var boot_width: u32 = 0;
+pub var boot_height: u32 = 0;
+pub var boot_pitch: u32 = 0;
+/// True when the viewport is smaller than the mode GRUB actually set.
+pub var viewport_scaled: bool = false;
+
+/// Bytes per pixel of the real LFB (3 for 24bpp, 4 for 32bpp).
+pub fn bytesPerPixel() u32 {
+    return fb_bytes_pp;
+}
+
+/// Resize the drawable viewport.  The mode itself is owned by the firmware /
+/// GRUB, so this only changes how much of the real LFB we address; anything
+/// larger than the boot geometry is clamped instead of scribbling past the end
+/// of the framebuffer.  Returns false when the request was clamped or refused.
+pub fn setViewport(new_w: u32, new_h: u32) bool {
+    if (!active) return false;
+    if (boot_width == 0 or boot_height == 0) return false;
+    const w = @min(new_w, boot_width);
+    const h = @min(new_h, boot_height);
+    if (w == 0 or h == 0) return false;
+
+    const exact = (w == new_w and h == new_h);
+    fb_width = w;
+    fb_height = h;
+    viewport_scaled = (w != boot_width or h != boot_height);
+
     cols = fb_width / char_w;
     rows = fb_height / char_h;
     if (cols > MAX_COLS) cols = MAX_COLS;
@@ -273,6 +341,12 @@ pub fn setResolution(new_w: u32, new_h: u32) void {
     cursor_row = 0;
     cursor_col = 0;
     clear();
+    return exact;
+}
+
+/// Backwards-compatible alias: resizing only ever changes the viewport now.
+pub fn setResolution(new_w: u32, new_h: u32) void {
+    _ = setViewport(new_w, new_h);
 }
 
 pub fn clear() void {
@@ -281,15 +355,33 @@ pub fn clear() void {
     if (ensureShadow() and shadow_pixels != 0) {
         @memset(shadow[0..shadow_pixels], bg_col);
         markDirtyRect(0, 0, fb_width, fb_height);
-    } else {
+    } else if (fb_bytes_pp == 4) {
+        // 32bpp: one u64 covers two BGRX pixels.
         const bg_val64: u64 = (@as(u64, bg_col) << 32) | bg_col;
         var y: u32 = 0;
         while (y < fb_height) : (y += 1) {
             const row_ptr: [*]volatile u64 = @ptrFromInt(fb_addr + @as(u64, y) * fb_pitch);
-            const count64 = (fb_width * 4) / 8;
+            const count64 = (@as(usize, fb_width) * 4) / 8;
             var i: usize = 0;
             while (i < count64) : (i += 1) {
                 row_ptr[i] = bg_val64;
+            }
+            // An odd pixel count leaves a 4-byte tail.
+            if (fb_width % 2 != 0) {
+                const tail: [*]volatile u32 = @ptrFromInt(fb_addr + @as(u64, y) * fb_pitch + @as(u64, count64) * 8);
+                tail[0] = bg_col;
+            }
+        }
+    } else {
+        // 24bpp: no padding word, so write B,G,R per pixel.
+        var y: u32 = 0;
+        while (y < fb_height) : (y += 1) {
+            const row: [*]volatile u8 = @ptrFromInt(fb_addr + @as(u64, y) * fb_pitch);
+            var x: u32 = 0;
+            while (x < fb_width) : (x += 1) {
+                row[x * 3 + 0] = bg_b;
+                row[x * 3 + 1] = bg_g;
+                row[x * 3 + 2] = bg_r;
             }
         }
     }
@@ -378,8 +470,12 @@ pub fn flush() void {
     if (!has_dirty or shadow_pixels == 0) return;
     const x0 = dirty_x0;
     const y0 = dirty_y0;
-    const x1 = @min(dirty_x1, fb_width);
-    const y1 = @min(dirty_y1, fb_height);
+    // Clamp to the real LFB, not just the viewport: a stale dirty rect must
+    // never write past the end of the mode GRUB set.
+    const max_x = if (boot_width != 0) @min(fb_width, boot_width) else fb_width;
+    const max_y = if (boot_height != 0) @min(fb_height, boot_height) else fb_height;
+    const x1 = @min(dirty_x1, max_x);
+    const y1 = @min(dirty_y1, max_y);
     has_dirty = false;
     if (x0 >= x1 or y0 >= y1) return;
 
@@ -595,16 +691,21 @@ fn drawCharAt(col: usize, row: usize, ch: u8) void {
     }
 }
 
+/// Standard 16-colour VGA palette, shared by every mirror repaint.
+const vga_palette = [_]u32{
+    0x000000, 0x0000AA, 0x00AA00, 0x00AAAA,
+    0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
+    0x555555, 0x5555FF, 0x55FF55, 0x55FFFF,
+    0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
+};
+
 fn redrawRow(row: usize) void {
     if (row >= rows) return;
     for (0..cols) |col| {
         const entry = screen_mirror[row][col];
         const ch: u8 = @intCast(entry & 0xFF);
-        const fg4: u8 = @intCast((entry >> 8) & 0x0F);
-        const bg4: u8 = @intCast((entry >> 12) & 0x0F);
-        const fgt = [_]u32{ 0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA, 0x555555, 0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF };
-        const fg = fgt[fg4];
-        const bg = fgt[bg4];
+        const fg = vga_palette[@intCast((entry >> 8) & 0x0F)];
+        const bg = vga_palette[@intCast((entry >> 12) & 0x0F)];
         fg_r = @intCast((fg >> 16) & 0xFF);
         fg_g = @intCast((fg >> 8) & 0xFF);
         fg_b = @intCast(fg & 0xFF);
@@ -613,6 +714,36 @@ fn redrawRow(row: usize) void {
         bg_b = @intCast(bg & 0xFF);
         drawCharAt(col, row, if (ch == 0) ' ' else ch);
     }
+}
+
+/// Repaint the whole text console from the screen mirror and push it to the LFB
+/// in one bulk flush.  Used by `screen redraw`, and to recover a console after
+/// something scribbled on the LFB directly.  The global colours and cursor are
+/// restored, so callers keep their palette.
+pub fn redrawAllText() void {
+    if (!active) return;
+    const saved_fg = .{ fg_r, fg_g, fg_b };
+    const saved_bg = .{ bg_r, bg_g, bg_b };
+    const saved_cursor = .{ cursor_row, cursor_col };
+    const saved_view = scroll_view;
+
+    scroll_view = false;
+    has_dirty = false;
+    var r: usize = 0;
+    while (r < rows) : (r += 1) redrawRow(r);
+
+    fg_r = saved_fg[0];
+    fg_g = saved_fg[1];
+    fg_b = saved_fg[2];
+    bg_r = saved_bg[0];
+    bg_g = saved_bg[1];
+    bg_b = saved_bg[2];
+    cursor_row = saved_cursor[0];
+    cursor_col = saved_cursor[1];
+    scroll_view = saved_view;
+
+    markDirtyRect(0, 0, fb_width, fb_height);
+    flush();
 }
 
 pub fn scrollUp() void {

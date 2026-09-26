@@ -138,7 +138,17 @@
 - [x] Command history (up/down arrows, 16 entries circular buffer)
 - [x] Environment variables (set KEY=V, unset K, env) with $KEY expansion + echo
 - [x] Scrollback buffer (PageUp/PageDown, 512 lines)
-- [x] Resolution command (framebuffer, change resolution at runtime)
+- [x] Resolution command (framebuffer; rescales the viewport inside the boot mode)
+- [x] `screen [info|redraw|refresh|clear]` (LFB geometry, console repaint, forced full refresh)
+- [ ] Runtime video-mode setter (`screen set 1920x1080`) — needs a real VBE path: use the
+      VBE 3.0 protected-mode interface from the Multiboot info (offsets 82/84/86, `0xFFFF`
+      when absent, see Linux `arch/x86/boot/video/vbe.c`), else a V86 `int 0x10` trampoline.
+      Until then the mode only changes via a `grub.cfg` menu entry.
+- [ ] Honor the framebuffer channel layout (MBI offsets 110-115). `lfbPut`/`lfbGet` and the
+      32bpp `flush()` fast path still assume BGRX, so a UEFI GOP `RGBA8`/`BLT_ONLY` mode
+      (R@0) renders with red and blue swapped.
+- [ ] Write-combining MTRR for the LFB (`rdmsr 0xFE`, set `0x200`/`0x201` like GRUB's
+      `grub_vbe_enable_mtrr`) — the biggest win for GUI/redraw bandwidth on real hardware.
 - [ ] Pipes (cmd1 | cmd2)
 - [ ] I/O redirection (cmd > file, cmd < file)
 - [ ] Serial console input so tests can drive the shell headless

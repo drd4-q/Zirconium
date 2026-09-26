@@ -221,27 +221,22 @@ const CURSOR_PIXELS = [CURSOR_H][CURSOR_W]u8{
 };
 var cursor_bg: [CURSOR_W * CURSOR_H]u32 = undefined;
 
+// The cursor is drawn straight into the LFB (it moves faster than the text
+// pipeline), so every access must go through the framebuffer's byte-aware
+// helpers: the real LFB may be 24bpp, where indexing it as u32 walks the wrong
+// stride and mixes neighbouring pixels.
 fn saveCursorBg(x: i32, y: i32) void {
     const sw = fb.fb_width;
     const sh = fb.fb_height;
     var cy: usize = 0;
     while (cy < CURSOR_H) : (cy += 1) {
         const py = y + @as(i32, @intCast(cy));
-        if (py >= 0 and py < sh) {
-            const src_off: u64 = @as(u64, @intCast(py)) * fb.fb_pitch;
-            const src: [*]volatile u32 = @ptrFromInt(fb.fb_addr + src_off);
-            var cx: usize = 0;
-            while (cx < CURSOR_W) : (cx += 1) {
-                const px = x + @as(i32, @intCast(cx));
-                if (px >= 0 and px < sw) {
-                    cursor_bg[cy * CURSOR_W + cx] = src[@intCast(px)];
-                } else {
-                    cursor_bg[cy * CURSOR_W + cx] = 0;
-                }
-            }
-        } else {
-            var cx: usize = 0;
-            while (cx < CURSOR_W) : (cx += 1) {
+        var cx: usize = 0;
+        while (cx < CURSOR_W) : (cx += 1) {
+            const px = x + @as(i32, @intCast(cx));
+            if (py >= 0 and py < sh and px >= 0 and px < sw) {
+                cursor_bg[cy * CURSOR_W + cx] = fb.rawPixel(@intCast(px), @intCast(py));
+            } else {
                 cursor_bg[cy * CURSOR_W + cx] = 0;
             }
         }
@@ -254,16 +249,13 @@ fn restoreCursorBg() void {
     var cy: usize = 0;
     while (cy < CURSOR_H) : (cy += 1) {
         const py = cursor_y + @as(i32, @intCast(cy));
-        if (py >= 0 and py < sh) {
-            const dst_off: u64 = @as(u64, @intCast(py)) * fb.fb_pitch;
-            const dst: [*]volatile u32 = @ptrFromInt(fb.fb_addr + dst_off);
-            var cx: usize = 0;
-            while (cx < CURSOR_W) : (cx += 1) {
-                const px = cursor_x + @as(i32, @intCast(cx));
-                if (px >= 0 and px < sw) {
-                    dst[@intCast(px)] = cursor_bg[cy * CURSOR_W + cx];
-                }
-            }
+        if (py < 0 or py >= sh) continue;
+        var cx: usize = 0;
+        while (cx < CURSOR_W) : (cx += 1) {
+            const px = cursor_x + @as(i32, @intCast(cx));
+            if (px < 0 or px >= sw) continue;
+            const c = cursor_bg[cy * CURSOR_W + cx];
+            fb.rawPutPixel(@intCast(px), @intCast(py), @intCast((c >> 16) & 0xFF), @intCast((c >> 8) & 0xFF), @intCast(c & 0xFF));
         }
     }
 }
@@ -275,18 +267,15 @@ fn drawCursorShape() void {
     while (cy < CURSOR_H) : (cy += 1) {
         const py = cursor_y + @as(i32, @intCast(cy));
         if (py < 0 or py >= sh) continue;
-        const dst_off: u64 = @as(u64, @intCast(py)) * fb.fb_pitch;
-        const dst: [*]volatile u32 = @ptrFromInt(fb.fb_addr + dst_off);
-
         var cx: usize = 0;
         while (cx < CURSOR_W) : (cx += 1) {
             const px = cursor_x + @as(i32, @intCast(cx));
             if (px < 0 or px >= sw) continue;
             const code = CURSOR_PIXELS[cy][cx];
             if (code == 1) {
-                dst[@intCast(px)] = 0x000000;
+                fb.rawPutPixel(@intCast(px), @intCast(py), 0, 0, 0);
             } else if (code == 2) {
-                dst[@intCast(px)] = 0xFFFFFF;
+                fb.rawPutPixel(@intCast(px), @intCast(py), 255, 255, 255);
             }
         }
     }
@@ -456,9 +445,7 @@ fn drawWindowBody(win: *Window) void {
                     const bg_col = if (bg_idx == 0) 0x0C0E12 else vga_colors[bg_idx];
 
                     const px = tx + @as(i32, @intCast(c * 8));
-                    fb.drawGlyph(@intCast(px), @intCast(py), if (ch == 0) ' ' else ch,
-                        @intCast((fg_col >> 16) & 0xFF), @intCast((fg_col >> 8) & 0xFF), @intCast(fg_col & 0xFF),
-                        @intCast((bg_col >> 16) & 0xFF), @intCast((bg_col >> 8) & 0xFF), @intCast(bg_col & 0xFF));
+                    fb.drawGlyph(@intCast(px), @intCast(py), if (ch == 0) ' ' else ch, @intCast((fg_col >> 16) & 0xFF), @intCast((fg_col >> 8) & 0xFF), @intCast(fg_col & 0xFF), @intCast((bg_col >> 16) & 0xFF), @intCast((bg_col >> 8) & 0xFF), @intCast(bg_col & 0xFF));
                 }
             }
 
