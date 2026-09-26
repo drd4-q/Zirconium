@@ -136,8 +136,11 @@ pub var fb_height: u32 = 0;
 pub var fb_bpp: u32 = 0;
 pub var fb_type: u32 = 0;
 /// Bytes per pixel on the real LFB: 4 for the classic XRGB8888 layout, 3 when
-/// the bootloader only offered a 24bpp mode (common with VBE). Everything that
-/// touches the LFB goes through lfbPut/lfbGet or branches on this.
+/// the bootloader only offered a 24bpp mode (common with VBE), 2 for RGB565.
+/// Everything that touches the LFB goes through lfbPut/lfbGet or branches on
+/// this.  16bpp matters on real hardware: when a 32bpp mode is unavailable GRUB
+/// happily lands on a 16bpp mode, and refusing it would leave us with no LFB at
+/// all (a black screen under UEFI, where the VGA text buffer is not displayed).
 var fb_bytes_pp: u32 = 4;
 
 inline fn lfbOffset(y: u32, x: u32) u64 {
@@ -146,6 +149,15 @@ inline fn lfbOffset(y: u32, x: u32) u64 {
 
 /// Write one RGB pixel straight to the LFB.
 fn lfbPut(x: u32, y: u32, rgb: u32) void {
+    if (fb_bytes_pp == 2) {
+        // RGB565: 5 bits red, 6 green, 5 blue.
+        const v: u16 = (@as(u16, @truncate(rgb >> 19)) << 11) |
+            (@as(u16, @truncate(rgb >> 10)) << 5) |
+            @as(u16, @truncate(rgb >> 3));
+        const p: [*]volatile u16 = @ptrFromInt(fb_addr + lfbOffset(y, x));
+        p[0] = v;
+        return;
+    }
     const p: [*]volatile u8 = @ptrFromInt(fb_addr + lfbOffset(y, x));
     p[0] = @truncate(rgb);
     p[1] = @truncate(rgb >> 8);
@@ -155,6 +167,13 @@ fn lfbPut(x: u32, y: u32, rgb: u32) void {
 
 /// Read one RGB pixel straight from the LFB.
 fn lfbGet(x: u32, y: u32) u32 {
+    if (fb_bytes_pp == 2) {
+        const p: [*]volatile u16 = @ptrFromInt(fb_addr + lfbOffset(y, x));
+        const v = p[0];
+        return (@as(u32, (v >> 11) & 0x1F) << 19) |
+            (@as(u32, (v >> 5) & 0x3F) << 10) |
+            (@as(u32, v & 0x1F) << 3);
+    }
     const p: [*]volatile u8 = @ptrFromInt(fb_addr + lfbOffset(y, x));
     return (@as(u32, p[2]) << 16) | (@as(u32, p[1]) << 8) | @as(u32, p[0]);
 }
@@ -213,7 +232,10 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
     if ((flags & (1 << 12)) == 0) {
         serial.serialWrite("[FB] No framebuffer info from bootloader (MBI flags=0x");
         serial.serialWriteHex(flags);
-        serial.serialWrite("); staying in VGA text mode\n");
+        serial.serialWrite(")\n");
+        serial.serialWrite("[FB] GRUB handed us no video mode (it fell back to text).\n");
+        serial.serialWrite("[FB] Under UEFI the VGA text buffer at 0xB8000 is NOT\n");
+        serial.serialWrite("[FB] displayed by the firmware console -> black screen.\n");
         return;
     }
 
@@ -249,13 +271,14 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
         serial.serialWrite("[FB] Degenerate framebuffer info; staying in text mode\n");
         return;
     }
-    // Only packed RGB is supported. GRUB/QEMU frequently hand out an
-    // 800x600x24 VBE mode when the requested 32bpp one is unavailable, so
-    // accept both rather than drawing invisibly.
-    if (fb_bpp != 32 and fb_bpp != 24) {
+    // Only packed RGB is supported.  GRUB/QEMU frequently hand out an
+    // 800x600x24 VBE mode when the requested 32bpp one is unavailable, and real
+    // hardware can be stuck on 16bpp (RGB565), so accept all three rather than
+    // leaving the machine with no LFB at all.
+    if (fb_bpp != 32 and fb_bpp != 24 and fb_bpp != 16) {
         serial.serialWrite("[FB] Unsupported depth ");
         serial.serialWriteDec(fb_bpp);
-        serial.serialWrite("bpp (need 24 or 32); staying in text mode\n");
+        serial.serialWrite("bpp (need 16, 24 or 32); staying in VGA text mode\n");
         return;
     }
     fb_bytes_pp = fb_bpp / 8;
@@ -302,6 +325,8 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
     serial.serialWriteDec(cols);
     serial.serialWrite("x");
     serial.serialWriteDec(rows);
+    serial.serialWrite(" mbi_flags=0x");
+    serial.serialWriteHex(flags);
     serial.serialWrite("\n");
 }
 
@@ -355,6 +380,17 @@ pub fn clear() void {
     if (ensureShadow() and shadow_pixels != 0) {
         @memset(shadow[0..shadow_pixels], bg_col);
         markDirtyRect(0, 0, fb_width, fb_height);
+    } else if (fb_bytes_pp == 2) {
+        // 16bpp RGB565, one u16 per pixel.
+        const bg16: u16 = (@as(u16, bg_r >> 3) << 11) |
+            (@as(u16, bg_g >> 2) << 5) |
+            @as(u16, bg_b >> 3);
+        var y: u32 = 0;
+        while (y < fb_height) : (y += 1) {
+            const row: [*]volatile u16 = @ptrFromInt(fb_addr + @as(u64, y) * fb_pitch);
+            var x: u32 = 0;
+            while (x < fb_width) : (x += 1) row[x] = bg16;
+        }
     } else if (fb_bytes_pp == 4) {
         // 32bpp: one u64 covers two BGRX pixels.
         const bg_val64: u64 = (@as(u64, bg_col) << 32) | bg_col;
