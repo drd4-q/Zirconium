@@ -27,6 +27,16 @@ pub fn run(args: []const u8) void {
         vga.setColor(.light_green, .black);
         vga.write("  Screen cleared and flushed.\n\n");
         vga.setColor(.white, .black);
+    } else if (eq(cmd, "test") or eq(cmd, "bars") or eq(cmd, "pattern")) {
+        // Raw-LFB colour bars, bypassing the shadow buffer.  If the screen stays
+        // black but the serial log says every probe read back OK, the buffer is
+        // writable and the hardware simply is not scanning it out.
+        // The message goes out first: any later vga.write triggers a full-shadow
+        // flush that would paint over the bars.
+        vga.setColor(.light_green, .black);
+        vga.write("  Colour bars written to the LFB; see the log for readback.\n\n");
+        vga.setColor(.white, .black);
+        fb.testPattern();
     } else {
         vga.setColor(.light_red, .black);
         vga.write("\n  Unknown subcommand '");
@@ -38,11 +48,12 @@ pub fn run(args: []const u8) void {
 }
 
 fn printUsage() void {
-    vga.write("  Usage: screen [info|redraw|refresh|clear]\n");
+    vga.write("  Usage: screen [info|redraw|refresh|clear|test]\n");
     vga.write("    info     Framebuffer geometry, pitch, grid, shadow state\n");
     vga.write("    redraw   Repaint the text console from its mirror\n");
     vga.write("    refresh  Force a full-shadow -> LFB flush\n");
-    vga.write("    clear    Clear the screen\n\n");
+    vga.write("    clear    Clear the screen\n");
+    vga.write("    test     Raw-LFB colour bars + readback (diagnoses a black screen)\n\n");
 }
 
 fn printInfo() void {
