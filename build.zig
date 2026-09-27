@@ -79,6 +79,12 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .red_zone = false,
+            // system/panic.zig walks the RBP chain in printBacktrace, and
+            // main.zig's panic handler seeds it from the current frame.  The
+            // optimized modes drop frame pointers by default, which would turn
+            // the backtrace into garbage exactly when it is needed (a panic on
+            // real hardware is otherwise undebuggable).  Keep them.
+            .omit_frame_pointer = false,
             .strip = true,
         }),
         .use_llvm = true,

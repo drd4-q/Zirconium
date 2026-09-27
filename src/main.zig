@@ -142,13 +142,10 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
 
     vga.write("[BOOT] Starting scheduler...\n");
     scheduler.runAll();
-    vga.write("[BOOT] Scheduler completed\n");
     serial.serialWrite("[BOOT] Scheduler completed\n");
 
-    vga.write("[BOOT] Initializing USB subsystem...\n");
-    @import("drivers/usb.zig").mod.init();
-    serial.serialWrite("[BOOT] USB init done\n");
-
+    // USB is already up from the storage/input pass above; usb.mod.init()
+    // guards on `initialized` and would be a no-op here.
     vga.write("[BOOT] Launching Shell...\n");
     serial.serialWrite("[BOOT] Launching Shell\n");
     shell.run();

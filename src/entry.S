@@ -69,10 +69,13 @@ _start:
     cld
     movl $stack_top, %esp
 
-    // Zero out entire .bss section (critical on bare metal where RAM is uninitialized)
+    // Zero out entire .bss section (critical on bare metal where RAM is uninitialized).
+    // Round the byte count up: a size that is not a multiple of 4 would otherwise
+    // leave the trailing 1-3 bytes stale.
     movl $__bss_start, %edi
     movl $__bss_end, %ecx
     subl %edi, %ecx
+    addl $3, %ecx
     shrl $2, %ecx
     xorl %eax, %eax
     rep stosl

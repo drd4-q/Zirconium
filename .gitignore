@@ -19,3 +19,8 @@ ser_capture.log
 regs_out.txt
 agy.txt
 prompt.txt
+
+# Python bytecode caches (the test harnesses rewrite these on every run, which
+# used to dirty the working tree after each `zig build` + test cycle)
+__pycache__/
+*.pyc
