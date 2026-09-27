@@ -11,6 +11,7 @@ MAKE_ISO="true"
 CLEAN_STAGE="false"
 GRUB_DEBUG="false"
 OUTPUT_ISO="$SCRIPT_DIR/kernel.iso"
+OUTPUT_SET="false"
 ZIG_BIN="${ZIG:-zig}"
 
 usage() {
@@ -31,6 +32,7 @@ Options:
                       and mirrors GRUB output to COM1. Use when the kernel logs
                       "[FB] No framebuffer info" - GRUB's own text output is
                       still visible there, so the mode list can be read.
+                      Writes to ./kernel-debug.iso unless --output is given.
   --clean             Remove the previous ISO/staging directory before building
   -h, --help          Show this help
 
@@ -68,6 +70,7 @@ while (($# > 0)); do
         --output)
             (($# >= 2)) || { echo "error: --output requires a path" >&2; exit 2; }
             OUTPUT_ISO="$2"
+            OUTPUT_SET="true"
             shift 2
             ;;
         --clean)
@@ -88,6 +91,13 @@ done
 
 if [[ "$OUTPUT_ISO" != /* ]]; then
     OUTPUT_ISO="$SCRIPT_DIR/$OUTPUT_ISO"
+fi
+
+# The diagnostic ISO must not land on top of the production one: they get copied
+# to the same boot medium side by side and compared, and silently overwriting
+# kernel.iso is how you end up testing the wrong build.
+if [[ "$GRUB_DEBUG" == "true" && "$OUTPUT_SET" == "false" ]]; then
+    OUTPUT_ISO="$SCRIPT_DIR/kernel-debug.iso"
 fi
 
 command -v "$ZIG_BIN" >/dev/null 2>&1 || {
