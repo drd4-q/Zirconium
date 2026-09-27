@@ -168,8 +168,8 @@ pub fn ensureArp(target_ip: [4]u8) bool {
     var attempt: u32 = 0;
     while (attempt < 3) : (attempt += 1) {
         arp.request(target_ip);
-        const deadline = timer.ticks +% 50; // 500ms per attempt
-        while (timer.ticks < deadline) {
+        const deadline = timer.tickCount() +% 50; // 500ms per attempt
+        while (timer.tickCount() < deadline) {
             poll();
             if (arp_cache.lookup(target_ip)) |_| return true;
         }

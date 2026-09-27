@@ -406,8 +406,8 @@ pub fn connect(dst_ip: [4]u8, dst_port_val: u16) ?*Connection {
 /// Block until the handshake completes (or a timeout). Returns true when
 /// established, false on timeout or RST/connection failure.
 pub fn waitEstablished(conn: *Connection, timeout_ticks: u64) bool {
-    const deadline = timer.ticks +% timeout_ticks;
-    while (timer.ticks < deadline) {
+    const deadline = timer.tickCount() +% timeout_ticks;
+    while (timer.tickCount() < deadline) {
         if (conn.state == .established) return true;
         if (conn.state == .closed) return false;
         net.poll();

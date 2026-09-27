@@ -24,7 +24,11 @@ const CELL_ENTRY: usize = 0x718; // u64
 const LAPIC_ICR_LO: u32 = 0x300;
 const LAPIC_ICR_HI: u32 = 0x310;
 
-const ICR_INIT_ASSERT: u32 = 0x0000C500; // delivery mode 5 (INIT), level+trigger
+// INIT *assert*: delivery mode 5 (bits 10:8) with level = 0 (assert) and the
+// edge/level bit clear. The old 0x0000C500 had level = 1 (deassert) set plus
+// the read-only delivery-status bit, so it never actually asserted INIT on any
+// AP - the CPUs came up only because QEMU and some firmwares ignore it.
+const ICR_INIT_ASSERT: u32 = 0x00004500;
 // SIPI: delivery mode 6 lives in bits 10:8 => 6 << 8 = 0x600 (IBM 0x6000
 // would put the mode bits into 14:13, decoding as FIXED vector = never wakes).
 const ICR_SIPI: u32 = (6 << 8) | @as(u32, @intCast(AP_BASE >> 12));
@@ -125,7 +129,7 @@ fn prepareAp(index: u64, stack_top: u64) void {
 inline fn lapicIpiWait() void {
     var spins: u32 = 0;
     while (lapicRead(LAPIC_ICR_LO) & 0x1000 != 0 and spins < 100000000) : (spins += 1) {
-        asm volatile ("pause");
+        asm volatile ("pause" ::: .{ .memory = true });
     }
 }
 
@@ -150,11 +154,12 @@ fn sendStartupAp(apic_id: u32) void {
     timer.sleep(2);
 }
 
-fn waitCpuOnline(expected: u32) void {
+fn waitCpuOnline(expected: u32) bool {
     var spins: u32 = 0;
-    while (smp_cpus_online < expected and spins < 2000000) : (spins += 1) {
-        asm volatile ("pause");
+    while (@as(*const volatile u32, @ptrCast(&smp_cpus_online)).* < expected and spins < 2000000) : (spins += 1) {
+        asm volatile ("pause" ::: .{ .memory = true });
     }
+    return @as(*const volatile u32, @ptrCast(&smp_cpus_online)).* >= expected;
 }
 
 pub export fn ap_entry(cpu_index: u64) callconv(.c) noreturn {
@@ -162,7 +167,7 @@ pub export fn ap_entry(cpu_index: u64) callconv(.c) noreturn {
     asm volatile ("ltr %[sel]" : : [sel] "r" (@as(u16, gdt.TSS_SEL)));
 
     while (!tryLock()) {
-        asm volatile ("pause");
+        asm volatile ("pause" ::: .{ .memory = true });
     }
     serial.serialWrite("[SMP] AP CPU ");
     serial.serialWriteDec(cpu_index);
@@ -182,7 +187,7 @@ pub export fn ap_entry(cpu_index: u64) callconv(.c) noreturn {
         if ((ticks & 0x1FFFF) == 0) {
             if (cpu_index < ap_ticks.len) ap_ticks[cpu_index] = ticks;
         }
-        asm volatile ("pause");
+        asm volatile ("pause" ::: .{ .memory = true });
     }
 }
 
@@ -227,12 +232,22 @@ pub fn init() void {
         sendInitAp(ap_id);
         sendStartupAp(ap_id);
 
-        waitCpuOnline(index);
-        serial.serialWrite("[SMP] AP ");
-        serial.serialWriteDec(index);
-        serial.serialWrite(" confirmed online (online=");
-        serial.serialWriteDec(smp_cpus_online);
-        serial.serialWrite(")\n");
+        // Report the truth: the old code always printed "confirmed online" even
+        // when the bounded wait expired, which is exactly the signal the test
+        // harness greps for - a silently dead AP still looked like a healthy one.
+        if (waitCpuOnline(index)) {
+            serial.serialWrite("[SMP] AP ");
+            serial.serialWriteDec(index);
+            serial.serialWrite(" confirmed online (online=");
+            serial.serialWriteDec(smp_cpus_online);
+            serial.serialWrite(")\n");
+        } else {
+            serial.serialWrite("[SMP] AP ");
+            serial.serialWriteDec(index);
+            serial.serialWrite(" FAILED to come online (online=");
+            serial.serialWriteDec(smp_cpus_online);
+            serial.serialWrite(")\n");
+        }
     }
 
     smp_booted = true;

@@ -35,6 +35,9 @@ const PORT_CMD_ST: u32 = 1 << 0;
 const PORT_CMD_FRE: u32 = 1 << 4;
 const PORT_CMD_FR: u32 = 1 << 14;
 const PORT_CMD_CR: u32 = 1 << 15;
+/// Upper bound on a bounded port-status wait. Every other wait in this driver
+/// uses the same 100k bound; an unbounded one in the boot path is a hang.
+const PORT_BUSY_LIMIT: u32 = 100_000;
 
 const SATA_SIG_ATA: u32 = 0x00000101;
 const ATA_DEV_BUSY: u8 = 0x80;
@@ -114,25 +117,47 @@ fn portWrite(port_no: u32, offset: u32, val: u32) void {
 }
 
 fn stopPort(port_no: u32) void {
+    // PxCI.FRE must only be written after PxCI.CR has read 0, so clear ST first,
+    // wait for the controller to go idle, and only then release the interface.
     var cmd = portRead(port_no, PORT_CMD);
     cmd &= ~PORT_CMD_ST;
-    cmd &= ~PORT_CMD_FRE;
     portWrite(port_no, PORT_CMD, cmd);
 
     var timeout: u32 = 0;
-    while ((portRead(port_no, PORT_CMD) & (PORT_CMD_FR | PORT_CMD_CR)) != 0 and timeout < 100_000) : (timeout += 1) {
-        asm volatile ("pause");
+    while ((portRead(port_no, PORT_CMD) & PORT_CMD_CR) != 0 and timeout < PORT_BUSY_LIMIT) : (timeout += 1) {
+        asm volatile ("pause" ::: .{ .memory = true });
+    }
+
+    cmd = portRead(port_no, PORT_CMD);
+    cmd &= ~PORT_CMD_FRE;
+    portWrite(port_no, PORT_CMD, cmd);
+
+    timeout = 0;
+    while ((portRead(port_no, PORT_CMD) & PORT_CMD_FR) != 0 and timeout < PORT_BUSY_LIMIT) : (timeout += 1) {
+        asm volatile ("pause" ::: .{ .memory = true });
     }
 }
 
-fn startPort(port_no: u32) void {
-    while ((portRead(port_no, PORT_CMD) & PORT_CMD_CR) != 0) {
-        asm volatile ("pause");
+/// Returns false when the controller never released the port. `stopPort`
+/// already bounds the identical CR wait, so an unbounded loop here was pure
+/// asymmetry - and it sits in the boot path (main.zig -> ahci.init), so a
+/// controller that refuses to clear CR hangs the whole boot with no log line.
+fn startPort(port_no: u32) bool {
+    var spins: u32 = 0;
+    while ((portRead(port_no, PORT_CMD) & PORT_CMD_CR) != 0) : (spins += 1) {
+        if (spins > PORT_BUSY_LIMIT) {
+            port.serialWrite("[AHCI] port ");
+            port.serialWriteDec(port_no);
+            port.serialWrite(" stuck busy (CR never cleared); not starting it\n");
+            return false;
+        }
+        asm volatile ("pause" ::: .{ .memory = true });
     }
     var cmd = portRead(port_no, PORT_CMD);
     cmd |= PORT_CMD_FRE;
     cmd |= PORT_CMD_ST;
     portWrite(port_no, PORT_CMD, cmd);
+    return true;
 }
 
 pub fn init() bool {
@@ -261,7 +286,9 @@ fn probePort(port_no: u32) void {
     portWrite(port_no, PORT_SERR, 0xFFFFFFFF);
     portWrite(port_no, PORT_IS, 0xFFFFFFFF);
 
-    startPort(port_no);
+    // A port that never releases CR must not be registered: returning early
+    // keeps the boot path responsive instead of spinning forever.
+    if (!startPort(port_no)) return;
 
     // Identify drive to get sector count
     const sectors = identifyDrive(port_no, drive_count);
@@ -309,7 +336,7 @@ fn identifyDrive(port_no: u32, slot_idx: usize) u64 {
 
     var spins: u32 = 0;
     while ((portRead(port_no, PORT_CI) & 1) != 0 and spins < 500_000) : (spins += 1) {
-        asm volatile ("pause");
+        asm volatile ("pause" ::: .{ .memory = true });
     }
 
     if ((portRead(port_no, PORT_CI) & 1) == 0) {
@@ -330,7 +357,7 @@ pub fn readSector(port_no: u32, slot_idx: usize, lba: u64, buf: []u8) bool {
     // Wait until port is not busy
     var spins: u32 = 0;
     while ((portRead(port_no, PORT_TFD) & (ATA_DEV_BUSY | ATA_DEV_DRQ)) != 0 and spins < 100_000) : (spins += 1) {
-        asm volatile ("pause");
+        asm volatile ("pause" ::: .{ .memory = true });
     }
 
     const ct = &cmd_tables[slot_idx];
@@ -363,7 +390,7 @@ pub fn readSector(port_no: u32, slot_idx: usize, lba: u64, buf: []u8) bool {
 
     spins = 0;
     while ((portRead(port_no, PORT_CI) & 1) != 0 and spins < 500_000) : (spins += 1) {
-        asm volatile ("pause");
+        asm volatile ("pause" ::: .{ .memory = true });
     }
 
     if ((portRead(port_no, PORT_IS) & (1 << 30)) != 0) { // Taskfile error
@@ -382,7 +409,7 @@ pub fn writeSector(port_no: u32, slot_idx: usize, lba: u64, buf: []const u8) boo
 
     var spins: u32 = 0;
     while ((portRead(port_no, PORT_TFD) & (ATA_DEV_BUSY | ATA_DEV_DRQ)) != 0 and spins < 100_000) : (spins += 1) {
-        asm volatile ("pause");
+        asm volatile ("pause" ::: .{ .memory = true });
     }
 
     @memcpy(dma_buffer[0..512], buf[0..512]);
@@ -417,7 +444,7 @@ pub fn writeSector(port_no: u32, slot_idx: usize, lba: u64, buf: []const u8) boo
 
     spins = 0;
     while ((portRead(port_no, PORT_CI) & 1) != 0 and spins < 500_000) : (spins += 1) {
-        asm volatile ("pause");
+        asm volatile ("pause" ::: .{ .memory = true });
     }
 
     if ((portRead(port_no, PORT_IS) & (1 << 30)) != 0) {

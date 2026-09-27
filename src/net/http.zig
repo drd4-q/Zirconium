@@ -45,10 +45,10 @@ pub fn fetchBuffer(host: []const u8, path: []const u8, dst_port: u16, out_buf: [
     tcp.resetState(conn);
     tcp.send(conn, http_req_buf[0..req_len]);
 
-    const response_deadline = timer.ticks +% 1500;
+    const response_deadline = timer.tickCount() +% 1500;
     var last_len: usize = 0;
     var last_progress = timer.ticks;
-    while (timer.ticks < response_deadline and (conn.state == .established or conn.state == .close_wait)) {
+    while (timer.tickCount() < response_deadline and (conn.state == .established or conn.state == .close_wait)) {
         net.poll();
         if (conn.rx_len != last_len) {
             last_len = conn.rx_len;
@@ -139,10 +139,10 @@ pub fn httpGetPort(host: []const u8, path: []const u8, dst_port: u16) void {
     // Wait for the server to finish: with "Connection: close" it FINs after the
     // body, so keep polling while the connection is still established. Also
     // stop early if the peer stalls for 3s after we already have data.
-    const response_deadline = timer.ticks +% 1500; // 15s hard cap
+    const response_deadline = timer.tickCount() +% 1500; // 15s hard cap
     var last_len: usize = 0;
     var last_progress = timer.ticks;
-    while (timer.ticks < response_deadline and conn.state == .established) {
+    while (timer.tickCount() < response_deadline and conn.state == .established) {
         net.poll();
         if (conn.rx_len != last_len) {
             last_len = conn.rx_len;

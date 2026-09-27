@@ -129,8 +129,8 @@ pub fn ping(target: [4]u8, count: u32) void {
 
         // Tick-based 1s deadline instead of a nop-count spin, which ran at a
         // wildly different rate between Debug and ReleaseFast.
-        const deadline = timer.ticks +% 100;
-        while (timer.ticks < deadline and last_rtt == 0) {
+        const deadline = timer.tickCount() +% 100;
+        while (timer.tickCount() < deadline and last_rtt == 0) {
             net.poll();
         }
 

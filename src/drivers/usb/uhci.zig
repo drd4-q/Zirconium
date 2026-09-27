@@ -90,14 +90,14 @@ inline fn writeVolatileU32(ptr: *u32, val: u32) void {
 fn spinDelayMs(ms: u32) void {
     if (timer.ticks > 0) {
         const needed: u64 = if (ms == 0) 0 else ((@as(u64, ms) + 9) / 10);
-        const target = timer.ticks + needed;
-        while (timer.ticks < target) {
-            asm volatile ("pause");
+        const target = timer.tickCount() + needed;
+        while (timer.tickCount() < target) {
+            asm volatile ("pause" ::: .{ .memory = true });
         }
     } else {
         var i: u32 = 0;
         while (i < ms * 10000) : (i += 1) {
-            asm volatile ("pause");
+            asm volatile ("pause" ::: .{ .memory = true });
         }
     }
 }
@@ -461,7 +461,7 @@ pub const UhciController = struct {
                     }
                     return true;
                 }
-                asm volatile ("pause");
+                asm volatile ("pause" ::: .{ .memory = true });
             }
             spinDelayMs(1);
         }
@@ -533,7 +533,7 @@ pub const UhciController = struct {
                     completed = true;
                     break;
                 }
-                asm volatile ("pause");
+                asm volatile ("pause" ::: .{ .memory = true });
             }
 
             writeVolatileU32(&self.bulk_qh.element_link, 1);

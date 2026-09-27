@@ -78,7 +78,11 @@ pub fn init() void {
 
 fn irqHandler(_: *isr_mod.InterruptFrame) void {
     // Drain all pending keyboard bytes. Status bit 5 = 1 means mouse data.
-    while (true) {
+    // Bounded: a controller that keeps OBF asserted (or a glitchy one that
+    // never clears it) would otherwise spin forever with interrupts disabled,
+    // hanging the whole machine. 16 covers every legitimate burst.
+    var drained: u8 = 0;
+    while (drained < 16) : (drained += 1) {
         const status = port_io.inb(KB_STATUS);
         if ((status & 0x01) == 0) break; // output buffer empty
         if ((status & 0x20) != 0) {

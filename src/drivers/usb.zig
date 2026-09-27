@@ -108,6 +108,8 @@ pub fn getDeviceCount() usize {
 }
 
 /// Drain USB HID events (called from the scheduler tick).
+/// There is no separate HID polling path: the whole stack is poll-driven, and
+/// draining the controller event ring *is* how HID reports are delivered.
 pub fn pollHid() void {
     poll();
 }

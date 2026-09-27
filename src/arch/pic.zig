@@ -38,9 +38,13 @@ pub fn init() void {
     port_io.outb(PIC2_DATA, 2);
     port_io.ioWait();
 
-    port_io.outb(PIC1_DATA, ICW4_8086);
+    // ICW4_AUTO selects 8086 *automatic* EOI mode. Without it the controller
+    // runs in the non-automatic mode, where a missed or spurious EOI leaves the
+    // in-service bit stuck and breaks priority tracking for every other IRQ -
+    // exactly the failure mode the isr.zig EOI routing has to avoid.
+    port_io.outb(PIC1_DATA, ICW4_8086 | ICW4_AUTO);
     port_io.ioWait();
-    port_io.outb(PIC2_DATA, ICW4_8086);
+    port_io.outb(PIC2_DATA, ICW4_8086 | ICW4_AUTO);
     port_io.ioWait();
 
     port_io.outb(PIC1_DATA, 0xFF);

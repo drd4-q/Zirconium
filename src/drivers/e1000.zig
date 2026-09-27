@@ -311,6 +311,18 @@ fn setupTx() void {
 /// every TCP timeout into a self-fulfilling prophecy.
 pub var debug_trace: bool = false;
 
+/// Descriptor fields are owned by the NIC between doorbell and DD. They are
+/// DMA-updated plain memory, so every read has to go through a volatile
+/// pointer: a normal load may be hoisted out of a spin loop, which would turn
+/// the "wait for DD" into a no-op and let us overwrite a live descriptor.
+fn txDescStatus(idx: usize) u8 {
+    return @as(*const volatile u8, @ptrCast(&tx_ring[idx].status)).*;
+}
+
+fn txDescLength(idx: usize) u16 {
+    return @as(*const volatile u16, @ptrCast(&tx_ring[idx].length)).*;
+}
+
 pub fn transmit(data: []const u8) void {
     if (!initialized or mmio_base == 0) return;
     if (data.len == 0) return;
@@ -319,9 +331,14 @@ pub fn transmit(data: []const u8) void {
     // Wait for the descriptor we are about to reuse to be free (DD set or never
     // used). The old code just spun 10k nops and reused the slot regardless,
     // which could clobber a frame the NIC had not sent yet.
+    //
+    // The status/length words are written by the NIC over DMA, so they must be
+    // read through a volatile pointer: a plain load can be hoisted out of the
+    // loop, which turns the wait into a single check and lets transmit() return
+    // while the controller is still reading the buffer.
     var spins: u32 = 0;
-    while (tx_ring[tx_cur].length != 0 and (tx_ring[tx_cur].status & 0x01) == 0 and spins < 1_000_000) : (spins += 1) {
-        asm volatile ("pause");
+    while (txDescStatus(tx_cur) & 0x01 == 0 and txDescLength(tx_cur) != 0 and spins < 1_000_000) : (spins += 1) {
+        asm volatile ("pause" ::: .{ .memory = true });
     }
 
     @memcpy(tx_bufs[tx_cur][0..len], data[0..len]);
@@ -341,8 +358,8 @@ pub fn transmit(data: []const u8) void {
 
     // Wait for the NIC to report this descriptor done.
     spins = 0;
-    while ((tx_ring[sent_idx].status & 0x01) == 0 and spins < 1_000_000) : (spins += 1) {
-        asm volatile ("pause");
+    while (txDescStatus(sent_idx) & 0x01 == 0 and spins < 1_000_000) : (spins += 1) {
+        asm volatile ("pause" ::: .{ .memory = true });
     }
 
     if (debug_trace) {
@@ -351,7 +368,7 @@ pub fn transmit(data: []const u8) void {
         port.serialWrite(" desc=");
         port.serialWriteDec(sent_idx);
         port.serialWrite(" status=");
-        port.serialWriteHexShort(tx_ring[sent_idx].status);
+        port.serialWriteHexShort(txDescStatus(sent_idx));
         port.serialWrite("\n");
     }
 }

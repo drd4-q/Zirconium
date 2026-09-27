@@ -205,7 +205,7 @@ fn doIo(sector: u64, buf_ptr: [*]u8, buf_len: usize, is_write: bool) bool {
             // Device has processed our request
             break;
         }
-        asm volatile ("pause");
+        asm volatile ("pause" ::: .{ .memory = true });
     }
     if (timeout >= 2000000) {
         freeDescChain(hdr_idx);

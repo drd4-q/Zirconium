@@ -4,10 +4,20 @@ const isr_mod = @import("../arch/isr.zig");
 const PIT_FREQ: u32 = 1193182;
 const TARGET_FREQ: u32 = 100;
 
+/// Written from the LAPIC/IRQ handler and read from every polling loop.
+/// A 64-bit store is not atomic on x86-64, so the update and the reads go
+/// through @atomic*; a plain `ticks += 1` can be observed torn by another CPU,
+/// and - worse for correctness - a plain read in a spin loop can be hoisted out
+/// of it, which silently removes the delay entirely.
 pub var ticks: u64 = 0;
 pub var seconds: u32 = 0;
 pub var minutes: u32 = 0;
 pub var hours: u32 = 0;
+
+/// Monotonic tick count. Use this instead of reading `ticks` directly.
+pub fn tickCount() u64 {
+    return @atomicLoad(u64, &ticks, .monotonic);
+}
 
 pub fn init() void {
     const divisor: u32 = PIT_FREQ / TARGET_FREQ;
@@ -24,17 +34,19 @@ pub fn init() void {
 }
 
 fn irqHandler(_: *isr_mod.InterruptFrame) void {
-    ticks += 1;
+    _ = @atomicRmw(u64, &ticks, .Add, 1, .monotonic);
     if (@import("root").scheduler_ready) {
         @import("../kernel/scheduler.zig").scheduleTick();
     }
 }
 
 pub fn sleep(ms: u32) void {
-    const target = ticks + @as(u64, ms) / 10; // 100 Hz tick = 10 ms
+    const target = tickCount() + @as(u64, ms) / 10; // 100 Hz tick = 10 ms
     asm volatile ("sti");
-    while (ticks < target) {
-        asm volatile ("hlt");
+    while (tickCount() < target) {
+        // Memory clobber: without it the loop condition can be hoisted, leaving
+        // a single check and no wait at all.
+        asm volatile ("hlt" ::: .{ .memory = true });
     }
 }
 

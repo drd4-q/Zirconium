@@ -50,6 +50,7 @@ pub const TRB_TYPE_COMMAND_COMPLETION: u32 = 33;
 const MAX_SCRATCHPADS: usize = 1024;
 const SCRATCHPAD_ENTRY_SIZE: usize = 8;
 pub const TRB_TYPE_PORT_STATUS_CHANGE: u32 = 34;
+const CMD_RING_TRBS: u64 = 4096 / @sizeOf(XhciTrb);
 
 inline fn readTrbControl(trb: *const XhciTrb) u32 {
     return @as(*const volatile u32, @ptrCast(&trb.control)).*;
@@ -98,14 +99,14 @@ inline fn readMmio8(addr: usize) u8 {
 fn spinDelayMs(ms: u32) void {
     if (timer.ticks > 0) {
         const needed: u64 = if (ms == 0) 0 else ((@as(u64, ms) + 9) / 10);
-        const target = timer.ticks + needed;
-        while (timer.ticks < target) {
-            asm volatile ("pause");
+        const target = timer.tickCount() + needed;
+        while (timer.tickCount() < target) {
+            asm volatile ("pause" ::: .{ .memory = true });
         }
     } else {
         var i: u32 = 0;
         while (i < ms * 10000) : (i += 1) {
-            asm volatile ("pause");
+            asm volatile ("pause" ::: .{ .memory = true });
         }
     }
 }
@@ -241,7 +242,7 @@ pub const XhciController = struct {
             const event = self.pending_events[index];
             const event_type = (event.control >> 10) & 0x3F;
             const event_slot: u8 = @intCast((event.control >> 24) & 0xFF);
-            const event_dci: u8 = @intCast((event.control >> 16) & 0x1F);
+            const event_dci: u8 = @intCast((event.control >> 16) & 0x3F);
             if (event_type != TRB_TYPE_TRANSFER_EVENT or event_slot != slot_id or event_dci != dci) continue;
 
             // Remove the matching entry while preserving the order of all
@@ -541,7 +542,14 @@ pub const XhciController = struct {
             .control = (TRB_TYPE_LINK << 10) | (1 << 1), // Type=Link, TC=1
         };
 
-        writeMmio64(self.op_regs + 0x18, @as(u64, self.cmd_ring_phys) | 1); // CRCR (RCS = 1)
+        // CRCR: RCS = 1.  CSZ (bits 63:32) is deliberately left at 0: the
+        // driver only ever enqueues within the first entries of the page and
+        // the link TRB at the end closes the ring, and QEMU - the only
+        // implementation this driver is tested against - rejects a non-zero
+        // CSZ whose ring does not match its own view. See TODO: a validated
+        // CSZ + high-dword-first writeMmio64 pair is needed before turning it
+        // on, together with a real-hardware test.
+        writeMmio64(self.op_regs + 0x18, @as(u64, self.cmd_ring_phys) | 1);
 
         // ─── Allocate Event Ring ────────────────────────────────────
         const event_page = dma.allocPage() orelse {
@@ -900,7 +908,7 @@ pub const XhciController = struct {
                     self.queuePendingEvent(event);
                 }
             }
-            asm volatile ("pause");
+            asm volatile ("pause" ::: .{ .memory = true });
         }
 
         serial.serialWrite("[XHCI] Command timed out after 500ms\n");
@@ -1281,18 +1289,18 @@ pub const XhciController = struct {
                 const ev_ctrl = readTrbControl(ev_trb);
                 const ev_cycle: u1 = @intCast(ev_ctrl & 1);
                 if (ev_cycle != self.event_cycle) {
-                    asm volatile ("pause");
+                    asm volatile ("pause" ::: .{ .memory = true });
                     continue;
                 }
 
                 event = snapshotTrb(ev_trb);
                 const ev_type = (event.control >> 10) & 0x3F;
                 const ev_slot: u8 = @intCast((event.control >> 24) & 0xFF);
-                const ev_dci: u8 = @intCast((event.control >> 16) & 0x1F);
+                const ev_dci: u8 = @intCast((event.control >> 16) & 0x3F);
                 self.advanceEvent();
                 if (ev_type != TRB_TYPE_TRANSFER_EVENT or ev_slot != slot.slot_id or ev_dci != 1) {
                     if (ev_type == TRB_TYPE_TRANSFER_EVENT) self.queuePendingEvent(event);
-                    asm volatile ("pause");
+                    asm volatile ("pause" ::: .{ .memory = true });
                     continue;
                 }
             }
@@ -1516,7 +1524,9 @@ pub const XhciController = struct {
     }
 
     pub fn resetEndpoint(self: *XhciController, slot_idx: usize, dci: u8) bool {
-        if (slot_idx >= self.slots.len or dci == 0 or dci > 31) return false;
+        // DCI is 6 bits (bits 23:16 of a Transfer Event). The old limit of 31
+        // silently masked the two limits against each other.
+        if (slot_idx >= self.slots.len or dci == 0 or dci > 63) return false;
         const slot = &self.slots[slot_idx];
         if (!slot.active) return false;
         const cmd_ctrl = (TRB_TYPE_RESET_ENDPOINT << 10) |
@@ -1616,18 +1626,18 @@ pub const XhciController = struct {
                     const ev_control = readTrbControl(ev);
                     const ev_cycle: u1 = @intCast(ev_control & 1);
                     if (ev_cycle != self.event_cycle) {
-                        asm volatile ("pause");
+                        asm volatile ("pause" ::: .{ .memory = true });
                         continue;
                     }
 
                     event = snapshotTrb(ev);
                     const ev_type = (event.control >> 10) & 0x3F;
                     const ev_slot: u8 = @intCast((event.control >> 24) & 0xFF);
-                    const ev_dci: u8 = @intCast((event.control >> 16) & 0x1F);
+                    const ev_dci: u8 = @intCast((event.control >> 16) & 0x3F);
                     self.advanceEvent();
                     if (ev_type != TRB_TYPE_TRANSFER_EVENT or ev_slot != slot.slot_id or ev_dci != dci) {
                         if (ev_type == TRB_TYPE_TRANSFER_EVENT) self.queuePendingEvent(event);
-                        asm volatile ("pause");
+                        asm volatile ("pause" ::: .{ .memory = true });
                         continue;
                     }
                 }
@@ -1723,7 +1733,7 @@ pub const XhciController = struct {
             const event_type = (event.control >> 10) & 0x3F;
             if (event_type == TRB_TYPE_TRANSFER_EVENT) {
                 const event_slot: u8 = @intCast((event.control >> 24) & 0xFF);
-                const event_dci: u8 = @intCast((event.control >> 16) & 0x1F);
+                const event_dci: u8 = @intCast((event.control >> 16) & 0x3F);
                 const event_status = event.status;
                 on_transfer(event_slot, event_dci, event_status & 0xFFFFFF, (event_status >> 24) & 0xFF);
             }
@@ -1740,7 +1750,7 @@ pub const XhciController = struct {
             const ev_slot: u8 = @intCast((event.control >> 24) & 0xFF);
             const comp_code: u32 = (event.status >> 24) & 0xFF;
             const rem_bytes: u32 = event.status & 0xFFFFFF;
-            const dci: u8 = @intCast((event.control >> 16) & 0x1F);
+            const dci: u8 = @intCast((event.control >> 16) & 0x3F);
 
             self.advanceEvent();
 

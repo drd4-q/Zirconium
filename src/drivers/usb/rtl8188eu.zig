@@ -284,15 +284,15 @@ fn timerDelay(ms: u32) void {
     const timer = @import("../timer.zig");
     if (timer.ticks > 0) {
         const needed: u64 = if (ms == 0) 0 else ((@as(u64, ms) + 9) / 10);
-        const target = timer.ticks + needed;
-        while (timer.ticks < target) {
-            asm volatile ("pause");
+        const target = timer.tickCount() + needed;
+        while (timer.tickCount() < target) {
+            asm volatile ("pause" ::: .{ .memory = true });
         }
     } else {
         // Fallback: simple loop
         var i: u32 = 0;
         while (i < ms * 10000) : (i += 1) {
-            asm volatile ("pause");
+            asm volatile ("pause" ::: .{ .memory = true });
         }
     }
 }

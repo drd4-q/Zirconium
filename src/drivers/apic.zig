@@ -75,7 +75,7 @@ fn calibrateLapicTimer() u32 {
     // Wait until PIT2 output goes high (bit 5 of port 0x61)
     var timeout: u32 = 0;
     while ((port_io.inb(0x61) & 0x20) == 0 and timeout < 1_000_000) : (timeout += 1) {
-        asm volatile ("pause");
+        asm volatile ("pause" ::: .{ .memory = true });
     }
 
     const current_lapic = readReg(REG_TIMER_CURR);
@@ -116,6 +116,10 @@ pub fn init() bool {
 
     // Mask legacy PIT IRQ 0 in 8259 PIC so LAPIC timer is the single clean 100 Hz source
     pic.mask(0);
+    // Vector 32 is a local-APIC source, not an 8259 IRQ: claiming it stops
+    // isr.zig from issuing a non-specific EOI to the 8259 on every tick. The
+    // handler is still the one timer.zig registered for this vector.
+    @import("../arch/isr.zig").claimLocalIrq(@intCast(timer_vector & 0xF));
 
     apic_enabled = true;
     serial.serialWrite("[APIC] Local APIC timer initialized at 0x");

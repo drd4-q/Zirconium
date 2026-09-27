@@ -163,7 +163,7 @@ pub fn init(dev: *pci.PciDevice) bool {
     mmioWrite8(ChipCmd, CmdReset);
     var reset_timeout: u32 = 0;
     while ((mmioRead8(ChipCmd) & CmdReset) != 0 and reset_timeout < 100_000) : (reset_timeout += 1) {
-        asm volatile ("pause");
+        asm volatile ("pause" ::: .{ .memory = true });
     }
 
     // Read MAC address from MAC0..MAC5
@@ -202,8 +202,13 @@ pub fn init(dev: *pci.PciDevice) bool {
         };
     }
 
-    // Mask all interrupts (polling mode)
-    mmioWrite16(IntrMask, 0x0000);
+    // Mask all interrupts (polling mode).
+    // Realtek's Interrupt Mask Register masks when a bit is SET, so writing
+    // 0x0000 unmask-enables every interrupt - the opposite of the comment and
+    // of the no-IRQ design. On QEMU nothing routes the legacy IRQ so it is
+    // harmless there; on real hardware an unhandled NIC interrupt burns time
+    // in isr_handler and can fight the PIC.
+    mmioWrite16(IntrMask, 0xFFFF);
     _ = mmioRead16(IntrStatus);
 
     // Set descriptor ring addresses
@@ -240,10 +245,11 @@ pub fn transmit(data: []const u8) void {
     if (data.len == 0 or data.len > PKT_SIZE) return;
 
     const idx = tx_cur;
-    // Wait if descriptor is currently owned by hardware
+    // Wait if descriptor is currently owned by hardware. OWN is DMA-written by
+    // the NIC, hence the volatile read.
     var spins: u32 = 0;
-    while ((tx_ring[idx].opts1 & DESC_OWN) != 0 and spins < 1_000_000) : (spins += 1) {
-        asm volatile ("pause");
+    while ((@as(*const volatile u16, @ptrCast(&tx_ring[idx].opts1)).* & DESC_OWN) != 0 and spins < 1_000_000) : (spins += 1) {
+        asm volatile ("pause" ::: .{ .memory = true });
     }
 
     const copy_len = @min(data.len, PKT_SIZE);
@@ -266,7 +272,9 @@ pub fn receive(buf: []u8) ?usize {
     if (!initialized or mmio_base == 0) return null;
 
     const idx = rx_cur;
-    const opts = rx_ring[idx].opts1;
+    // opts1 is set by the NIC over DMA: read it volatile, otherwise the check
+    // below can be hoisted and we would read a buffer the controller owns.
+    const opts = @as(*const volatile u16, @ptrCast(&rx_ring[idx].opts1)).*;
 
     // If OWN bit is set, hardware still owns descriptor (no packet ready)
     if ((opts & DESC_OWN) != 0) {

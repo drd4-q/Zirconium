@@ -34,9 +34,25 @@ pub const IrqHandler = *const fn (frame: *InterruptFrame) void;
 
 var irq_handlers: [16]?IrqHandler = [_]?IrqHandler{null} ** 16;
 
+/// Vectors delivered by the local APIC instead of the 8259. The LAPIC timer runs
+/// on vector 32, which is the PIC's IRQ0 slot - and IRQ0 is masked. Sending a
+/// non-specific EOI to the 8259 for it 100 times a second clears the
+/// highest-priority in-service bit, which is whatever real PIC IRQ happens to
+/// be running (the keyboard, typically) and desynchronises the 8259's priority
+/// tracking. Only vectors marked here get a LAPIC EOI and no PIC EOI.
+var lapic_owned: [16]bool = [_]bool{false} ** 16;
+
 pub fn registerIrq(irq: u8, handler: IrqHandler) void {
     irq_handlers[irq] = handler;
+    lapic_owned[irq] = false;
     pic.unmask(irq);
+}
+
+/// Mark a vector in the 32..48 range as belonging to a local-APIC source.
+/// It only changes the EOI routing; the handler stays whatever was registered
+/// for that vector.
+pub fn claimLocalIrq(vector: u8) void {
+    if (vector < lapic_owned.len) lapic_owned[vector] = true;
 }
 
 pub fn unregisterIrq(irq: u8) void {
@@ -179,7 +195,11 @@ export fn isr_handler(frame: *InterruptFrame) callconv(.c) void {
             handler(frame);
         }
 
-        pic.sendEoi(irq);
-        @import("../drivers/apic.zig").sendEoi();
+        if (lapic_owned[irq]) {
+            // Local-APIC source: EOI the APIC only. See lapic_owned.
+            @import("../drivers/apic.zig").sendEoi();
+        } else {
+            pic.sendEoi(irq);
+        }
     }
 }

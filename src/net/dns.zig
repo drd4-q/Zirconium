@@ -45,8 +45,8 @@ pub fn resolve(hostname: []const u8) ?[4]u8 {
         udp.sendPacket(udp.dns_server, udp.DNS_PORT, DNS_SRC_PORT, dns_tx_buf[0..pkt_len]);
 
         // Poll for response (real internet RTT can be ~200ms+)
-        const deadline = timer.ticks +% 300; // 3s
-        while (timer.ticks < deadline and !dns_rx_ready) {
+        const deadline = timer.tickCount() +% 300; // 3s
+        while (timer.tickCount() < deadline and !dns_rx_ready) {
             net.poll();
         }
     }

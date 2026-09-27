@@ -456,8 +456,8 @@ pub fn run() void {
     while (attempt < 3 and !lease_valid) : (attempt += 1) {
         sendDiscover(saved_ip);
 
-        const deadline = timer.ticks +% 200;
-        while (timer.ticks < deadline and !lease_valid) {
+        const deadline = timer.tickCount() +% 200;
+        while (timer.tickCount() < deadline and !lease_valid) {
             net.poll();
         }
     }

@@ -586,8 +586,8 @@ fn nativeDispatch(frame: *isr_mod.InterruptFrame) void {
             }
 
             // Block up to ~3s for data to arrive.
-            const deadline = timer.ticks +% 300;
-            while (!conn.rx_ready and conn.state == .established and timer.ticks < deadline) {
+            const deadline = timer.tickCount() +% 300;
+            while (!conn.rx_ready and conn.state == .established and timer.tickCount() < deadline) {
                 net.poll();
             }
 

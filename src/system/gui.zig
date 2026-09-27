@@ -1038,7 +1038,7 @@ pub fn run() void {
             drawCursor();
         }
 
-        asm volatile ("pause");
+        asm volatile ("pause" ::: .{ .memory = true });
     }
 
     redrawAll();

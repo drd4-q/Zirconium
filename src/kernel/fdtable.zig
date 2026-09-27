@@ -142,8 +142,8 @@ pub fn read(t: *task.Task, fd: usize, buf: []u8) isize {
         .socket => |c| {
             const net = @import("../net/mod.zig");
             const timer = @import("../drivers/timer.zig");
-            const deadline = timer.ticks +% 300;
-            while (!c.rx_ready and c.state == .established and timer.ticks < deadline) {
+            const deadline = timer.tickCount() +% 300;
+            while (!c.rx_ready and c.state == .established and timer.tickCount() < deadline) {
                 net.poll();
             }
             if (!c.rx_ready or c.rx_len == 0) return 0;

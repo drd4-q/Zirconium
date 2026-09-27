@@ -60,14 +60,14 @@ inline fn writeMmio8(addr: usize, val: u8) void {
 fn spinDelayMs(ms: u32) void {
     if (timer.ticks > 0) {
         const needed: u64 = if (ms == 0) 0 else ((@as(u64, ms) + 9) / 10);
-        const target = timer.ticks + needed;
-        while (timer.ticks < target) {
-            asm volatile ("pause");
+        const target = timer.tickCount() + needed;
+        while (timer.tickCount() < target) {
+            asm volatile ("pause" ::: .{ .memory = true });
         }
     } else {
         var i: u32 = 0;
         while (i < ms * 10000) : (i += 1) {
-            asm volatile ("pause");
+            asm volatile ("pause" ::: .{ .memory = true });
         }
     }
 }
@@ -520,7 +520,7 @@ pub const EhciController = struct {
                     }
                     return true;
                 }
-                asm volatile ("pause");
+                asm volatile ("pause" ::: .{ .memory = true });
             }
             spinDelayMs(1);
         }
@@ -587,7 +587,7 @@ pub const EhciController = struct {
                     completed = true;
                     break;
                 }
-                asm volatile ("pause");
+                asm volatile ("pause" ::: .{ .memory = true });
             }
 
             self.bulk_qh.overlay_next_qtd = 1;
