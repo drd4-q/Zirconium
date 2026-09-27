@@ -4,6 +4,8 @@ zig-out/
 build/
 isodir/
 kernel.iso
+kernel-debug.iso
+*.iso
 *.o
 
 # QEMU / test / disk artifacts
