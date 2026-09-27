@@ -265,6 +265,15 @@ pub fn init() void {
         return;
     };
 
+    // This driver only speaks legacy virtio, which is an I/O BAR (bit 0 = 1).
+    // Device 0x1042 (virtio 1.0) and the class-code fallback are MMIO-only and
+    // have no legacy register block: "claiming" them and then writing `outl` to
+    // a garbage port number corrupts whatever port the base happened to be.
+    if ((dev.bar0 & 1) == 0) {
+        serial.serialWrite("[VIRTIO-BLK] modern (MMIO) virtio-blk is unsupported, skipping\n");
+        return;
+    }
+
     serial.serialWrite("[VIRTIO-BLK] Found device at PCI ");
     serial.serialWriteHex(@as(u64, dev.bus));
     serial.serialWrite(":");

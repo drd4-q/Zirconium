@@ -387,6 +387,13 @@ pub fn cmdHexdump(args: []const u8) void {
         var any = false;
         while (rest.len > 0 and rest[0] == ' ') : (rest = rest[1..]) {}
         while (rest.len > 0 and rest[0] >= '0' and rest[0] <= '9') : (rest = rest[1..]) {
+            // Saturate instead of wrapping: `hexdump file 99999999999999999999`
+            // overflowed u64 (panic in Debug) and the wrapped value was then
+            // handed to vfs.seek().
+            if (v > (std.math.maxInt(u64) - 9) / 10) {
+                v = std.math.maxInt(u64);
+                continue;
+            }
             v = v * 10 + (rest[0] - '0');
             any = true;
         }

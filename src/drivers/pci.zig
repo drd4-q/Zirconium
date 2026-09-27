@@ -71,7 +71,12 @@ pub fn getBarSize(bus: u8, dev: u8, func: u8, bar_num: u8) u32 {
     const mask = readConfig(bus, dev, func, reg);
     writeConfig(bus, dev, func, reg, orig);
     if (mask == 0 or mask == 0xFFFFFFFF) return 0;
-    const size_mask = if ((orig & 1) == 0) mask & 0xFFFFFFF0 else mask & 0xFFFFFFFC;
+    // Low nibble holds the type/attribute bits, not size: masking it off before
+    // inverting is what makes the 64-bit (type 10b) case return a size at all.
+    // The old per-type masks left bits 3:1 in place for type 10b, so ~mask
+    // produced 0x10 for every 64-bit BAR.
+    const size_mask = mask & ~@as(u32, 0xF);
+    if (size_mask == 0) return 0;
     return ~size_mask +% 1;
 }
 

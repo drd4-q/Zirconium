@@ -16,6 +16,13 @@ pub const VMError = error{
 pub const VM = struct {
     globals: Table,
     allocator: std.mem.Allocator,
+    /// Interpreter recursion depth. evalExpr declares ~5 KB of locals per call
+    /// frame and the interpreter runs on the 32 KiB boot stack, so unbounded
+    /// recursion (`function f() return f() end f()`) triple-faults the kernel -
+    /// and a cooperative scheduler can never preempt it.
+    call_depth: u32 = 0,
+    /// ~5 KB of frame per level against a 32 KiB stack, with room to spare.
+    max_call_depth: u32 = 32,
 
     pub fn init(allocator: std.mem.Allocator) VM {
         var globals = Table.init(allocator) orelse unreachable;
@@ -150,12 +157,12 @@ pub const VM = struct {
                 }
                 break :blk Value.nil();
             },
-            .for_in_stmt => |fs| blk: {
-                // Simplified: just evaluate iterators and run body once
-                for (fs.iterators) |iter_expr| {
-                    _ = try self.evalExpr(iter_expr);
-                }
-                break :blk try self.execBlock(fs.body);
+            .for_in_stmt => |fs| {
+                // Not implemented, and the old "run the body exactly once"
+                // behaviour was indistinguishable from a working loop - it
+                // printed wrong results with no error. Refuse instead.
+                _ = fs;
+                return VMError.RuntimeError;
             },
             .function_def => |fd| blk: {
                 // Anonymous function — store as LuaFunc value
@@ -392,6 +399,16 @@ pub const VM = struct {
     }
 
     fn callFunction(self: *VM, func: Value, args: []Value) VMError!Value {
+        // Depth guard first: a runaway script must produce a Lua error the
+        // REPL can print, not a triple fault.
+        if (func.type == .lua_func and self.call_depth >= self.max_call_depth) {
+            return VMError.RuntimeError;
+        }
+        if (func.type == .lua_func) {
+            self.call_depth += 1;
+            defer self.call_depth -= 1;
+        }
+
         switch (func.type) {
             .native_fn => {
                 if (func.native_fn_val) |f| {
@@ -409,9 +426,13 @@ pub const VM = struct {
                     const param_count = @min(lf.params.len, args.len);
                     var saved_count: usize = 0;
 
-                    // Bind parameters
+                    // Bind parameters. The two loops below together write one
+                    // entry per parameter, so the bound must be enforced here:
+                    // parser.zig caps parameters at 32, but that is an
+                    // invariant in another file and this frame is ~2.8 KB.
                     var i: usize = 0;
                     while (i < param_count) : (i += 1) {
+                        if (saved_count >= saved.len) break;
                         saved[saved_count] = .{
                             .name = lf.params[i],
                             .val = self.globals.get(Value.fromString(lf.params[i])) orelse Value.nil(),
@@ -421,6 +442,7 @@ pub const VM = struct {
                     }
                     // Bind missing params to nil
                     while (i < lf.params.len) : (i += 1) {
+                        if (saved_count >= saved.len) break;
                         saved[saved_count] = .{
                             .name = lf.params[i],
                             .val = self.globals.get(Value.fromString(lf.params[i])) orelse Value.nil(),

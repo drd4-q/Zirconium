@@ -134,8 +134,12 @@ pub fn luaSleep(args: []Value) Value {
     if (args.len == 0) return Value.nil();
     switch (args[0].type) {
         .number => {
-            const ms = @as(u64, @intFromFloat(args[0].number_val));
-            sleepKernel(ms);
+            // The script controls this float. @intFromFloat to an unsigned
+            // type panics for a negative or huge value, and a panic here takes
+            // the whole kernel down from a one-line script.
+            const v = args[0].number_val;
+            if (!(v >= 0) or v > 60000) return Value.nil();
+            sleepKernel(@as(u64, @intFromFloat(v)));
         },
         else => {},
     }
@@ -177,12 +181,15 @@ pub fn luaAssert(args: []Value) Value {
 
 pub fn luaIpairs(args: []Value) Value {
     _ = args;
-    // Stub — not fully implemented
+    // Not implemented. Returning nil made `for i, v in ipairs(t)` run its body
+    // exactly once with i/v bound to whatever the globals happened to hold -
+    // silently wrong instead of an obvious error. A nil here is the honest
+    // "unsupported" signal the for..in path can report.
     return Value.nil();
 }
 
 pub fn luaPairs(args: []Value) Value {
     _ = args;
-    // Stub — not fully implemented
+    // See luaIpairs: nil, not a silently non-iterating value.
     return Value.nil();
 }

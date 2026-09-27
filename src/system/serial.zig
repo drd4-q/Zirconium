@@ -1,4 +1,4 @@
-const COM1: u16 = 0x3F8;
+pub const COM1: u16 = 0x3F8;
 const EARLY_LOG_CAPACITY: usize = 64 * 1024;
 
 pub const LogSink = *const fn (data: []const u8) void;
@@ -17,7 +17,9 @@ fn outb(port_addr: u16, val: u8) void {
     );
 }
 
-fn inb(port_addr: u16) u8 {
+/// Read one byte from a port I/O address. Public so the TTY/REPL front ends can
+/// poll the UART input buffer directly (headless console input).
+pub fn inb(port_addr: u16) u8 {
     return asm volatile ("inb %%dx, %%al"
         : [result] "={al}" (-> u8),
         : [port] "{dx}" (port_addr),

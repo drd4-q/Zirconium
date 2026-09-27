@@ -151,5 +151,14 @@ fn readLine(buf: []u8, max_len: usize) usize {
 }
 
 fn readKey() ?u8 {
-    return kb.pollKey();
+    // Keyboard first, serial console second, exactly like fdtable.read's
+    // console descriptor. The REPL used to be keyboard-only, which also made it
+    // impossible to drive headlessly from the test harnesses.
+    return kb.pollKey() orelse serialPollKey();
+}
+
+fn serialPollKey() ?u8 {
+    // COM1 + 5 is the line status register; bit 0 means "data ready".
+    if (port.inb(port.COM1 + 5) & 0x01 == 0) return null;
+    return port.inb(port.COM1);
 }

@@ -1118,8 +1118,13 @@ fn tabComplete(buf: []u8, len: usize) usize {
 
     if (common_len > prefix.len) {
         clearLine(len);
+        // Reveal the rest of the common prefix as spaces. The old code copied
+        // `prefix[0..copy_len]` with copy_len > prefix.len, which is an
+        // out-of-bounds slice and panics in any Debug build the moment a word
+        // completes.
         const copy_len = @min(common_len, CMD_MAX - 1);
-        @memcpy(buf[0..copy_len], prefix[0..copy_len]);
+        @memcpy(buf[0..len], prefix);
+        @memset(buf[len..copy_len], ' ');
         printStr(buf[0..copy_len]);
         return copy_len;
     }

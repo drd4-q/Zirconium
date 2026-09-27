@@ -6,6 +6,7 @@ const port_io = @import("../arch/port.zig");
 const isr_mod = @import("../arch/isr.zig");
 const scheduler = @import("scheduler.zig");
 const task = @import("task.zig");
+const fdtable = @import("fdtable.zig");
 const address_space = @import("address_space.zig");
 const pmm = @import("pmm.zig");
 const vmm = @import("vmm.zig");
@@ -130,8 +131,13 @@ fn nativeDispatch(frame: *isr_mod.InterruptFrame) void {
             if (fd == 0) { // stdin -> keyboard
                 const buf: [*]u8 = @ptrFromInt(buf_ptr);
                 var count: usize = 0;
+                // Bounded wait, same reason as fdtable.read: `hlt` with IF
+                // cleared is an unrecoverable halt.
+                var idle_spins: u32 = 0;
                 while (count < max_len) {
+                    if (idle_spins >= fdtable.IDLE_SPIN_LIMIT) break;
                     if (kb.pollKey()) |ch| {
+                        idle_spins = 0;
                         if (ch == '\n' or ch == '\r') {
                             buf[count] = '\n';
                             count += 1;
@@ -149,7 +155,8 @@ fn nativeDispatch(frame: *isr_mod.InterruptFrame) void {
                             vga.putChar(ch);
                         }
                     } else {
-                        asm volatile ("hlt");
+                        idle_spins += 1;
+                        asm volatile ("pause" ::: .{ .memory = true });
                     }
                 }
                 frame.rax = count;

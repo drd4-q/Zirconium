@@ -206,6 +206,11 @@ pub const Parser = struct {
             const key_text = self.lexer.getTokenText(self.current);
             // Peek ahead to see if this is key = value
             const saved = self.current;
+            // The lexer position has to be restored too: `self.current` alone
+            // left the scanner one token further along, so the following
+            // parseExpression re-read `a` and then skipped past `b` - which is
+            // why `{a, b}` was a syntax error while `{x = 1}` worked.
+            const saved_pos = self.lexer.position;
             self.advance();
             if (self.peek() == .assign) {
                 self.advance(); // skip =
@@ -215,6 +220,7 @@ pub const Parser = struct {
             } else {
                 // Not a key=value, restore and treat as expression
                 self.current = saved;
+                self.lexer.position = saved_pos;
             }
         }
         const value = try self.parseExpression();

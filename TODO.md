@@ -153,6 +153,51 @@
       (R@0) renders with red and blue swapped.
 - [ ] Write-combining MTRR for the LFB (`rdmsr 0xFE`, set `0x200`/`0x201` like GRUB's
       `grub_vbe_enable_mtrr`) — the biggest win for GUI/redraw bandwidth on real hardware.
+
+### Found by the kernel audit, not yet fixed
+- [ ] `fork` cannot work as written: `address_space.cloneUserSpace` deep-copies every
+      inherited identity map (entry.S maps 64 GB as 2 MB pages), so one `SYS_FORK` asks
+      for ~64 GB and always fails with ENOMEM. It must copy the *entries* for the shared
+      supervisor huge pages, not their payload. AGENTS.md previously blamed the
+      cooperative scheduler — that is not the reason. It also `incRef`s kernel leaves that
+      `destroy()` never revisits, so every fork permanently leaks kernel page refs.
+- [ ] `uaccess` is called before the task's CR3 is active in `process.setup` /
+      `setupWindowsStack`, so the PE TEB/CRT writes land on kernel-visible physical memory
+      instead of the task's freshly mapped pages. Needs writes through the target address
+      space (as `pe.zig` does) or a switch/restore around init.
+- [ ] The user stack (0x7FFE_0000) is mapped through the *shared kernel* PD, and exit
+      frees the frames without clearing the PT entries, leaving them user-writable
+      through a page table shared with the kernel and every other task.
+- [ ] `winapi.dispatch` declares ~60 KB of locals across its switch arms against a 16 KB
+      task kernel stack; a Debug build reserves the full sum on every thunk call and
+      overflows into the rest of `Task`. Move the large buffers into `noinline` helpers or
+      grow `task.KERNEL_SIZE`.
+- [ ] The native syscall ABI validates no user pointers or lengths: `SYS_WRITE`/`SYS_SEND`
+      hand raw ring-3 pointers and 64-bit counts to the VGA and TCP code. Route them
+      through `uaccess` and cap the length.
+- [ ] `readUserStr` dereferences an unvalidated user pointer and its `?` return can never
+      be null, making the caller's EFAULT branch unreachable.
+- [ ] `exec` failure leaks the 128 KB user stack (`setup`'s errdefer never clears
+      `user_stack_phys`).
+- [ ] xHCI CRCR.CSZ is still 0 and `writeMmio64` still writes low dword first. Linux
+      writes high-then-low and reports the ring size; both are needed before real-hardware
+      bring-up, and CSZ must be validated against QEMU in the same change.
+- [ ] `net/tcp.zig` ACKs a segment even when its payload did not fit in `rx_buf`, so data
+      is silently dropped; stop advancing `ack_num` when `copy_len < data_len`.
+- [ ] `net/tcp.zig` and `udp.zig` read the source IP at a hard-coded offset that assumes
+      IHL = 5; the IP layer accepts IHL up to 15.
+- [ ] Lua: no index/call postfix syntax (`t[1]` is a syntax error), multi-target assignment
+      silently drops values, and function *expressions* parse then discard their body and
+      leak two dupes. Parser recursion (`if a then` repeated) is still unbounded.
+- [ ] `fat32.zig` refuses to open a directory because `OpenFlags.directory` is never set
+      by any caller, so `vfs.open("subdir")` fails on FAT32 while FAT16 succeeds.
+- [ ] `vfs.resolvePath` silently truncates at 255 bytes and returns a slice into one global
+      buffer, so an over-long path can resolve to a different existing file and the result
+      is invalid across a re-entrant call.
+- [ ] `pci_detect.readMmioBar` documents returning 0 for BARs outside the identity map but
+      maps them instead, so every caller's guard is dead code.
+- [ ] `hid.zig` and `hid_input.zig` keep two near-identical HID usage tables that have
+      already diverged, and `dma.zig`'s pools are unused `undefined` instances.
 - [ ] Pipes (cmd1 | cmd2)
 - [ ] I/O redirection (cmd > file, cmd < file)
 - [ ] Serial console input so tests can drive the shell headless

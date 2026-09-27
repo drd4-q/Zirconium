@@ -51,6 +51,11 @@ pub const Url = struct {
             var parsed_port: u32 = 0;
             for (port_str) |ch| {
                 if (ch >= '0' and ch <= '9') {
+                    // Stop before the u32 can wrap: a URL like
+                    // http://host:99999999999999/ panicked in Debug and, after
+                    // wrapping, could pass the <= 65535 check with a port the
+                    // user never typed.
+                    if (parsed_port > 6553) break;
                     parsed_port = parsed_port * 10 + (ch - '0');
                 }
             }

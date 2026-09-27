@@ -1494,9 +1494,20 @@ pub fn dispatch(frame: *isr.InterruptFrame) void {
             process.exitCurrent(-1);
         },
         .GetSystemInfo => {
-            // SYSTEM_INFO: page size @4, active processor mask @32, count @32+8.
-            _ = uaccess.writeU32(a1 + 4, 4096);
-            _ = uaccess.writeU32(a1 + 32, 1);
+            // Win64 SYSTEM_INFO layout: dwOemId @0, dwPageSize @4 (the one the
+            // old code got right), lpMinimumApplicationAddress @8,
+            // lpMaximumApplicationAddress @16, dwActiveProcessorMask @24,
+            // dwNumberOfProcessors @28, dwProcessorType @32.
+            // The old offsets (page size at +32, "count" at +32) meant a program
+            // reading dwPageSize got whatever we happened to store in
+            // lpMinimumApplicationAddress.
+            _ = uaccess.writeU32(a1 + 0, 0); // dwOemId = no OEM resource
+            _ = uaccess.writeU32(a1 + 4, 4096); // dwPageSize
+            _ = uaccess.writeU64(a1 + 8, 0x10000); // lpMinimumApplicationAddress
+            _ = uaccess.writeU64(a1 + 16, 0x7FFFFFFFFFFF); // lpMaximumApplicationAddress
+            _ = uaccess.writeU64(a1 + 24, 1); // dwActiveProcessorMask
+            _ = uaccess.writeU32(a1 + 32, 1); // dwNumberOfProcessors
+            _ = uaccess.writeU32(a1 + 36, 9); // dwProcessorType = PROCESSOR_ARCHITECTURE_AMD64
             retBool(frame, true);
         },
         .GetEnvironmentVariableA => {

@@ -235,9 +235,12 @@ fn sysOpenat(t: *task.Task, dirfd: i64, path_ptr: u64, flags: u64) isize {
         if (vfs.stat(path)) |st| {
             if (st.file_type == .directory) {
                 var d = task.DirDesc{};
-                const n = @min(path.len, d.path_buf.len);
-                @memcpy(d.path_buf[0..n], path[0..n]);
-                d.path_len = n;
+                // Reject instead of silently truncating: a short stored path
+                // makes getdents64 enumerate a *different* directory than the
+                // one that was opened.
+                if (path.len > d.path_buf.len) return -36; // ENAMETOOLONG
+                @memcpy(d.path_buf[0..path.len], path);
+                d.path_len = path.len;
                 const fd = fdtable.alloc(t, .{ .dir = d }) orelse return -24; // EMFILE
                 return @intCast(fd);
             }
@@ -281,24 +284,32 @@ fn sysGetdents64(t: *task.Task, fd: u64, buf_ptr: u64, buf_len: u64) isize {
     const DT_DIR: u8 = 4;
 
     var written: usize = 0;
-    var i = dir.cursor;
+    // readdirFrom already applied start_cursor: entries[0] is the entry at
+    // absolute index start_cursor. Starting the loop at dir.cursor skipped the
+    // first entries of every continuation call and made d_off jump past the
+    // end, so any program reading a directory in more than one chunk saw a
+    // corrupt listing (and got EINVAL once cursor >= count).
+    var i: usize = 0;
     while (i < count) : (i += 1) {
         const e = &entries[i];
         // 19 fixed bytes + name + NUL, padded to 8.
         const reclen = (@as(usize, 19) + e.name_len + 1 + 7) & ~@as(usize, 7);
         if (written + reclen > buf_len) break;
 
-        _ = uaccess.writeU64(buf_ptr + written, start_cursor + i + 1); // d_ino
-        _ = uaccess.writeU64(buf_ptr + written + 8, start_cursor + i + 1); // d_off
-        _ = uaccess.writeU16(buf_ptr + written + 16, @intCast(reclen));
-        _ = uaccess.writeU8(buf_ptr + written + 18, if (e.file_type == .directory) DT_DIR else DT_REG);
+        // A bad user buffer must be reported, not swallowed: returning a
+        // non-zero "written" count for bytes that never landed is worse than
+        // an honest EFAULT.
+        if (!uaccess.writeU64(buf_ptr + written, start_cursor + i + 1)) return EFAULT; // d_ino
+        if (!uaccess.writeU64(buf_ptr + written + 8, start_cursor + i + 1)) return EFAULT; // d_off
+        if (!uaccess.writeU16(buf_ptr + written + 16, @intCast(reclen))) return EFAULT;
+        if (!uaccess.writeU8(buf_ptr + written + 18, if (e.file_type == .directory) DT_DIR else DT_REG)) return EFAULT;
         var k: usize = 0;
         while (k < e.name_len) : (k += 1) {
-            _ = uaccess.writeU8(buf_ptr + written + 19 + k, e.name[k]);
+            if (!uaccess.writeU8(buf_ptr + written + 19 + k, e.name[k])) return EFAULT;
         }
         var p = 19 + e.name_len;
         while (p < reclen) : (p += 1) {
-            _ = uaccess.writeU8(buf_ptr + written + p, 0); // NUL + padding
+            if (!uaccess.writeU8(buf_ptr + written + p, 0)) return EFAULT; // NUL + padding
         }
         written += reclen;
     }
@@ -455,6 +466,10 @@ fn sysDup(t: *task.Task, oldfd: u64) isize {
 fn sysDup2(t: *task.Task, oldfd: u64, newfd: u64) isize {
     if (oldfd >= task.MAX_FDS or newfd >= task.MAX_FDS) return EBADF;
     const desc = fdtable.get(t, @intCast(oldfd)) orelse return EBADF;
+    // Linux: dup2(fd, fd) is a no-op. The close below would release the VFS
+    // slot and then re-install the same now-dangling *FileHandle, so the
+    // process would later read a different file (and run closeFn twice).
+    if (oldfd == newfd) return @intCast(newfd);
     _ = fdtable.close(t, @intCast(newfd));
     t.fds[@intCast(newfd)] = desc;
     return @intCast(newfd);

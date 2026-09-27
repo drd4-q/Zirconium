@@ -11,6 +11,12 @@ pub const STDIN: usize = 0;
 pub const STDOUT: usize = 1;
 pub const STDERR: usize = 2;
 
+/// How long a console read keeps waiting for input before returning what it has.
+/// Interrupts are disabled for the duration of a syscall, so the wait cannot
+/// use `hlt`; this bound is what turns "no input ever arrives" into a short read
+/// instead of a permanently halted machine.
+pub const IDLE_SPIN_LIMIT: u32 = 200_000;
+
 /// Serial counterpart of kb.pollKey() for console stdin: CR -> LF, DEL -> BS.
 fn serialPollKey() ?u8 {
     const raw = @import("../system/serial.zig").pollRead() orelse return null;
@@ -107,11 +113,23 @@ pub fn read(t: *task.Task, fd: usize, buf: []u8) isize {
             // shell expect read() to return at the newline. Keyboard first,
             // serial console second (headless automation).
             var count: usize = 0;
+            // Bounded wait. `hlt` here is a permanent machine lockup: IF is
+            // cleared for the whole syscall (IA32_FMASK clears it on entry and
+            // nothing re-enables it before this loop), so `hlt` halts with no
+            // possible wake-up - and the cooperative scheduler cannot preempt
+            // it either. Spin with a cap instead, so a blocking read degrades
+            // into a short read rather than a dead machine.
+            var idle_spins: u32 = 0;
             while (count < buf.len) {
                 const ch = kb.pollKey() orelse serialPollKey() orelse {
-                    asm volatile ("hlt");
-                    continue;
+                    if (idle_spins < IDLE_SPIN_LIMIT) {
+                        idle_spins += 1;
+                        asm volatile ("pause" ::: .{ .memory = true });
+                        continue;
+                    }
+                    break;
                 };
+                idle_spins = 0;
                 if (ch == '\n' or ch == '\r') {
                     vga.putChar('\n');
                     buf[count] = '\n';
