@@ -187,7 +187,10 @@ if [[ "$MAKE_ISO" == "true" ]]; then
             printf 'terminal_output serial\n'
             printf 'echo\n'
             printf 'echo ==== Zirconium GRUB video diagnostic ====\n'
-            printf 'set gfxmode=auto,1024x768x32,1024x768x16,800x600x32,640x480x32\n'
+            # Explicit mode first, no "auto" in front: under UEFI "auto" plus a
+            # "keep,text" payload makes GRUB hand the kernel no framebuffer at
+            # all, and there is no VGA text console either - a black screen.
+            printf 'set gfxmode=1024x768x32,800x600x32,640x480x32,1024x768x16\n'
             printf 'echo ---- gfxmode=$gfxmode gfxpayload=$gfxpayload ----\n'
             printf 'videoinfo\n'
             printf 'echo ---- modes listed above; boot entries below ----\n'
@@ -197,14 +200,17 @@ if [[ "$MAKE_ISO" == "true" ]]; then
             printf 'echo ----   boot\n'
             printf 'set gfxpayload=keep,text\n'
             printf 'terminal_output gfxterm\n'
-            printf 'menuentry "Boot with the mode GRUB is already using" {\n'
+            # The default entry forces a mode: pressing Enter must land on a
+            # machine that actually gets a framebuffer.
+            printf 'menuentry "Force 1024x768x32 (default)" {\n'
+            printf '    set gfxmode=1024x768x32,800x600x32,640x480x32\n'
             printf '    multiboot /boot/kernel.bin\n'
-            printf '    set gfxpayload=keep,text\n'
+            printf '    set gfxpayload=1024x768x32,800x600x32,640x480x32\n'
             printf '    boot\n'
             printf '}\n'
-            printf 'menuentry "Force 1024x768x32" {\n'
+            printf 'menuentry "Boot with the mode GRUB is already using (diagnostic)" {\n'
             printf '    multiboot /boot/kernel.bin\n'
-            printf '    set gfxpayload=1024x768x32,text\n'
+            printf '    set gfxpayload=keep,text\n'
             printf '    boot\n'
             printf '}\n'
             printf 'menuentry "Force 1024x768x16" {\n'
