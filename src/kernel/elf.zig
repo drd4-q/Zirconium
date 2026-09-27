@@ -57,6 +57,9 @@ const PF_W: u32 = 2;
 
 /// Base applied to ET_DYN (static-PIE) images, which are linked at vaddr 0.
 const PIE_BASE: u64 = 0x10000000;
+/// Upper bound for a single PT_LOAD segment. Anything larger is a corrupt or
+/// hostile header: mapping it would only fail deep inside the page allocator.
+const MAX_SEGMENT_BYTES: u64 = 512 * 1024 * 1024;
 
 pub fn isElf(data: []const u8) bool {
     return data.len >= @sizeOf(Elf64_Ehdr) and std.mem.eql(u8, data[0..4], "\x7fELF");
@@ -95,7 +98,13 @@ pub fn load(addr_space: address_space.AddressSpace, data: []const u8) !binfmt.Lo
         serial.serialWrite("[ELF] Error: no program headers\n");
         return error.TruncatedElf;
     }
-    if (data.len < ehdr.e_phoff + @as(u64, ehdr.e_phnum) * ehdr.e_phentsize) {
+    // e_phoff and e_phentsize come straight from the file. Compare by
+    // subtraction, not addition: a phoff near 2^64 would wrap the sum below and
+    // pass this check, after which the header loop indexes off the end of the
+    // buffer and panics the kernel.
+    if (ehdr.e_phoff > data.len or
+        @as(u64, ehdr.e_phnum) * @as(u64, ehdr.e_phentsize) > data.len - ehdr.e_phoff)
+    {
         serial.serialWrite("[ELF] Error: truncated program headers\n");
         return error.TruncatedElf;
     }
@@ -131,7 +140,13 @@ pub fn load(addr_space: address_space.AddressSpace, data: []const u8) !binfmt.Lo
         }
         if (ph.p_type != PT_LOAD) continue;
         if (ph.p_filesz > ph.p_memsz) return error.InvalidElfHeader;
-        if (ph.p_offset + ph.p_filesz > data.len) return error.TruncatedElf;
+        // Same wrap hazard as the program-header check: p_offset + p_filesz can
+        // overflow and slip through, so bound each part against the buffer.
+        if (ph.p_offset > data.len or ph.p_filesz > data.len - ph.p_offset) return error.TruncatedElf;
+        // A segment whose vaddr+memsz wraps (or that claims gigabytes) would ask
+        // for page allocations that cannot succeed; reject it up front.
+        if (ph.p_vaddr +% ph.p_memsz < ph.p_vaddr) return error.InvalidElfHeader;
+        if (ph.p_memsz > MAX_SEGMENT_BYTES) return error.InvalidElfHeader;
 
         try mapSegment(addr_space, data, ph, bias);
 

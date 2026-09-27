@@ -1316,6 +1316,10 @@ pub fn dispatch(frame: *isr.InterruptFrame) void {
                 i += 1;
             }
             var base: u64 = if (f == .atoi) 10 else a3;
+            // a3 is r9, fully controlled by the PE: base >= 2^63 makes the
+            // @intCast below panic, and a base outside 2..36 is meaningless
+            // anyway. Clamp to the documented strtol range.
+            if (base < 2 or base > 36) base = 10;
             if (base == 0) {
                 if (i + 1 < s.len and s[i] == '0' and (s[i + 1] == 'x' or s[i + 1] == 'X')) {
                     base = 16;
@@ -1632,7 +1636,13 @@ fn heapAlloc(t: *task.Task, size: u64, zero: bool) ?u64 {
 
 fn heapFree(t: *task.Task, ptr: u64) void {
     if (ptr == 0) return;
+    // Only pointers this allocator handed out may be freed. Without the range
+    // check, free() on a stack or code address writes a free-list link at
+    // ptr-8 and links an arbitrary address into the list, which heapAlloc then
+    // hands back to the program as a writable block.
+    if (ptr < task.MMAP_BASE + HEAP_HDR or ptr > t.mmap_next) return;
     const block = ptr - HEAP_HDR;
+    if (uaccess.readU64(block) == null) return;
     _ = uaccess.writeU64(block + 8, t.heap_free_head);
     t.heap_free_head = block;
 }

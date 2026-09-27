@@ -8,6 +8,9 @@ const vfs = @import("../fs/vfs.zig");
 const SECTOR_SIZE: usize = 512;
 const MAX_FAT16_FILES: usize = 128;
 const MAX_PATH_LEN: usize = 64;
+/// FAT16 stores cluster indices as u16 and a volume's byte span as u32; an
+/// offset beyond that cannot be addressed (mirrors fat32.zig's MAX_U32).
+const MAX_U32: u64 = 0xFFFF_FFFF;
 
 const Fat16BootSector = struct {
     bytes_per_sector: u16,
@@ -777,6 +780,12 @@ fn fat16Write(fs: *vfs.FileSystem, handle: *vfs.FileHandle, buf: []const u8) usi
         if (!writeFATEntry(c, 0xFFFF)) return 0;
     }
 
+    // fat32Write has the same guard; without it a ring-3 lseek past 4 GiB makes
+    // pos / cluster_size exceed u32 (a panic in Debug) or, once truncated, walks
+    // clusterAtIndex across up to 2^32 clusters - a multi-minute kernel hang
+    // that keeps allocating clusters and fills the volume.
+    if (handle.offset > MAX_U32 or handle.offset + buf.len > MAX_U32) return 0;
+
     var pos: u64 = handle.offset;
     var written: usize = 0;
     while (written < buf.len) {
@@ -975,6 +984,10 @@ fn truncateChain(first: u16, keep: u32) void {
 
 fn fat16Seek(fs: *vfs.FileSystem, handle: *vfs.FileHandle, offset: u64) bool {
     _ = fs;
+    // FAT16 addresses clusters with a u32 index, so a seek past 4 GiB can never
+    // be satisfied. Rejecting it here keeps the failure at the lseek instead of
+    // inside the read/write cluster walk.
+    if (offset > MAX_U32) return false;
     handle.offset = offset;
     return true;
 }

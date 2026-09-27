@@ -69,6 +69,10 @@ const Header = struct {
     fn dir(self: Header, data: []const u8, idx: usize) struct { rva: u32, size: u32 } {
         if (idx >= self.dir_count) return .{ .rva = 0, .size = 0 };
         const off = self.dir_off + idx * 8;
+        // NumberOfRvaAndSizes is attacker-controlled and dir() is called
+        // unconditionally for TLS/DELAY_IMPORT, so the entry has to be proven to
+        // live inside the file as well as inside the optional header.
+        if (off + 8 > data.len) return .{ .rva = 0, .size = 0 };
         return .{ .rva = readU32(data, off), .size = readU32(data, off + 4) };
     }
 };
@@ -154,7 +158,11 @@ fn parseHeader(data: []const u8) !Header {
         return error.UnsupportedPeFormat;
     }
 
-    const dir_count = readU32(data, opt_off + 108);
+    // NumberOfRvaAndSizes claims how many directory entries follow, but the
+    // optional header may be too short to contain them. Clamp to what actually
+    // fits so Header.dir() can never walk off the end of the file.
+    const dir_capacity: u32 = (@as(u32, opt_size) - 112) / 8;
+    const dir_count = @min(readU32(data, opt_off + 108), dir_capacity);
     const hdr = Header{
         .machine = machine,
         .section_count = section_count,
@@ -241,7 +249,12 @@ fn mapSections(
         }
 
         if (raw_size > 0 and chars & SCN_CNT_UNINIT_DATA == 0) {
-            if (raw_off + raw_size > data.len) return error.TruncatedPe;
+            // raw_off + raw_size is u32 arithmetic and wraps: 0xFFFF_FF00 + 0x200
+            // is 0x100, which passes an addition-based check and then slices the
+            // buffer at 4 GiB. Bound each part instead.
+            if (@as(u64, raw_off) > data.len or @as(u64, raw_size) > data.len - raw_off) {
+                return error.TruncatedPe;
+            }
             const copy_len = @min(raw_size, mem_size);
             try copyInto(addr_space, base + virt_addr, data[raw_off..][0..copy_len]);
         }

@@ -3,8 +3,21 @@
 
 const SYS_BRK: u64 = 12;
 
-const block_header_size: usize = 16;
+/// Header layout is derived from Block itself instead of a hand-kept constant,
+/// so adding a field cannot silently desync the offsets used by free().
+const Block = struct {
+    size: usize, // total block size, header included
+    next: ?*Block,
+    used: bool, // guards against double free and bogus pointers
+};
+
+const block_header_size: usize = @sizeOf(Block);
 const align_mask: usize = 15;
+
+/// Refuse absurd requests outright.  Rounding a huge `size` up would wrap and
+/// hand back a block far smaller than the caller believes it got, which is a
+/// silent heap overflow rather than a clean malloc failure.
+const max_request: usize = @as(usize, 1) << 62;
 
 fn syscall3(num: u64, a1: u64, a2: u64, a3: u64) u64 {
     return asm volatile (
@@ -22,19 +35,16 @@ fn brkSys(new_break: u64) u64 {
     return syscall3(SYS_BRK, new_break, 0, 0);
 }
 
-const Block = struct {
-    size: usize,
-    next: ?*Block,
-};
-
 var free_head: ?*Block = null;
+var heap_base: usize = 0;
 var heap_top: usize = 0; // 0 = not initialized yet
 
 fn ensureInit() bool {
     if (heap_top != 0) return true;
     const base = brkSys(0); // query current break; kernel returns the heap base
     if (base == 0) return false;
-    heap_top = @intCast(base);
+    heap_base = @intCast(base);
+    heap_top = heap_base;
     return true;
 }
 
@@ -49,6 +59,7 @@ fn growHeap(amount: usize) ?usize {
 }
 
 pub fn malloc(size: usize) ?*anyopaque {
+    if (size > max_request) return null;
     const payload_needed = (size + align_mask) & ~align_mask;
     const block_needed = payload_needed + block_header_size;
 
@@ -67,7 +78,7 @@ pub fn malloc(size: usize) ?*anyopaque {
             // Split if there is leftover room for another block
             if (b.size - block_needed >= block_header_size + 16) {
                 const tail: *Block = @ptrFromInt(@intFromPtr(b) + block_needed);
-                tail.* = .{ .size = b.size - block_needed, .next = next };
+                tail.* = .{ .size = b.size - block_needed, .next = next, .used = false };
                 b.size = block_needed;
                 if (prev) |p| {
                     p.next = tail;
@@ -75,6 +86,7 @@ pub fn malloc(size: usize) ?*anyopaque {
                     free_head = tail;
                 }
             }
+            b.used = true;
             return @ptrFromInt(@intFromPtr(b) + block_header_size);
         }
         prev = cur;
@@ -84,13 +96,24 @@ pub fn malloc(size: usize) ?*anyopaque {
     // No fit: extend the heap via brk
     const base = growHeap(block_needed) orelse return null;
     const b: *Block = @ptrFromInt(base);
-    b.* = .{ .size = block_needed, .next = null };
+    b.* = .{ .size = block_needed, .next = null, .used = true };
     return @ptrFromInt(base + block_header_size);
 }
 
 pub fn free(ptr: ?*anyopaque) void {
-    if (ptr == null) return;
-    const b: *Block = @ptrFromInt(@intFromPtr(ptr.?) - block_header_size);
+    const p = ptr orelse return;
+    if (!ensureInit()) return;
+    const addr = @intFromPtr(p);
+    // Reject anything that is not a live block of our own heap before touching
+    // the header.  A bogus pointer here would otherwise corrupt the free list,
+    // and a self-referential list makes the first-fit scan in malloc() loop
+    // forever - which hangs the whole machine, because the scheduler is
+    // cooperative and never preempts a runaway ring-3 task.
+    if (addr < heap_base + block_header_size or addr > heap_top) return;
+    const b: *Block = @ptrFromInt(addr - block_header_size);
+    if (@intFromPtr(b) < heap_base or @intFromPtr(b) + b.size > heap_top) return;
+    if (!b.used) return;
+    b.used = false;
     b.next = free_head;
     free_head = b;
 }

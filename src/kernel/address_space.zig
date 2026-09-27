@@ -296,16 +296,46 @@ pub const AddressSpace = struct {
     /// Pages already present are left alone (so it is safe to call over a range
     /// that partially overlaps an existing mapping).
     pub fn allocUserRange(self: AddressSpace, vaddr_start: u64, size: u64, flags: u64) bool {
+        if (size == 0) return false;
+        if (vaddr_start +% size < vaddr_start) return false; // wrap
         const start = vaddr_start & ~@as(u64, 0xFFF);
         const end = (vaddr_start + size + 0xFFF) & ~@as(u64, 0xFFF);
         var vaddr = start;
         while (vaddr < end) : (vaddr += 0x1000) {
             if (self.translate(vaddr) != null) continue;
-            const phys = pmm.allocPage() orelse return false;
+            const phys = pmm.allocPage() orelse {
+                // Out of memory part-way through: give back what this call
+                // already mapped. The caller (mmapAnon) does not advance
+                // mmap_next on failure, so leaving the pages behind would both
+                // leak them and map over live mappings on the next attempt.
+                var undo = start;
+                while (undo < vaddr) : (undo += 0x1000) {
+                    const p = self.translate(undo) orelse continue;
+                    self.clearUserPageEntry(undo);
+                    pmm.freePage(p);
+                }
+                return false;
+            };
             @memset(@as([*]u8, @ptrFromInt(phys))[0..4096], 0);
             self.mapUserPage(vaddr, phys, flags | vmm.PAGE_USER);
         }
         return true;
+    }
+
+    /// Drop the leaf mapping for one 4 KiB page without touching the page
+    /// tables above it. Used to roll back a partially completed range.
+    fn clearUserPageEntry(self: AddressSpace, vaddr: u64) void {
+        const pdpt_idx: u16 = @intCast((vaddr >> 30) & 0x1FF);
+        const pd_idx: u16 = @intCast((vaddr >> 21) & 0x1FF);
+        const pt_idx: u16 = @intCast((vaddr >> 12) & 0x1FF);
+        const pml4: [*]u64 = @ptrFromInt(self.pml4_phys);
+        const pdpt = lookupTable(pml4, @intCast((vaddr >> 39) & 0x1FF)) orelse return;
+        const pd = lookupTable(pdpt, pdpt_idx) orelse return;
+        const pd_val = pd[pd_idx];
+        if (pd_val & vmm.PAGE_SIZE != 0) return; // large page: not ours to clear
+        const pt = lookupTable(pd, pd_idx) orelse return;
+        pt[pt_idx] = 0;
+        vmm.invalidatePage(vaddr);
     }
 
     pub fn mapUserPage(self: AddressSpace, vaddr: u64, paddr: u64, flags: u64) void {
@@ -384,6 +414,15 @@ const ChildLevel = enum {
     /// Children are PT entries, i.e. splitting a 2MB PD huge page into 4KB ones.
     pt,
 };
+
+/// Read-only variant of nextPageTable: returns null instead of creating (or
+/// splitting) a table. Never allocates, so it is safe on teardown paths.
+fn lookupTable(table: [*]u64, index: u16) ?[*]u64 {
+    const entry = table[index];
+    if (entry & vmm.PAGE_PRESENT == 0) return null;
+    if (entry & vmm.PAGE_SIZE != 0) return null; // huge page, not a table
+    return @ptrFromInt(entry & vmm.PAGE_ADDR_MASK);
+}
 
 fn nextPageTable(table: [*]u64, index: u16, flags: u64, child_level: ChildLevel) [*]u64 {
     const entry = table[index];

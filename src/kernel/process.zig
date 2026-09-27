@@ -276,7 +276,12 @@ fn setupWindowsStack(
     b.alignDown(2);
     var wide: [256]u8 = undefined;
     var wlen: usize = 0;
-    while (wlen < argline.len and wlen < 255) : (wlen += 1) {
+    // The bound must be in *characters* halved: each one takes two bytes, so a
+    // 255-character limit would write up to index 509 of a 256-byte array,
+    // smashing the kernel stack and then copying that garbage into the user
+    // stack where GetCommandLineW hands it out.
+    const max_chars = wide.len / 2 - 1;
+    while (wlen < argline.len and wlen < max_chars) : (wlen += 1) {
         wide[wlen * 2] = argline[wlen];
         wide[wlen * 2 + 1] = 0;
     }
@@ -324,7 +329,14 @@ fn setupWindowsStack(
 /// Reserve `length` bytes of zeroed anonymous memory in the task's mmap arena.
 pub fn mmapAnon(t: *task.Task, length: u64) ?u64 {
     const as = t.address_space orelse return null;
+    // A zero length (or one that wraps when rounded up) must fail. Returning
+    // "success" with size == 0 leaves the caller with an address that has no
+    // page behind it, and the first write kills the task.
+    if (length == 0) return null;
+    if (length > task.MMAP_LIMIT - task.MMAP_BASE) return null;
+    if (length + 0xFFF < length) return null;
     const size = (length + 0xFFF) & ~@as(u64, 0xFFF);
+    if (size == 0) return null;
     if (t.mmap_next + size > task.MMAP_LIMIT) {
         serial.serialWrite("[PROC] mmap arena exhausted\n");
         return null;

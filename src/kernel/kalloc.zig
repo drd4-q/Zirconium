@@ -88,8 +88,31 @@ pub fn kmalloc(size: usize) ?[*]u8 {
     return null;
 }
 
+/// True when [addr, addr+size) can be a block this allocator handed out.
+/// kfree/krealloc dereference a header at ptr-sizeof(BlockHeader) before they
+/// can check anything, so an out-of-heap pointer has to be rejected first.
+fn inHeapRange(addr: usize, size: usize) bool {
+    const start = heap_start orelse return false;
+    const end = heap_end orelse return false;
+    if (addr < @intFromPtr(start)) return false;
+    if (addr >= @intFromPtr(end)) return false;
+    if (size > @intFromPtr(end) - addr) return false;
+    return true;
+}
+
 pub fn kfree(ptr: [*]u8) void {
     const addr = @intFromPtr(ptr);
+    if (!inHeapRange(addr, @sizeOf(BlockHeader))) {
+        // Refuse before touching the "header": the range check that used to
+        // live inside the double-free branch was itself reading a word in front
+        // of a foreign pointer, and a non-heap pointer could otherwise be
+        // linked into the address-sorted free list and later handed out by
+        // kmalloc.
+        serial.serialWrite("[KHEAP] kfree of a non-heap pointer 0x");
+        serial.serialWriteHex(addr);
+        serial.serialWrite(" ignored\n");
+        return;
+    }
     const block: *BlockHeader = @ptrFromInt(addr - @sizeOf(BlockHeader));
 
     if (block.free) {
@@ -97,12 +120,6 @@ pub fn kfree(ptr: [*]u8) void {
         serial.serialWriteHex(addr);
         serial.serialWrite(" from ra=0x");
         serial.serialWriteHex(@returnAddress());
-        // Outside any heap page? Then the caller passed a non-kalloc pointer.
-        if (heap_start == null or addr < @intFromPtr(heap_start.?) or
-            (heap_end != null and addr >= @intFromPtr(heap_end.?)))
-        {
-            serial.serialWrite(" [NON-HEAP PTR]");
-        }
         serial.serialWrite("\n");
         return;
     }
@@ -120,10 +137,25 @@ pub fn kfree(ptr: [*]u8) void {
 }
 
 pub fn krealloc(ptr: [*]u8, new_size: usize) ?[*]u8 {
+    // realloc(p, 0) is a free. Without this it falls into the "block is large
+    // enough" branch with aligned_new == 0, and splitBlock writes a fresh header
+    // at block+24 - which is exactly the caller's data pointer, overwriting
+    // 40 bytes of payload.
+    if (new_size == 0) {
+        kfree(ptr);
+        return null;
+    }
     const addr = @intFromPtr(ptr);
+    if (!inHeapRange(addr, @sizeOf(BlockHeader))) {
+        serial.serialWrite("[KHEAP] krealloc of a non-heap pointer 0x");
+        serial.serialWriteHex(addr);
+        serial.serialWrite(" refused\n");
+        return null;
+    }
     const block: *BlockHeader = @ptrFromInt(addr - @sizeOf(BlockHeader));
 
     const aligned_new = (new_size + 15) & ~@as(usize, 15);
+    if (aligned_new <= @sizeOf(BlockHeader)) return null;
 
     // If current block is large enough, just return it
     if (block.size >= aligned_new) {
@@ -160,6 +192,9 @@ pub fn krealloc(ptr: [*]u8, new_size: usize) ?[*]u8 {
 }
 
 fn splitBlock(block: *BlockHeader, needed: usize) void {
+    // A zero/header-sized `needed` would place the new header exactly on the
+    // caller's data pointer and record a zero-size block.
+    if (needed <= @sizeOf(BlockHeader)) return;
     if (block.size < needed + @sizeOf(BlockHeader) + MIN_BLOCK_SIZE) return;
 
     const new_block_addr = @intFromPtr(block) + @sizeOf(BlockHeader) + needed;
@@ -231,17 +266,6 @@ fn mergeBlocks(block: *BlockHeader) void {
                 }
             }
         }
-    }
-}
-
-fn removeBlock(block: *BlockHeader) void {
-    if (block.prev) |prev| {
-        prev.next = block.next;
-    } else {
-        free_list = block.next;
-    }
-    if (block.next) |next| {
-        next.prev = block.prev;
     }
 }
 

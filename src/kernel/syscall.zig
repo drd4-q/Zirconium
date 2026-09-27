@@ -158,8 +158,9 @@ fn nativeDispatch(frame: *isr_mod.InterruptFrame) void {
             }
         },
         .SYS_SLEEP => {
-            const ms = frame.rdi;
-            timer.sleep(@intCast(ms));
+            // rdi is attacker-controlled and 64-bit wide: @intCast straight to
+            // u32 panics in Debug and truncates in release. Truncate instead.
+            timer.sleep(@truncate(frame.rdi));
             frame.rax = 0;
         },
         .SYS_TIME => {
@@ -224,7 +225,7 @@ fn nativeDispatch(frame: *isr_mod.InterruptFrame) void {
             if (scheduler.current_task >= 0) {
                 const idx: usize = @intCast(scheduler.current_task);
                 scheduler.tasks[idx].state = .finished;
-                scheduler.tasks[idx].exit_code = @intCast(exit_code);
+                scheduler.tasks[idx].exit_code = @bitCast(@as(u32, @truncate(exit_code)));
 
                 // Wake up parent if it's waiting via waitpid
                 const parent_id = scheduler.tasks[idx].parent_id;
@@ -522,6 +523,12 @@ fn nativeDispatch(frame: *isr_mod.InterruptFrame) void {
 
             // Configure the socket's own connection (not an orphaned one like
             // the old code did), then block until the handshake completes.
+            // port comes straight from rdx and is 64-bit wide, so validate it
+            // before narrowing to u16 rather than @intCast-ing blindly.
+            if (port > 65535) {
+                frame.rax = @bitCast(@as(isize, -22)); // EINVAL
+                return;
+            }
             tcp.openConn(conn, dst_ip, @intCast(port));
             if (tcp.waitEstablished(conn, 500)) {
                 frame.rax = 0;

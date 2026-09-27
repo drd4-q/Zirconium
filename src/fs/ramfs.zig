@@ -172,10 +172,14 @@ fn ramfsOpen(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.
         const new_idx = allocNode() orelse return null;
 
         @memset(&nodes[new_idx].name, 0);
-        for (pn.name, 0..) |ch, i| {
-            if (i < MAX_NAME - 1) nodes[new_idx].name[i] = ch;
+        // Clamp the stored length to what actually fits: readdir trusts
+        // name_len, so an unclamped value would read past `name` and write
+        // past the caller's DirEntry.name.
+        const name_len = @min(pn.name.len, MAX_NAME - 1);
+        for (pn.name[0..name_len], 0..) |ch, i| {
+            nodes[new_idx].name[i] = ch;
         }
-        nodes[new_idx].name_len = pn.name.len;
+        nodes[new_idx].name_len = name_len;
         nodes[new_idx].file_type = if (flags.directory) .directory else .file;
         nodes[new_idx].size = 0;
         nodes[new_idx].parent = pn.parent;
@@ -212,6 +216,10 @@ fn ramfsRead(fs: *vfs.FileSystem, handle: *vfs.FileHandle, buf: []u8) usize {
     if (node.data == null) return 0;
 
     const data = node.data.?;
+    // lseek is reachable from ring 3 and can leave handle.offset past the end
+    // of the data; subtracting first would wrap and turn the read below into an
+    // out-of-bounds access at an astronomically large offset.
+    if (handle.offset >= node.size) return 0;
     const available = node.size - handle.offset;
     const to_read = @min(buf.len, available);
 
@@ -271,10 +279,11 @@ fn ramfsReaddir(fs: *vfs.FileSystem, path: []const u8, entries: []vfs.DirEntry) 
 
         const child = &nodes[child_idx];
         @memset(&entries[count].name, 0);
-        for (child.name[0..child.name_len], 0..) |ch, j| {
-            entries[count].name[j] = ch;
-        }
-        entries[count].name_len = child.name_len;
+        // Clamp again on the way out: DirEntry.name may be smaller than
+        // MAX_NAME, and name_len comes from on-disk state.
+        const n = @min(child.name_len, entries[count].name.len);
+        @memcpy(entries[count].name[0..n], child.name[0..n]);
+        entries[count].name_len = n;
         entries[count].file_type = child.file_type;
         entries[count].size = child.size;
         count += 1;
@@ -294,10 +303,11 @@ fn ramfsMkdir(fs: *vfs.FileSystem, path: []const u8) bool {
     const new_idx = allocNode() orelse return false;
 
     @memset(&nodes[new_idx].name, 0);
-    for (pn.name, 0..) |ch, i| {
-        if (i < MAX_NAME - 1) nodes[new_idx].name[i] = ch;
+    const mkdir_name_len = @min(pn.name.len, MAX_NAME - 1);
+    for (pn.name[0..mkdir_name_len], 0..) |ch, i| {
+        nodes[new_idx].name[i] = ch;
     }
-    nodes[new_idx].name_len = pn.name.len;
+    nodes[new_idx].name_len = mkdir_name_len;
     nodes[new_idx].file_type = .directory;
     nodes[new_idx].size = 0;
     nodes[new_idx].parent = pn.parent;
@@ -305,6 +315,11 @@ fn ramfsMkdir(fs: *vfs.FileSystem, path: []const u8) bool {
     if (nodes[pn.parent].child_count < MAX_ENTRIES) {
         nodes[pn.parent].children[nodes[pn.parent].child_count] = new_idx;
         nodes[pn.parent].child_count += 1;
+    } else {
+        // Do not report success for a directory that was never linked in: the
+        // node would be an orphan, permanently leaking the pool slot.
+        freeNode(new_idx);
+        return false;
     }
 
     return true;

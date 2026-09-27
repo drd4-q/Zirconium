@@ -79,6 +79,23 @@ pub export fn _start() callconv(.c) noreturn {
             for (msg2, 0..) |ch, i| reuse[i] = ch;
             write(3, reuse[0..msg2.len]);
             heap.free(p3.?);
+
+            // Double free and a wild pointer must both be refused. Before the
+            // header gained a `used` flag, freeing p3 twice made the free list
+            // point at itself and the next malloc() scanned it forever - an
+            // unkillable ring-3 hang, because the scheduler never preempts.
+            heap.free(p3.?);
+            heap.free(@ptrFromInt(0xDEAD_BEEF));
+            const p4 = heap.malloc(32);
+            if (p4 != null) {
+                const b4: [*]u8 = @ptrCast(p4.?);
+                const msg3 = "[USER-HEAP] double-free rejected\n";
+                for (msg3, 0..) |ch, i| b4[i] = ch;
+                write(3, b4[0..msg3.len]);
+                heap.free(p4.?);
+            } else {
+                write(3, "[USER-HEAP] FAILED (malloc after double free)\n");
+            }
         }
     } else {
         write(3, "[USER-HEAP] FAILED (brk returned nothing)\n");

@@ -32,10 +32,16 @@ fn append(data: []const u8) void {
     if (data.len == 0) return;
 
     if (data.len >= BUFFER_SIZE) {
+        // The whole buffer becomes the tail of this chunk: return, otherwise the
+        // copy below writes at buffer[buffered..] with buffered == buffer.len
+        // and runs off the end of the array.
         @memcpy(buffer[0..], data[data.len - BUFFER_SIZE ..]);
         buffered = BUFFER_SIZE;
         dropped +|= @intCast(data.len - BUFFER_SIZE);
-    } else if (buffered + data.len > BUFFER_SIZE) {
+        if (buffered >= FLUSH_THRESHOLD) flush_requested = true;
+        return;
+    }
+    if (buffered + data.len > BUFFER_SIZE) {
         const remove = buffered + data.len - BUFFER_SIZE;
         @memmove(buffer[0 .. buffered - remove], buffer[remove..buffered]);
         buffered -= remove;

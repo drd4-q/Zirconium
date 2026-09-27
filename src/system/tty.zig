@@ -326,6 +326,10 @@ pub const TTY = struct {
     fn redrawCommandLine(self: *TTY) void {
         self.cursor_col = 5; // right after "zig> "
         for (self.cmd_buf[0..self.cmd_len]) |c| {
+            // cmd_buf is longer than the row: without this the loop writes past
+            // the end of buffer[self.cursor_row] (and past the whole buffer on
+            // the last row) as soon as the command line exceeds the width.
+            if (self.cursor_col >= self.cols) break;
             self.buffer[self.cursor_row][self.cursor_col] = makeEntry(c, self.fg, self.bg);
             self.cursor_col += 1;
         }
@@ -411,13 +415,18 @@ pub const TTY = struct {
                 defer vfs.close(handle);
                 var fbuf: [512]u8 = undefined;
                 var total: usize = 0;
+                var last: u8 = 0;
                 while (true) {
                     const n = vfs.read(handle, &fbuf);
                     if (n == 0) break;
                     self.write(fbuf[0..n]);
+                    // Track the last byte seen, not the total count: fbuf is
+                    // only 512 bytes, so fbuf[total-1] reads out of bounds for
+                    // any file larger than one buffer.
+                    last = fbuf[n - 1];
                     total += n;
                 }
-                if (total > 0 and fbuf[total - 1] != '\n') self.write("\n");
+                if (total > 0 and last != '\n') self.write("\n");
             } else {
                 self.setColor(.light_red, .black);
                 self.write("Error: file not found: ");
