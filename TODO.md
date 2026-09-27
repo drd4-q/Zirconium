@@ -160,9 +160,10 @@
 - [ ] Let APs run tasks: the run queue, `current_task` and the tick bookkeeping are BSP-only, and
       `syscall_kernel_rsp` is a single global, so it is wrong the moment a second CPU takes a
       syscall.
-- [ ] Honor the framebuffer channel layout (MBI offsets 110-115). `lfbPut`/`lfbGet` and the
-      32bpp `flush()` fast path still assume BGRX, so a UEFI GOP `RGBA8`/`BLT_ONLY` mode
-      (R@0) renders with red and blue swapped.
+- [x] Honor the framebuffer channel layout. `fb_red_first` is derived from the reported
+      channel field positions (MBI offset 112) and honoured by `lfbPut`, `lfbGet` and the
+      32bpp `flush()` fast path, so a UEFI GOP `RGBA8`/`BLT_ONLY` mode (R@0) no longer
+      renders with red and blue swapped.
 - [ ] Write-combining MTRR for the LFB (`rdmsr 0xFE`, set `0x200`/`0x201` like GRUB's
       `grub_vbe_enable_mtrr`) — the biggest win for GUI/redraw bandwidth on real hardware.
 

@@ -152,6 +152,16 @@ inline fn lfbOffset(y: u32, x: u32) u64 {
     return @as(u64, y) * fb_pitch + @as(u64, x) * fb_bytes_pp;
 }
 
+/// True when the mode stores red in the LOW byte (memory order R,G,B).
+///
+/// Almost every PC display is B,G,R,X in memory, which is why this used to be
+/// hardcoded - but a discrete GPU is free to report the opposite through the
+/// multiboot channel fields, and then every colour comes out with red and blue
+/// swapped. Deriving it from the reported field positions costs nothing and
+/// removes the assumption. Defaults to B,G,R,X for the 16bpp and text paths,
+/// which have no channel fields at all.
+var fb_red_first: bool = false;
+
 /// Write one RGB pixel straight to the LFB.
 fn lfbPut(x: u32, y: u32, rgb: u32) void {
     if (fb_bytes_pp == 2) {
@@ -164,9 +174,15 @@ fn lfbPut(x: u32, y: u32, rgb: u32) void {
         return;
     }
     const p: [*]volatile u8 = @ptrFromInt(fb_addr + lfbOffset(y, x));
-    p[0] = @truncate(rgb);
-    p[1] = @truncate(rgb >> 8);
-    p[2] = @truncate(rgb >> 16);
+    if (fb_red_first) {
+        p[0] = @truncate(rgb >> 16);
+        p[1] = @truncate(rgb >> 8);
+        p[2] = @truncate(rgb);
+    } else {
+        p[0] = @truncate(rgb);
+        p[1] = @truncate(rgb >> 8);
+        p[2] = @truncate(rgb >> 16);
+    }
     if (fb_bytes_pp == 4) p[3] = 0;
 }
 
@@ -180,6 +196,9 @@ fn lfbGet(x: u32, y: u32) u32 {
             (@as(u32, v & 0x1F) << 3);
     }
     const p: [*]volatile u8 = @ptrFromInt(fb_addr + lfbOffset(y, x));
+    if (fb_red_first) {
+        return (@as(u32, p[0]) << 16) | (@as(u32, p[1]) << 8) | @as(u32, p[2]);
+    }
     return (@as(u32, p[2]) << 16) | (@as(u32, p[1]) << 8) | @as(u32, p[0]);
 }
 
@@ -228,49 +247,219 @@ var saved_cursor_col: usize = 0;
 pub var scroll_view: bool = false;
 pub var scroll_view_line: usize = 0; // which line in scrollback is at top of screen
 
+/// Official Multiboot 1 video mode table, reached through flag bit 11.
+///
+/// The spec's `graphics_table` pointer sits right after `apm_table` (bit 10), so
+/// at byte 68 + 4.  Each entry is 20 bytes:
+///   0 mode_type (0 = linear graphics, 1 = EGA text)
+///   4 width      (pixels, or characters for a text mode)
+///   8 height
+///   12 depth     (bits per pixel)
+///   16 frame_buffer_address (physical, valid for text modes too)
+///
+/// There is no count field, so entries are scanned until one stops looking like
+/// a mode, bounded so a garbage pointer cannot walk the whole machine.  Returns
+/// false when the table is absent or holds nothing usable, in which case the
+/// caller stays in text mode.
+fn tryVbeVideoTable(mbi: [*]const u8, flags: u32) bool {
+    const serial = @import("serial.zig");
+    if ((flags & (1 << 11)) == 0) return false;
+
+    const ptr = @as(u32, @intCast(mbi[72])) |
+        (@as(u32, @intCast(mbi[73])) << 8) |
+        (@as(u32, @intCast(mbi[74])) << 16) |
+        (@as(u32, @intCast(mbi[75])) << 24);
+    if (ptr == 0) return false;
+    serial.serialWrite("[FB] multiboot video table at 0x");
+    serial.serialWriteHex(ptr);
+    serial.serialWrite("\n");
+
+    const t: [*]const u8 = @ptrFromInt(ptr);
+    var i: u32 = 0;
+    while (i < 32) : (i += 1) {
+        const e = ptr + i * 20;
+        const mode_type = @as(u32, @intCast(t[i * 20 + 0])) |
+            (@as(u32, @intCast(t[i * 20 + 1])) << 8) |
+            (@as(u32, @intCast(t[i * 20 + 2])) << 16) |
+            (@as(u32, @intCast(t[i * 20 + 3])) << 24);
+        const w = @as(u32, @intCast(t[i * 20 + 4])) |
+            (@as(u32, @intCast(t[i * 20 + 5])) << 8) |
+            (@as(u32, @intCast(t[i * 20 + 6])) << 16) |
+            (@as(u32, @intCast(t[i * 20 + 7])) << 24);
+        const h = @as(u32, @intCast(t[i * 20 + 8])) |
+            (@as(u32, @intCast(t[i * 20 + 9])) << 8) |
+            (@as(u32, @intCast(t[i * 20 + 10])) << 16) |
+            (@as(u32, @intCast(t[i * 20 + 11])) << 24);
+        const d = @as(u32, @intCast(t[i * 20 + 12])) |
+            (@as(u32, @intCast(t[i * 20 + 13])) << 8) |
+            (@as(u32, @intCast(t[i * 20 + 14])) << 16) |
+            (@as(u32, @intCast(t[i * 20 + 15])) << 24);
+        const a = @as(u32, @intCast(t[i * 20 + 16])) |
+            (@as(u32, @intCast(t[i * 20 + 17])) << 8) |
+            (@as(u32, @intCast(t[i * 20 + 18])) << 16) |
+            (@as(u32, @intCast(t[i * 20 + 19])) << 24);
+
+        // Stop at the first entry that is not a plausible mode, otherwise the
+        // loop walks whatever follows the table in memory.
+        if (mode_type > 1 or w == 0 or h == 0 or w > 16384 or h > 16384 or d > 64) break;
+
+        serial.serialWrite("[FB]   table[");
+        serial.serialWriteDec(i);
+        serial.serialWrite("] type=");
+        serial.serialWriteDec(mode_type);
+        serial.serialWrite(" ");
+        serial.serialWriteDec(w);
+        serial.serialWrite("x");
+        serial.serialWriteDec(h);
+        serial.serialWrite("x");
+        serial.serialWriteDec(d);
+        serial.serialWrite(" @0x");
+        serial.serialWriteHex(a);
+        serial.serialWrite("\n");
+
+        // First linear graphics mode wins: that is the one the bootloader set.
+        if (mode_type == 0 and a != 0 and (d == 32 or d == 24 or d == 16)) {
+            fb_addr = a;
+            fb_width = w;
+            fb_height = h;
+            fb_bpp = d;
+            fb_type = 2; // direct colour
+            fb_pitch = w * (d / 8);
+            serial.serialWrite("[FB] adopted table entry at 0x");
+            serial.serialWriteHex(e);
+            serial.serialWrite("\n");
+            return true;
+        }
+    }
+    serial.serialWrite("[FB] video table has no usable linear graphics mode\n");
+    return false;
+}
+
+/// Log the raw multiboot video bytes.
+///
+/// The framebuffer fields live in GRUB's extension of the Multiboot 1 layout
+/// rather than in the 2001 spec, and every consumer guesses at the offsets
+/// differently - `framebuffer_depth` versus `framebuffer_bpp` is a 4-byte field
+/// at 108 versus a 1-byte field at 112, and they are read as single bytes.  When
+/// a machine behaves differently from QEMU there is no way to tell a misread
+/// offset from a genuinely absent field except by looking at the bytes, so print
+/// them.
+fn dumpMbiVideo(mbi: [*]const u8, flags: u32) void {
+    const serial = @import("serial.zig");
+    serial.serialWrite("[FB] mbi_flags=0x");
+    serial.serialWriteHex(flags);
+    serial.serialWrite(" bit11=");
+    serial.serialWriteDec(if ((flags & (1 << 11)) != 0) @as(u32, 1) else @as(u32, 0));
+    serial.serialWrite(" bit12=");
+    serial.serialWriteDec(if ((flags & (1 << 12)) != 0) @as(u32, 1) else @as(u32, 0));
+    serial.serialWrite("\n");
+    var hex: [128]u8 = undefined;
+    var n: usize = 0;
+    var off: usize = 80;
+    while (off < 144) : (off += 1) {
+        const b: u8 = mbi[off];
+        const hi: u8 = (b >> 4) & 0xF;
+        const lo: u8 = b & 0xF;
+        hex[n] = if (hi < 10) hi + '0' else hi + 'a' - 10;
+        hex[n + 1] = if (lo < 10) lo + '0' else lo + 'a' - 10;
+        n += 2;
+    }
+    serial.serialWrite("[FB] mbi[80..144]=");
+    serial.serialWrite(hex[0..n]);
+    serial.serialWrite("\n");
+}
+
 pub fn initFromMultiboot(mbi_ptr: u32) void {
     const mbi: [*]const u8 = @ptrFromInt(mbi_ptr);
     const serial = @import("serial.zig");
 
     const flags = @as(u32, @intCast(mbi[0])) | (@as(u32, @intCast(mbi[1])) << 8) |
         (@as(u32, @intCast(mbi[2])) << 16) | (@as(u32, @intCast(mbi[3])) << 24);
+
+    dumpMbiVideo(mbi, flags);
+
     if ((flags & (1 << 12)) == 0) {
-        serial.serialWrite("[FB] No framebuffer info from bootloader (MBI flags=0x");
-        serial.serialWriteHex(flags);
-        serial.serialWrite(")\n");
-        serial.serialWrite("[FB] GRUB handed us no video mode (it fell back to text).\n");
-        serial.serialWrite("[FB] Under UEFI the VGA text buffer at 0xB8000 is NOT\n");
-        serial.serialWrite("[FB] displayed by the firmware console -> black screen.\n");
-        return;
+        // Bit 12 is the GRUB extension.  The *official* Multiboot 1 spec has a
+        // second, older video source that the driver never looked at: bit 11
+        // points at a table of 20-byte entries of
+        //   { mode_type, width, height, depth, frame_buffer_address }.
+        // A bootloader that only implements the spec hands the framebuffer over
+        // this way and no other, so ignoring it is how a perfectly capable
+        // machine ends up in text mode.
+        if (tryVbeVideoTable(mbi, flags)) {
+            serial.serialWrite("[FB] source=multiboot bit 11 video table\n");
+        } else {
+            serial.serialWrite("[FB] No framebuffer info from bootloader (MBI flags=0x");
+            serial.serialWriteHex(flags);
+            serial.serialWrite(")\n");
+            serial.serialWrite("[FB] GRUB handed us no video mode (it fell back to text).\n");
+            serial.serialWrite("[FB] Under UEFI the VGA text buffer at 0xB8000 is NOT\n");
+            serial.serialWrite("[FB] displayed by the firmware console -> black screen.\n");
+            return;
+        }
+    } else {
+        serial.serialWrite("[FB] source=multiboot bit 12 framebuffer\n");
+
+        fb_addr = @as(u64, @intCast(mbi[88])) |
+            (@as(u64, @intCast(mbi[89])) << 8) |
+            (@as(u64, @intCast(mbi[90])) << 16) |
+            (@as(u64, @intCast(mbi[91])) << 24) |
+            (@as(u64, @intCast(mbi[92])) << 32) |
+            (@as(u64, @intCast(mbi[93])) << 40) |
+            (@as(u64, @intCast(mbi[94])) << 48) |
+            (@as(u64, @intCast(mbi[95])) << 56);
+
+        fb_pitch = @as(u32, @intCast(mbi[96])) |
+            (@as(u32, @intCast(mbi[97])) << 8) |
+            (@as(u32, @intCast(mbi[98])) << 16) |
+            (@as(u32, @intCast(mbi[99])) << 24);
+
+        fb_width = @as(u32, @intCast(mbi[100])) |
+            (@as(u32, @intCast(mbi[101])) << 8) |
+            (@as(u32, @intCast(mbi[102])) << 16) |
+            (@as(u32, @intCast(mbi[103])) << 24);
+
+        fb_height = @as(u32, @intCast(mbi[104])) |
+            (@as(u32, @intCast(mbi[105])) << 8) |
+            (@as(u32, @intCast(mbi[106])) << 16) |
+            (@as(u32, @intCast(mbi[107])) << 24);
+
+        fb_bpp = @as(u32, @intCast(mbi[108]));
+
+        fb_type = @as(u32, @intCast(mbi[109]));
+
+        // Channel field positions/mask sizes, six bytes, so the byte order is
+        // read rather than assumed.  red@0 means the mode is R,G,B in memory;
+        // blue@0 (the usual PC layout) means B,G,R.
+        const red_pos: u32 = mbi[112];
+        const blue_pos: u32 = mbi[116];
+        if (red_pos == 0 and blue_pos != 0) {
+            fb_red_first = true;
+        } else if (red_pos == 16 and blue_pos == 0) {
+            fb_red_first = false;
+        } else if (red_pos != 0 or blue_pos != 0) {
+            serial.serialWrite("[FB] unusual channel layout red@");
+            serial.serialWriteDec(red_pos);
+            serial.serialWrite(" blue@");
+            serial.serialWriteDec(blue_pos);
+            serial.serialWrite(", assuming B,G,R\n");
+        }
+        serial.serialWrite("[FB] channels R@");
+        serial.serialWriteDec(red_pos);
+        serial.serialWrite("/");
+        serial.serialWriteDec(mbi[113]);
+        serial.serialWrite(" G@");
+        serial.serialWriteDec(mbi[114]);
+        serial.serialWrite("/");
+        serial.serialWriteDec(mbi[115]);
+        serial.serialWrite(" B@");
+        serial.serialWriteDec(blue_pos);
+        serial.serialWrite("/");
+        serial.serialWriteDec(mbi[117]);
+        serial.serialWrite(" byte_order=");
+        serial.serialWrite(if (fb_red_first) "RGB" else "BGR");
+        serial.serialWrite("\n");
     }
-
-    fb_addr = @as(u64, @intCast(mbi[88])) |
-        (@as(u64, @intCast(mbi[89])) << 8) |
-        (@as(u64, @intCast(mbi[90])) << 16) |
-        (@as(u64, @intCast(mbi[91])) << 24) |
-        (@as(u64, @intCast(mbi[92])) << 32) |
-        (@as(u64, @intCast(mbi[93])) << 40) |
-        (@as(u64, @intCast(mbi[94])) << 48) |
-        (@as(u64, @intCast(mbi[95])) << 56);
-
-    fb_pitch = @as(u32, @intCast(mbi[96])) |
-        (@as(u32, @intCast(mbi[97])) << 8) |
-        (@as(u32, @intCast(mbi[98])) << 16) |
-        (@as(u32, @intCast(mbi[99])) << 24);
-
-    fb_width = @as(u32, @intCast(mbi[100])) |
-        (@as(u32, @intCast(mbi[101])) << 8) |
-        (@as(u32, @intCast(mbi[102])) << 16) |
-        (@as(u32, @intCast(mbi[103])) << 24);
-
-    fb_height = @as(u32, @intCast(mbi[104])) |
-        (@as(u32, @intCast(mbi[105])) << 8) |
-        (@as(u32, @intCast(mbi[106])) << 16) |
-        (@as(u32, @intCast(mbi[107])) << 24);
-
-    fb_bpp = @as(u32, @intCast(mbi[108]));
-
-    fb_type = @as(u32, @intCast(mbi[109]));
 
     if (fb_addr == 0 or fb_width == 0 or fb_height == 0) {
         serial.serialWrite("[FB] Degenerate framebuffer info; staying in text mode\n");
@@ -670,9 +859,21 @@ pub fn flush() void {
         const src: [*]const u32 = shadow + row_off;
         if (fb_bytes_pp == 4) {
             const dst: [*]volatile u32 = @ptrFromInt(fb_addr + @as(u64, y) * fb_pitch + @as(u64, x0) * 4);
-            var x: u32 = 0;
-            while (x < w) : (x += 1) {
-                dst[x] = src[x];
+            if (fb_red_first) {
+                // The shadow holds 0x00RRGGBB, which lands in memory as B,G,R,X.
+                // A mode reporting red at byte 0 needs the other order, so swap
+                // here too - the fast path used to hardcode BGRX and render a
+                // red-first mode with red and blue exchanged.
+                var x: u32 = 0;
+                while (x < w) : (x += 1) {
+                    const c = src[x];
+                    dst[x] = (c >> 16) | (c << 16);
+                }
+            } else {
+                var x: u32 = 0;
+                while (x < w) : (x += 1) {
+                    dst[x] = src[x];
+                }
             }
         } else {
             var x: u32 = 0;
