@@ -17,6 +17,7 @@ const uaccess = @import("uaccess.zig");
 const pmm = @import("pmm.zig");
 const vmm = @import("vmm.zig");
 const msr = @import("../arch/msr.zig");
+const isr = @import("../arch/isr.zig");
 
 pub const USER_STACK_TOP: u64 = address_space.USER_STACK_TOP;
 
@@ -347,8 +348,10 @@ pub fn mmapAnon(t: *task.Task, length: u64) ?u64 {
     return base;
 }
 
-/// Terminate the current task and return to the scheduler. Never returns.
-pub fn exitCurrent(code: i32) noreturn {
+/// Terminate the current task. Returns only in the child-of-a-parent case, where
+/// the exit is completed by the interrupt handler's redirect; a top-level task
+/// transfers control to `sys_exit_return` and does not come back.
+pub fn exitCurrent(code: i32) void {
     const idx_signed = scheduler.current_task;
     if (idx_signed >= 0) {
         const idx: usize = @intCast(idx_signed);
@@ -399,6 +402,21 @@ pub fn exitCurrent(code: i32) noreturn {
     // one, but leaving a user pointer there would confuse the next task.
     msr.setFsBase(0);
     msr.setGsBase(0);
+
+    // A task with a parent is part of a running program. Resuming the parent
+    // has to happen from the interrupt handler, immediately before its `iretq`:
+    // returning into the exiting task's own user code would be wrong, and
+    // `sys_exit_return` would jump to the C frame of whatever launched the
+    // *original* task, skipping the parent entirely. So just record the
+    // redirect; the syscall/exception path performs the switch as its last act.
+    if (idx_signed >= 0) {
+        const idx: usize = @intCast(idx_signed);
+        const target = scheduler.redirectTargetFor(&scheduler.tasks[idx], idx);
+        if (target >= 0) {
+            scheduler.exit_redirect = target;
+            return;
+        }
+    }
 
     sys_exit_return();
 }

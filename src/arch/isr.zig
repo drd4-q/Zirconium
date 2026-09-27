@@ -94,7 +94,14 @@ const exception_names = [_][]const u8{
     "Reserved",
 };
 
+/// The frame of the interrupt currently being handled on this CPU.  The
+/// scheduler needs it to preempt: it rewrites the saved user registers in
+/// place and lets the normal `iretq` at the end of the ISR transfer control to
+/// the next task, instead of nesting a second context switch.
+pub var current_frame: ?*InterruptFrame = null;
+
 export fn isr_handler(frame: *InterruptFrame) callconv(.c) void {
+    current_frame = frame;
     const int_num = frame.int_num;
 
     if (int_num < 32) {
@@ -202,4 +209,9 @@ export fn isr_handler(frame: *InterruptFrame) callconv(.c) void {
             pic.sendEoi(irq);
         }
     }
+
+    // A ring-3 fault killed the task (see above). If it had a parent, the frame
+    // now describes the parent and this ISR's `iretq` resumes it instead of
+    // returning into the dead task.
+    if (@import("../kernel/scheduler.zig").applyExitRedirect(frame)) return;
 }

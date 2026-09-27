@@ -64,6 +64,14 @@ fn readUserStr(ptr: u64, max_len: usize) ?[256]u8 {
 }
 
 pub export fn syscall_handler(frame: *isr_mod.InterruptFrame) callconv(.c) void {
+    syscall_dispatch(frame);
+    // If the task called exit(), it is gone and the frame now belongs to its
+    // parent. Returning immediately keeps every later write to the frame from
+    // landing in the resumed task.
+    if (scheduler.applyExitRedirect(frame)) return;
+}
+
+fn syscall_dispatch(frame: *isr_mod.InterruptFrame) void {
     // Route by the current task's ABI. Linux binaries arrive here through
     // `syscall_entry_64` with Linux call numbers, which do not overlap ours in
     // meaning (e.g. 1 is write in both, but 2 is open there and read here), so

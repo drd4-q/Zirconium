@@ -33,10 +33,13 @@ pub fn init() void {
     _ = @import("apic.zig").init();
 }
 
-fn irqHandler(_: *isr_mod.InterruptFrame) void {
+fn irqHandler(frame: *isr_mod.InterruptFrame) void {
     _ = @atomicRmw(u64, &ticks, .Add, 1, .monotonic);
     if (@import("root").scheduler_ready) {
-        @import("../kernel/scheduler.zig").scheduleTick();
+        // The frame is handed over so the scheduler can preempt: it rewrites
+        // the saved ring-3 registers and this ISR's `iretq` resumes a different
+        // task.
+        @import("../kernel/scheduler.zig").scheduleTick(frame);
     }
 }
 

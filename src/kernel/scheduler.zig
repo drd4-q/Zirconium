@@ -4,6 +4,7 @@ const vga = root.vga;
 const port = root.serial;
 const task = @import("task.zig");
 const gdt = @import("../arch/gdt.zig");
+const isr = @import("../arch/isr.zig");
 const address_space = @import("address_space.zig");
 const vmm = @import("vmm.zig");
 
@@ -259,6 +260,9 @@ pub fn runAll() void {
         if (tasks[i].state != .ready) continue;
         tasks[i].state = .running;
         current_task = @intCast(i);
+        // Blocking-capable housekeeping runs here, between tasks: the tick
+        // handler must stay non-blocking.
+        pollDeferred();
 
         vga.setColor(.light_cyan, .black);
         vga.write("[SCHED] Task ");
@@ -284,7 +288,14 @@ pub fn runAll() void {
 
     current_task = -1;
     vga.setColor(.yellow, .black);
-    vga.write("[SCHED] All tasks completed\n");
+    vga.write("[SCHED] All tasks completed (preemptions=");
+    vga.writeDec(preemptions);
+    vga.write(")\n");
+    port.serialWrite("[SCHED] preemptions=");
+    port.serialWriteDec(preemptions);
+    port.serialWrite(" tick_count=");
+    port.serialWriteDec(tick_count);
+    port.serialWrite("\n");
 }
 
 extern fn switch_to_user(user_rsp: u64, user_rip: u64, user_cs: u64, user_ss: u64, user_rflags: u64) void;
@@ -324,13 +335,226 @@ fn jumpToUser(t: *task.Task) void {
     );
 }
 
-pub fn scheduleTick() void {
+// ───────────────────────── preemption (user <-> user) ─────────────────────────
+//
+// The scheduler switches ring-3 tasks by rewriting the *current* InterruptFrame
+// in place.  The ISR's normal `iretq` then lands in the next task, so there is
+// no nested context switch and no need for a separate kernel stack yet.
+//
+// Deliberately restricted to user<->user transitions: kernel-mode execution is
+// non-preemptible (like Linux without PREEMPT) and a top-level task still
+// returns to its C caller through `sys_exit_return`.  That keeps every existing
+// path intact while making fork() children actually run.
+
+/// Copy the architecture-visible part of a task's saved state into an interrupt
+/// frame, so the frame's `iretq` resumes exactly that task.
+pub fn loadStateIntoFrame(frame: *isr.InterruptFrame, t: *task.Task) void {
+    const s = &t.saved_state;
+    frame.rax = s.rax;
+    frame.rbx = s.rbx;
+    frame.rcx = s.rcx;
+    frame.rdx = s.rdx;
+    frame.rsi = s.rsi;
+    frame.rdi = s.rdi;
+    frame.rbp = s.rbp;
+    frame.r8 = s.r8;
+    frame.r9 = s.r9;
+    frame.r10 = s.r10;
+    frame.r11 = s.r11;
+    frame.r12 = s.r12;
+    frame.r13 = s.r13;
+    frame.r14 = s.r14;
+    frame.r15 = s.r15;
+    frame.rip = s.rip;
+    frame.rsp = s.rsp;
+    frame.rflags = s.rflags | 0x200; // IF=1: a task never resumes with IRQs off
+    frame.cs = s.cs;
+    frame.ss = s.ss;
+}
+
+/// Inverse of loadStateIntoFrame: bank the interrupted registers.
+pub fn saveFrameToState(frame: *isr.InterruptFrame, t: *task.Task) void {
+    const s = &t.saved_state;
+    s.rax = frame.rax;
+    s.rbx = frame.rbx;
+    s.rcx = frame.rcx;
+    s.rdx = frame.rdx;
+    s.rsi = frame.rsi;
+    s.rdi = frame.rdi;
+    s.rbp = frame.rbp;
+    s.r8 = frame.r8;
+    s.r9 = frame.r9;
+    s.r10 = frame.r10;
+    s.r11 = frame.r11;
+    s.r12 = frame.r12;
+    s.r13 = frame.r13;
+    s.r14 = frame.r14;
+    s.r15 = frame.r15;
+    s.rip = frame.rip;
+    s.rsp = frame.rsp;
+    s.rflags = frame.rflags;
+    s.cs = frame.cs;
+    s.ss = frame.ss;
+}
+
+/// Install everything a task needs to be *the* current one: page tables, the
+/// ring-0 stack interrupts will land on, and its TLS bases.
+pub fn activateTask(t: *task.Task) void {
+    if (t.address_space) |as| as.switchTo() else vmm.loadCr3(kernel_cr3);
+
+    const kstack_top = @intFromPtr(&t.kernel_stack) + task.KERNEL_STACK_SIZE;
+    gdt.setRsp0(kstack_top);
+    @import("../arch/syscall64.zig").setKernelStack(kstack_top);
+
+    if (t.personality == .linux and t.fs_base != 0) {
+        @import("../arch/msr.zig").setFsBase(t.fs_base);
+    }
+    if (t.personality == .windows and t.gs_base != 0) {
+        @import("../arch/msr.zig").setGsBase(t.gs_base);
+    }
+}
+
+/// First ready user task that is not `skip`, round-robin from the current one.
+fn pickNextUserTask(skip: usize) ?usize {
+    var i: usize = 0;
+    while (i < task_count) : (i += 1) {
+        const idx = (skip + 1 + i) % task_count;
+        const t = &tasks[idx];
+        if (t.task_type == .user and t.state == .ready and t.address_space != null) return idx;
+    }
+    return null;
+}
+
+/// The task a C caller (runTask/runAll -> jumpToUser) is still blocked in.
+/// Only this one may return through `sys_exit_return`; a pre-empted task that
+/// exits has to be routed to a live task instead, or control would land back in
+/// the middle of a C frame belonging to someone else.
+pub var preempted_from: i32 = -1;
+
+/// Resume `next` through `frame`, switching away from whatever is running now.
+/// Called from interrupt context; it does not return to the old task.
+pub fn switchToTaskInFrame(frame: *isr.InterruptFrame, next: usize) void {
+    const cur_signed = current_task;
+    if (cur_signed >= 0 and @as(usize, @intCast(cur_signed)) != next) {
+        const cur: usize = @intCast(cur_signed);
+        // Only a task that is still mid-flight becomes the resume target for
+        // whatever it pre-empts out of.
+        if (cur < task_count and tasks[cur].state == .running) preempted_from = cur_signed;
+    }
+    const t = &tasks[next];
+    t.state = .running;
+    current_task = @intCast(next);
+    slice_used = 0;
+    activateTask(t);
+    loadStateIntoFrame(frame, t);
+}
+
+/// Where a task that is exiting should hand the CPU. Prefers the parent (so
+/// waitpid-style loops resume), then the task we were pre-empted out of, then
+/// -1 meaning "return to the C caller".
+///
+/// `exiting` is excluded from every candidate: a preempted task is recorded in
+/// `preempted_from`, and without this check a pre-empted task with no parent
+/// would redirect to *itself*, resurrecting a task that already returned from
+/// exit() - which loops forever instead of completing.
+pub fn redirectTargetFor(t: *task.Task, exiting: usize) i32 {
+    if (t.parent_id >= 0 and @as(usize, @intCast(t.parent_id)) < task_count and
+        @as(usize, @intCast(t.parent_id)) != exiting and
+        scheduler_taskAlive(@intCast(t.parent_id))) return t.parent_id;
+    if (preempted_from >= 0 and @as(usize, @intCast(preempted_from)) < task_count and
+        @as(usize, @intCast(preempted_from)) != exiting and
+        tasks[@intCast(preempted_from)].state == .running) return preempted_from;
+    return -1;
+}
+
+fn scheduler_taskAlive(idx: i32) bool {
+    if (idx < 0) return false;
+    const i: usize = @intCast(idx);
+    if (i >= task_count) return false;
+    return tasks[i].state == .ready or tasks[i].state == .running;
+}
+
+/// Tick hook. Returns true when the caller must let the ISR's `iretq` perform
+/// the switch, i.e. the frame now describes a different task.
+pub fn onTick(frame: *isr.InterruptFrame) bool {
+    const cur_signed = current_task;
+    if (cur_signed < 0) return false;
+    const cur: usize = @intCast(cur_signed);
+    if (cur >= task_count) return false;
+
+    const preemptible = tasks[cur].state == .running and tasks[cur].task_type == .user and
+        tasks[cur].address_space != null;
+    if (!preemptible) return false;
+    // Only switch away from ring 3: a kernel-mode context has no iretq frame
+    // to rewrite and must run to its next blocking point.
+    if ((frame.cs & 3) != 3) return false;
+
+    const next = pickNextUserTask(cur) orelse return false;
+
+    saveFrameToState(frame, &tasks[cur]);
+    tasks[cur].state = .ready;
+
+    switchToTaskInFrame(frame, next);
+    preemptions += 1;
+    return true;
+}
+
+/// Ticks the current task has consumed in its current slice.
+pub var slice_used: u64 = 0;
+pub var preemptions: u64 = 0;
+/// Set by process.exitCurrent when a task with a parent exits. The interrupt
+/// handler consumes it as its last action: rewrite the frame for that parent so
+/// the pending `iretq` resumes it, and drop whatever the dying task was about to
+/// return.
+pub var exit_redirect: i32 = -1;
+
+/// Perform a pending exit redirect, if any. Returns true when the frame has been
+/// repurposed and the caller must return immediately without touching it again.
+pub fn applyExitRedirect(frame: *isr.InterruptFrame) bool {
+    const target = exit_redirect;
+    if (target < 0) return false;
+    exit_redirect = -1;
+    const idx: usize = @intCast(target);
+    if (idx >= task_count or tasks[idx].state == .finished) return false;
+    switchToTaskInFrame(frame, idx);
+    return true;
+}
+/// Mark that a task gave up the CPU without exiting (end of its slice).
+pub fn yieldCurrent() void {
+    const cur_signed = current_task;
+    if (cur_signed < 0) return;
+    const cur: usize = @intCast(cur_signed);
+    if (cur < task_count and tasks[cur].state == .running) tasks[cur].state = .ready;
+}
+
+/// Interrupt-context work. Deliberately does *only* the preemption decision,
+/// which is bounded and cannot block.
+///
+/// USB/HID/net polling used to live here and had to move out: a poll that
+/// spins on a hardware status bit inside an ISR deadlocks the machine, because
+/// the very tick that would release it cannot arrive while IF is clear.
+pub fn scheduleTick(frame: ?*isr.InterruptFrame) void {
     tick_count += 1;
-    // Poll USB input devices periodically
+
+    if (frame) |f| {
+        const cur_signed = current_task;
+        if (cur_signed >= 0) {
+            const cur: usize = @intCast(cur_signed);
+            if (cur < task_count and tasks[cur].state == .running) {
+                slice_used += 1;
+                if (slice_used >= tasks[cur].time_slice) {
+                    _ = onTick(f);
+                }
+            }
+        }
+    }
+}
+
+/// Polling that may block, so it must run from a context that can wait (the
+/// shell loop and between scheduled tasks) - never from the tick handler.
+pub fn pollDeferred() void {
     @import("../drivers/usb.zig").poll();
-    // Poll USB HID devices (keyboards/tablets) at the tick rate.
     @import("../drivers/usb.zig").pollHid();
-    // Call net tick every 100 ticks (~1 second at 100Hz)
     if (tick_count % 100 == 0) {
         @import("../net/mod.zig").tick();
     }

@@ -40,12 +40,31 @@ pub fn build(b: *std.Build) void {
     user_exe.entry = .{ .symbol_name = "_start" };
     user_exe.image_base = 0x2000000;
 
+    // 2b. Second ring-3 task: a pure user-mode spinner used to prove that the
+    //     scheduler preempts (it never blocks, so only a tick can switch away).
+    const user2_exe = b.addExecutable(.{
+        .name = "user_test2",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/user/test2.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    user2_exe.entry = .{ .symbol_name = "_start" };
+    user2_exe.image_base = 0x2000000;
+
     // 3. Run bin2zig to generate user_test_bin.zig
     const run_bin2zig = b.addRunArtifact(bin2zig);
     run_bin2zig.addArg("-i");
     run_bin2zig.addFileArg(user_exe.getEmittedBin());
     run_bin2zig.addArg("-o");
     const out_file = run_bin2zig.addOutputFileArg("user_test_bin.zig");
+
+    const run_bin2zig2 = b.addRunArtifact(bin2zig);
+    run_bin2zig2.addArg("-i");
+    run_bin2zig2.addFileArg(user2_exe.getEmittedBin());
+    run_bin2zig2.addArg("-o");
+    const out_file2 = run_bin2zig2.addOutputFileArg("user_test2_bin.zig");
 
     // 3b. Build the AP trampoline blob (assemble + link at 0x8000, raw binary),
     //     then embed it as a Zig byte array via bin2zig.
@@ -99,6 +118,9 @@ pub fn build(b: *std.Build) void {
     // Add generated binary array as a module import
     exe.root_module.addAnonymousImport("user_test_bin", .{
         .root_source_file = out_file,
+    });
+    exe.root_module.addAnonymousImport("user_test2_bin", .{
+        .root_source_file = out_file2,
     });
     exe.root_module.addAnonymousImport("ap_tramp_bin", .{
         .root_source_file = tramp_out,

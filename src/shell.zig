@@ -119,8 +119,9 @@ pub fn run() void {
     root.serial.serialWrite("[SHELL] run: keyboard ready\n");
 
     // Storage, USB, partitions, filesystems, and the logger are initialized
-    // once by the kernel boot path before the shell is entered.
-    root.scheduler_ready = true;
+    // once by the kernel boot path before the shell is entered. The tick
+    // (scheduler_ready) is enabled in main.zig before runAll(), so a task is
+    // already preemptible by the time it gets here.
 
     vga.clear();
     printBanner();
@@ -1153,6 +1154,11 @@ fn readLineEnhanced(buf: []u8, max_len: usize) usize {
     history_pos = -1;
     while (pos < max_len) {
         klog.service();
+        // USB/HID/net polling used to run from the timer tick. It cannot: a
+        // poll that spins on a hardware bit inside an ISR deadlocks the box,
+        // because the tick that would release it needs interrupts on. The
+        // shell loop is the right place - it is a normal, blocking context.
+        root.scheduler.pollDeferred();
         // Keyboard first, serial console second: the latter lets tests and
         // remote users drive the shell through QEMU -serial stdio.
         const ch = kb.pollKey() orelse serialPollKey() orelse {

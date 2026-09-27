@@ -141,6 +141,10 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     vga.write("[BOOT] SMP init done\n");
 
     vga.write("[BOOT] Starting scheduler...\n");
+    // The tick has to be live *before* the first task runs: scheduleTick is
+    // what polls USB and what preempts a task whose slice expired. Leaving this
+    // to shell.run() meant no preemption (and no USB polling) during runAll().
+    scheduler_ready = true;
     scheduler.runAll();
     serial.serialWrite("[BOOT] Scheduler completed\n");
 
