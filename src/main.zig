@@ -105,28 +105,18 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     vga.write("[BOOT] Kernel modules initialized\n");
     serial.serialWrite("[BOOT] Kernel init done\n");
 
-    vga.write("[BOOT] Initializing network...\n");
-    pci.scan();
-    var net_dev_idx: usize = 0;
-    while (net_dev_idx < pci.device_count) : (net_dev_idx += 1) {
-        const dev = &pci.devices[net_dev_idx];
-        if (dev.class == 0x02 and (dev.subclass == 0x00 or dev.subclass == 0x80)) {
-            if (@import("drivers/e1000.zig").init(dev) or @import("drivers/rtl8169.zig").init(dev)) {
-                break;
-            }
-        }
-    }
-    @import("net/mod.zig").init();
-    serial.serialWrite("[BOOT] Network init done\n");
-
     // Bring up all block-device providers before scanning partitions.  This
     // is the single hardware-initialization pass; the shell no longer repeats
     // PCI/storage discovery during boot.
+    //
+    // Storage deliberately comes BEFORE the network: it is what brings up
+    // klog, and the persistent log is the only evidence that survives a crash
+    // later in boot.  With the network first, a fault in storage/USB left no
+    // trace at all on real hardware.
     vga.write("[BOOT] Initializing storage and input...\n");
     @import("drivers/virtio_blk.zig").init();
     _ = @import("drivers/ahci.zig").init();
     @import("drivers/usb.zig").init();
-    @import("net/mod.zig").refreshUsbNic();
     @import("fs/partition.zig").scanAll();
     @import("fs/fat16.zig").init();
     const fat32 = @import("fs/fat32.zig");
@@ -139,6 +129,22 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     } else {
         _ = klog.init("");
     }
+    serial.serialWrite("[BOOT] Kernel log enabled\n");
+
+    vga.write("[BOOT] Initializing network...\n");
+    pci.scan();
+    var net_dev_idx: usize = 0;
+    while (net_dev_idx < pci.device_count) : (net_dev_idx += 1) {
+        const dev = &pci.devices[net_dev_idx];
+        if (dev.class == 0x02 and (dev.subclass == 0x00 or dev.subclass == 0x80)) {
+            if (@import("drivers/e1000.zig").init(dev) or @import("drivers/rtl8169.zig").init(dev)) {
+                break;
+            }
+        }
+    }
+    @import("net/mod.zig").init();
+    @import("net/mod.zig").refreshUsbNic();
+    serial.serialWrite("[BOOT] Network init done\n");
     const usb_state = @import("drivers/usb.zig");
     serial.serialWrite("[USB] post-init summary: controllers=");
     serial.serialWriteDec(usb_state.getControllerCount());
