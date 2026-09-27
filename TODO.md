@@ -148,6 +148,18 @@
       displayed, so a firmware/GRUB fallback to `text` looks like a black screen.
 - [x] 16bpp RGB565 LFB support (GRUB lands on 16bpp when no 32bpp mode exists; without it
       the machine gets no framebuffer at all)
+- [x] NX for kernel/RAM pages, and no `PAGE_USER` on the inherited identity map
+- [ ] W^X for user segments: with NXE on, ELF/PE data segments are still executable because the
+      loaders map every segment with the same flags. Honour `PF_X` (omit `PAGE_NX` only for
+      executable segments) now that `entry.S` enables NXE.
+- [ ] Per-interrupt kernel stack (IST in the IDT, or an explicit RSP swap in the ISR stubs).
+      Preemption can today only rewrite an `InterruptFrame` taken from ring 3, so a tick arriving
+      while a syscall holds IF=0 cannot switch tasks and a task in `sleep` keeps the CPU. This
+      is also what would make it safe to re-enable interrupts inside a syscall instead of the
+      bounded spin in `fdtable.IDLE_SPIN_LIMIT`.
+- [ ] Let APs run tasks: the run queue, `current_task` and the tick bookkeeping are BSP-only, and
+      `syscall_kernel_rsp` is a single global, so it is wrong the moment a second CPU takes a
+      syscall.
 - [ ] Honor the framebuffer channel layout (MBI offsets 110-115). `lfbPut`/`lfbGet` and the
       32bpp `flush()` fast path still assume BGRX, so a UEFI GOP `RGBA8`/`BLT_ONLY` mode
       (R@0) renders with red and blue swapped.

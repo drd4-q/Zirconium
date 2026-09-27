@@ -10,6 +10,15 @@
 .set PAGE_PRESENT, 1 << 0
 .set PAGE_WRITE,   1 << 1
 .set PAGE_SIZE,    1 << 7
+// PTE bit 63 is NX.  A 64-bit page-table entry is written here as two 32-bit
+// halves, so in the high dword NX is bit 31.
+.set PAGE_NX_HI,   1 << 31
+
+// The kernel is linked at 1M (see linker.ld) and is a few MB.  NX applies to
+// ring 0 as well, so this many 2MB pages at the bottom of the identity map are
+// kept executable: 3 pages = 6MB, which covers the image, its page tables and
+// the low memory the loaders use.
+.set EXEC_PD_ENTRIES, 3
 
 .section .multiboot, "a", @progbits
     .align 4
@@ -99,9 +108,14 @@ _start:
     decl %ecx
     jnz .setup_pdpt
 
-    // Fill the 64 Page Directories with 2MB huge pages (512 * 64 = 32768 entries = 64 GB)
+    // Fill the 64 Page Directories with 2MB huge pages (512 * 64 = 32768 entries = 64 GB).
+    // The high dword carries NX: with EFER.NXE enabled this makes the whole
+    // identity map - kernel image, RAM, page tables - non-executable, so a
+    // ring-3 task cannot jump into kernel code even though it can still read
+    // the address range.  User pages are mapped separately by the ELF/PE loaders
+    // and are left executable.
     movl $(PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE), %eax
-    xorl %edx, %edx
+    movl $PAGE_NX_HI, %edx
     movl $(512 * 64), %ecx
     leal pd_table_0, %edi
 .fill_pds:
@@ -113,6 +127,24 @@ _start:
     decl %ecx
     jnz .fill_pds
 
+    // NX is *not* privilege-dependent: an instruction fetch from an NX page
+    // faults in ring 0 too.  The kernel image is linked at 1M and lives in the
+    // identity map, so the first EXEC_MB megabytes must stay executable; only
+    // everything above that is marked non-executable.  User programs are mapped
+    // explicitly by the loaders and are unaffected either way.
+    //
+    // Loop the first EXEC_PD_ENTRIES 2MB entries of PD0 and clear NX there.
+    movl $EXEC_PD_ENTRIES, %ecx
+    leal pd_table_0, %edi
+    xorl %edx, %edx                 // edx = 0 -> clears bit 63 (NX)
+.clear_exec_nx:
+    movl (%edi), %eax               // keep the physical address, drop NX
+    movl %eax, (%edi)
+    movl %edx, 4(%edi)
+    addl $8, %edi
+    decl %ecx
+    jnz .clear_exec_nx
+
     leal pml4_table, %eax
     movl %eax, %cr3
 
@@ -120,9 +152,12 @@ _start:
     orl $((1 << 5) | (1 << 9) | (1 << 10)), %eax
     movl %eax, %cr4
 
+    // EFER: LME (bit 8) enables long mode, NXE (bit 11) makes PTE bit 63
+    // meaningful.  Without NXE the NX bits in the identity map are ignored and
+    // every page stays executable.
     movl $0xC0000080, %ecx
     rdmsr
-    orl $(1 << 8), %eax
+    orl $((1 << 8) | (1 << 11)), %eax
     wrmsr
 
     movl %cr0, %eax

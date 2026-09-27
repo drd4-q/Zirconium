@@ -43,15 +43,22 @@ pub const AddressSpace = struct {
                 return null;
             };
             @memset(@as([*]u8, @ptrFromInt(new_pdpt_phys))[0..4096], 0);
-            new_pml4[0] = (new_pdpt_phys & vmm.PAGE_ADDR_MASK) | vmm.PAGE_PRESENT | vmm.PAGE_WRITE | vmm.PAGE_USER;
+            // The task's PDPT is a *table*, not a mapping: the entries below
+            // decide what is accessible.  It deliberately stays supervisor-only
+            // (no PAGE_USER) so a user task cannot reach it.
+            new_pml4[0] = (new_pdpt_phys & vmm.PAGE_ADDR_MASK) | vmm.PAGE_PRESENT | vmm.PAGE_WRITE;
             const new_pdpt: [*]u64 = @ptrFromInt(new_pdpt_phys);
 
-            // Copy PDPT entries 1-511 from kernel: covers 1GB-512GB (including LAPIC
-            // at 0xFEE00000 and all physical identity-mapped RAM up to 8GB+).
+            // Copy PDPT entries 1-511 from the kernel: covers 1GB-512GB (LAPIC at
+            // 0xFEE00000, RAM, MMIO).  Copied *verbatim* - no PAGE_USER.  The
+            // old code ORed PAGE_USER in, which handed every task the entire
+            // low 64 GB as read/write user memory: kernel image, page tables,
+            // everything.  The user address space gets its own explicit mappings
+            // (ELF/PE segments, user stack, mmap arena) through mapUserPage().
             var j: u16 = 1;
             while (j < 512) : (j += 1) {
                 if (kernel_pdpt[j] & vmm.PAGE_PRESENT != 0) {
-                    new_pdpt[j] = kernel_pdpt[j] | vmm.PAGE_USER;
+                    new_pdpt[j] = kernel_pdpt[j];
                 }
             }
 
@@ -71,7 +78,13 @@ pub const AddressSpace = struct {
                 // Copy all PD0 entries from kernel (2MB identity-mapped pages)
                 @memcpy(@as([*]u8, @ptrFromInt(new_pd0_phys))[0..4096],
                         @as([*]u8, @ptrFromInt(kernel_pd0_phys))[0..4096]);
-                new_pdpt[0] = (new_pd0_phys & vmm.PAGE_ADDR_MASK) | vmm.PAGE_PRESENT | vmm.PAGE_WRITE | vmm.PAGE_USER;
+                // PDPT[0] covers 0-1GB, where the user ELF/PE image is loaded
+                // (0x0200_0000).  A private copy of the kernel's PD0 is needed
+                // so the loader can split huge pages without touching the
+                // kernel's own tables.  The entries inside stay supervisor (the
+                // loader flags the pages it maps with PAGE_USER), so the
+                // identity map is not handed to ring 3 wholesale.
+                new_pdpt[0] = (new_pd0_phys & vmm.PAGE_ADDR_MASK) | vmm.PAGE_PRESENT | vmm.PAGE_WRITE;
                 _ = kernel_pd0; // suppress unused warning
             }
         }

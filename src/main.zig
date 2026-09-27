@@ -60,6 +60,15 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
 
     system_init.init(magic, mbi_ptr);
     serial.serialWrite("[BOOT] System init done\n");
+    {
+        // NXE (EFER bit 11) makes PTE bit 63 meaningful. entry.S sets it and
+        // marks the identity map non-executable above the kernel image, so a
+        // ring-3 task cannot execute kernel or RAM pages.
+        const efer = @import("arch/msr.zig").read(0xC0000080);
+        serial.serialWrite("[BOOT] EFER NXE=");
+        serial.serialWrite(if (efer & (1 << 11) != 0) "on" else "OFF");
+        serial.serialWrite("\n");
+    }
 
     // Enable the `syscall` instruction: Linux binaries enter the kernel that
     // way, not through INT 0x80.

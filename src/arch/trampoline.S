@@ -52,10 +52,13 @@ trampoline_pm32:
     movl (%eax), %eax
     movl %eax, %cr3
 
-    # LME = 1 (long mode enable)
+    # EFER: LME (bit 8) + NXE (bit 11), same as entry.S.  Without NXE a
+    # secondary CPU would treat PTE bit 63 as a reserved bit and execute
+    # kernel pages fine, so APs would disagree with the BSP about what is
+    # executable.
     movl $0xC0000080, %ecx
     rdmsr
-    orl  $(1 << 8), %eax
+    orl  $((1 << 8) | (1 << 11)), %eax
     wrmsr
 
     # Enable paging: PG=1 | PE=1

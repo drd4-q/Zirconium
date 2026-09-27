@@ -193,8 +193,10 @@ fn mapSegment(
 
     var flags: u64 = vmm.PAGE_USER;
     if (ph.p_flags & PF_W != 0) flags |= vmm.PAGE_WRITE;
-    // Everything stays executable: we do not set PAGE_NX because the kernel
-    // never enabled EFER.NXE, and setting bit 63 without it faults.
+    // User segments are executable: EFER.NXE is now on and the kernel's identity
+    // map carries NX, but these pages are mapped explicitly and deliberately get
+    // no PAGE_NX.  Data segments are still executable too - a W^X split needs
+    // PF_X to be honoured per segment, which is follow-up work.
 
     var vaddr = page_start;
     while (vaddr < page_end) : (vaddr += 0x1000) {
