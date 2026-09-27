@@ -314,7 +314,12 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
 
     active = true;
     clearMirror();
-    probeLfb(serial);
+    // The LFB probe is deliberately NOT run here: initFromMultiboot runs
+    // before the IDT is installed (main.zig calls vga.initFb ahead of
+    // system_init), so touching a framebuffer the firmware reported but did not
+    // actually map would be an unhandled page fault -> triple fault ->
+    // immediate reboot, with nothing in the log. It is called from
+    // probeLfbSafe() once exceptions can be reported.
 
     serial.serialWrite("[FB] pitch=");
     serial.serialWriteDec(fb_pitch);
@@ -331,13 +336,21 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
     serial.serialWrite("\n");
 }
 
-/// Touch every page of the reported LFB and read one pixel back, before
-/// anything else draws.  A bootloader can hand out an address that is not
-/// identity-mapped or not backed at all, and the failure mode is a silent
-/// triple fault with a black screen - this turns that into one serial line.
-/// Runs before the shell, so it lands in the persistent kernel log even when
-/// the display is unusable.
-fn probeLfb(serial: @TypeOf(@import("serial.zig"))) void {
+/// Verify the reported LFB is actually backed before anything draws to it.
+///
+/// A firmware can report a mode whose LFB lives outside the identity map, or
+/// with a pitch that walks off the end of it. Touching that memory with no IDT
+/// installed is a triple fault: the machine reboots and *nothing* reaches the
+/// log, which is exactly the "forced mode reboots, keep hangs" signature seen
+/// on real hardware. So this refuses anything it cannot vouch for and is called
+/// from main.zig only after system_init has installed the IDT - a fault here is
+/// then a reportable exception, not a silent reboot.
+pub fn probeLfbSafe() void {
+    const serial = @import("serial.zig");
+    if (!active) {
+        serial.serialWrite("[FB] probe SKIP: no framebuffer\n");
+        return;
+    }
     const total = @as(u64, fb_pitch) * fb_height;
     if (fb_pitch == 0 or fb_pitch > fb_width * fb_bytes_pp) {
         serial.serialWrite("[FB] probe SKIP: implausible pitch ");
@@ -347,6 +360,21 @@ fn probeLfb(serial: @TypeOf(@import("serial.zig"))) void {
         serial.serialWrite("\n");
         return;
     }
+    // entry.S identity-maps the first 64 GB, so anything inside that window is
+    // safe to touch without help from mapFbRange (which cannot map above it).
+    if (fb_addr + total > MAX_IDENTITY_MAP_BYTES) {
+        serial.serialWrite("[FB] probe SKIP: LFB at 0x");
+        serial.serialWriteHex(@truncate(fb_addr));
+        serial.serialWrite(" is outside the 64 GB identity map\n");
+        return;
+    }
+    probeLfb(serial);
+}
+
+/// Touch every page of the reported LFB and read one pixel back. Callers must
+/// have verified the range is mapped and installed the IDT first.
+fn probeLfb(serial: @TypeOf(@import("serial.zig"))) void {
+    const total = @as(u64, fb_pitch) * fb_height;
     const step: u64 = 4096;
     var off: u64 = 0;
     while (off < total) : (off += step) {

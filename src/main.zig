@@ -9,6 +9,7 @@ pub const pmm = @import("kernel/pmm.zig");
 pub const vmm = @import("kernel/vmm.zig");
 pub const kalloc = @import("kernel/kalloc.zig");
 pub const tty = @import("system/tty.zig");
+const vga_fb = @import("system/framebuffer.zig");
 const kernel_init = @import("kernel/init.zig");
 const gdt = @import("arch/gdt.zig");
 const klog = @import("system/kernel_log.zig");
@@ -60,6 +61,10 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
 
     system_init.init(magic, mbi_ptr);
     serial.serialWrite("[BOOT] System init done\n");
+    // Only now is the IDT live: a framebuffer the firmware reported but did not
+    // back would fault here as a *reportable* exception instead of a triple
+    // fault reboot with an empty log.
+    vga_fb.probeLfbSafe();
     {
         // NXE (EFER bit 11) makes PTE bit 63 meaningful. entry.S sets it and
         // marks the identity map non-executable above the kernel image, so a
