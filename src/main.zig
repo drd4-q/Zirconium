@@ -114,6 +114,10 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     // later in boot.  With the network first, a fault in storage/USB left no
     // trace at all on real hardware.
     vga.write("[BOOT] Initializing storage and input...\n");
+    // The bus must be enumerated before any driver looks for its device:
+    // virtio_blk/ahci/usb all resolve through pci.findDevice(), which only sees
+    // what the last scan filled in.
+    pci.scan();
     @import("drivers/virtio_blk.zig").init();
     _ = @import("drivers/ahci.zig").init();
     @import("drivers/usb.zig").init();
@@ -132,7 +136,6 @@ export fn kernel_entry(magic: u32, mbi_ptr: u32) callconv(.c) noreturn {
     serial.serialWrite("[BOOT] Kernel log enabled\n");
 
     vga.write("[BOOT] Initializing network...\n");
-    pci.scan();
     var net_dev_idx: usize = 0;
     while (net_dev_idx < pci.device_count) : (net_dev_idx += 1) {
         const dev = &pci.devices[net_dev_idx];
