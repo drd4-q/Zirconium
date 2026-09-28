@@ -92,6 +92,13 @@ fn allocShadow(pixels: u64) bool {
     const bytes = (pixels * 4 + 4095) & ~@as(u64, 4095);
     const pages = @as(usize, @intCast(bytes / 4096));
     const phys = root.pmm.allocPages(pages) orelse return false;
+    // Release the previous PMM allocation.  Not doing so leaks the whole buffer
+    // on every `resolution` change that needs a bigger one, which on real
+    // hardware is several megabytes per attempt.
+    if (shadow_pixels != 0 and !using_early_shadow) {
+        const old_pages = (shadow_pixels * 4 + 4095) / 4096;
+        root.pmm.freePages(@intFromPtr(shadow), old_pages);
+    }
     shadow = @ptrFromInt(phys);
     shadow_pixels = @intCast(pixels);
     shadow_stride_px = fb_width;
@@ -121,10 +128,11 @@ fn ensureShadow() bool {
 
     if (shadow_stride_px == fb_width and needed <= shadow_pixels) return true;
 
-    // The viewport changed. Re-stride in place when the existing allocation is
-    // still large enough, otherwise get a bigger one from the PMM.  Keeping the
-    // old buffer on PMM failure is safe: every write is bounded by
-    // fb_width/fb_height, so a stale stride is never indexed out of range.
+    // The viewport changed.  Re-stride in place when the existing allocation is
+    // still large enough, otherwise get a bigger one from the PMM.  On PMM
+    // failure this returns false with the OLD, smaller buffer still installed,
+    // which is only safe because every caller gates its indexing on this
+    // function's return value - there is no "bounded by fb_width" guarantee here.
     if (needed <= shadow_pixels) {
         shadow_stride_px = fb_width;
         @memset(shadow[0..@intCast(needed)], 0);
@@ -733,9 +741,15 @@ pub fn clear() void {
             var x: u32 = 0;
             while (x < fb_width) : (x += 1) row[x] = bg16;
         }
+        // Nothing was written through the shadow, so a dirty rect left over from
+        // before this resize must not be flushed against a stale stride.
+        has_dirty = false;
     } else if (fb_bytes_pp == 4) {
-        // 32bpp: one u64 covers two BGRX pixels.
-        const bg_val64: u64 = (@as(u64, bg_col) << 32) | bg_col;
+        // 32bpp: one u64 covers two pixels.  The shadow stores 0x00RRGGBB, which
+        // is B,G,R,X in memory unless the mode reported red at byte 0 - the same
+        // byte swap flush() applies, so both paths agree.
+        const bg32: u32 = if (fb_red_first) (bg_col >> 16) | (bg_col << 16) else bg_col;
+        const bg_val64: u64 = (@as(u64, bg32) << 32) | bg32;
         var y: u32 = 0;
         while (y < fb_height) : (y += 1) {
             const row_ptr: [*]volatile u64 = @ptrFromInt(fb_addr + @as(u64, y) * fb_pitch);
@@ -747,21 +761,29 @@ pub fn clear() void {
             // An odd pixel count leaves a 4-byte tail.
             if (fb_width % 2 != 0) {
                 const tail: [*]volatile u32 = @ptrFromInt(fb_addr + @as(u64, y) * fb_pitch + @as(u64, count64) * 8);
-                tail[0] = bg_col;
+                tail[0] = bg32;
             }
         }
+        has_dirty = false;
     } else {
-        // 24bpp: no padding word, so write B,G,R per pixel.
+        // 24bpp: no padding word, so three bytes per pixel in the mode's order.
         var y: u32 = 0;
         while (y < fb_height) : (y += 1) {
             const row: [*]volatile u8 = @ptrFromInt(fb_addr + @as(u64, y) * fb_pitch);
             var x: u32 = 0;
             while (x < fb_width) : (x += 1) {
-                row[x * 3 + 0] = bg_b;
-                row[x * 3 + 1] = bg_g;
-                row[x * 3 + 2] = bg_r;
+                if (fb_red_first) {
+                    row[x * 3 + 0] = bg_r;
+                    row[x * 3 + 1] = bg_g;
+                    row[x * 3 + 2] = bg_b;
+                } else {
+                    row[x * 3 + 0] = bg_b;
+                    row[x * 3 + 1] = bg_g;
+                    row[x * 3 + 2] = bg_r;
+                }
             }
         }
+        has_dirty = false;
     }
     clearMirror();
     cursor_row = 0;
@@ -801,7 +823,10 @@ pub fn putPixel(x: u32, y: u32, r: u8, g: u8, b: u8) void {
 
 pub fn getPixel(x: u32, y: u32) u32 {
     if (x >= fb_width or y >= fb_height) return 0;
-    if (shadow_pixels != 0 and x < fb_width and y < fb_height) {
+    // ensureShadow(), not `shadow_pixels != 0`: after a viewport change the
+    // allocation can still exist while being too small for the new geometry, and
+    // indexing it with the new fb_width would read past the end.
+    if (ensureShadow() and x < fb_width and y < fb_height) {
         return shadow[@as(u64, y) * fb_width + x];
     }
     return lfbGet(x, y);
@@ -823,8 +848,10 @@ pub fn rawPixel(x: u32, y: u32) u32 {
 
 pub fn markDirtyRect(x: u32, y: u32, w: u32, h: u32) void {
     if (w == 0 or h == 0) return;
-    const x1 = x + w;
-    const y1 = y + h;
+    // Saturating: a wrapping x1 would shrink the rect instead of growing it, and
+    // callers derive w/h from this via a subtraction.
+    const x1 = x +| w;
+    const y1 = y +| h;
     if (!has_dirty) {
         dirty_x0 = x;
         dirty_y0 = y;
@@ -856,6 +883,13 @@ pub fn flush() void {
     const y1 = @min(dirty_y1, max_y);
     has_dirty = false;
     if (x0 >= x1 or y0 >= y1) return;
+    // The shadow can be smaller than the current geometry: clear() falls back to
+    // drawing straight to the LFB when the PMM cannot grow the buffer, and rows
+    // are addressed with the *new* fb_width.  Refuse rather than read past the
+    // allocation.
+    if (ensureShadow()) {
+        if (@as(u64, y1) * fb_width > shadow_pixels) return;
+    } else return;
 
     const w = x1 - x0;
     var y: u32 = y0;
@@ -893,8 +927,10 @@ pub fn fillRect(px: u32, py: u32, pw: u32, ph: u32, r: u8, g: u8, b: u8) void {
     if (px >= fb_width or py >= fb_height or pw == 0 or ph == 0) return;
     const x0 = px;
     const y0 = py;
-    const x1 = @min(px + pw, fb_width);
-    const y1 = @min(py + ph, fb_height);
+    // Saturating, not wrapping: `px + pw` overflowing u32 would wrap to a small
+    // value, make x1 < x0, and turn w into a multi-gigabyte write.
+    const x1 = @min(px +| pw, fb_width);
+    const y1 = @min(py +| ph, fb_height);
     const w = x1 - x0;
     const col: u32 = (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b);
 
