@@ -142,6 +142,20 @@ fn ensureShadow() bool {
     return allocShadow(needed);
 }
 
+/// Derive the character grid from the current viewport.
+///
+/// The `@max(1, …)` is not cosmetic.  A viewport shorter than one character cell
+/// (the `resolution` command accepts anything down to 1 pixel) would make `rows`
+/// zero, and every `rows - 1` in the scroll and cursor code is a `usize`
+/// subtraction: it wraps to 2^64-1 and `scrollUp()` then walks the whole BSS
+/// clearing cells.  One character row is the smallest meaningful grid.
+fn recomputeGrid() void {
+    cols = @max(1, fb_width / char_w);
+    rows = @max(1, fb_height / char_h);
+    if (cols > MAX_COLS) cols = MAX_COLS;
+    if (rows > MAX_ROWS) rows = MAX_ROWS;
+}
+
 pub var fb_addr: u64 = 0;
 pub var fb_pitch: u32 = 0;
 pub var fb_width: u32 = 0;
@@ -169,6 +183,15 @@ inline fn lfbOffset(y: u32, x: u32) u64 {
 /// removes the assumption. Defaults to B,G,R,X for the 16bpp and text paths,
 /// which have no channel fields at all.
 var fb_red_first: bool = false;
+
+/// Turn a shadow pixel (0x00RRGGBB) into the 32-bit word the LFB wants, honouring
+/// the mode's byte order.  BGRX is the identity; red-first needs 0x00BBGGRR, which
+/// is a red/blue exchange that leaves green alone - *not* `(c>>16)|(c<<16)`, that
+/// zeroes green and spills it into the reserved byte.
+inline fn packPixel32(rgb: u32) u32 {
+    if (!fb_red_first) return rgb;
+    return ((rgb & 0x0000FF) << 16) | (rgb & 0x0000FF00) | ((rgb >> 16) & 0xFF);
+}
 
 /// Write one RGB pixel straight to the LFB.
 fn lfbPut(x: u32, y: u32, rgb: u32) void {
@@ -514,10 +537,7 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
     const total_fb_bytes = @as(u64, fb_pitch) * fb_height;
     mapFbRange(fb_addr, total_fb_bytes);
 
-    cols = fb_width / char_w;
-    rows = fb_height / char_h;
-    if (cols > MAX_COLS) cols = MAX_COLS;
-    if (rows > MAX_ROWS) rows = MAX_ROWS;
+    recomputeGrid();
 
     active = true;
     clearMirror();
@@ -559,20 +579,35 @@ pub fn probeLfbSafe() void {
         return;
     }
     const total = @as(u64, fb_pitch) * fb_height;
-    if (fb_pitch == 0 or fb_pitch > fb_width * fb_bytes_pp) {
-        serial.serialWrite("[FB] probe SKIP: implausible pitch ");
+    // A pitch LARGER than width*bpp is normal and must be accepted: 24bpp VBE
+    // modes and anything with a scanline pad report one, and rejecting them
+    // silenced this very probe on the hardware it exists to diagnose.  The
+    // dangerous direction is a pitch too SMALL, where lfbOffset walks into the
+    // next scanline and eventually off the end of the aperture.
+    const min_pitch = fb_width * fb_bytes_pp;
+    if (fb_pitch == 0 or fb_pitch < min_pitch) {
+        serial.serialWrite("[FB] probe SKIP: pitch ");
         serial.serialWriteDec(fb_pitch);
-        serial.serialWrite(" for width ");
-        serial.serialWriteDec(fb_width);
-        serial.serialWrite("\n");
+        serial.serialWrite(" is below width*bytes_pp=");
+        serial.serialWriteDec(min_pitch);
+        serial.serialWrite(" (rows would shear and the last row runs off the LFB)\n");
         return;
+    }
+    if (fb_pitch > min_pitch and fb_pitch - min_pitch >= fb_width) {
+        serial.serialWrite("[FB] note: pitch has ");
+        serial.serialWriteDec(fb_pitch - min_pitch);
+        serial.serialWrite(" bytes of padding per scanline\n");
     }
     // entry.S identity-maps the first 64 GB, so anything inside that window is
     // safe to touch without help from mapFbRange (which cannot map above it).
+    // Outside it the buffer is NOT backed, so switch the driver off rather than
+    // leave `active` set: the first vga.write would fault, and this function
+    // exists precisely to stop the machine dying on an unmapped LFB.
     if (fb_addr + total > MAX_IDENTITY_MAP_BYTES) {
         serial.serialWrite("[FB] probe SKIP: LFB at 0x");
         serial.serialWriteHex(@truncate(fb_addr));
-        serial.serialWrite(" is outside the 64 GB identity map\n");
+        serial.serialWrite(" is outside the 64 GB identity map - disabling the driver\n");
+        active = false;
         return;
     }
     probeLfb(serial);
@@ -709,10 +744,7 @@ pub fn setViewport(new_w: u32, new_h: u32) bool {
     fb_height = h;
     viewport_scaled = (w != boot_width or h != boot_height);
 
-    cols = fb_width / char_w;
-    rows = fb_height / char_h;
-    if (cols > MAX_COLS) cols = MAX_COLS;
-    if (rows > MAX_ROWS) rows = MAX_ROWS;
+    recomputeGrid();
     cursor_row = 0;
     cursor_col = 0;
     clear();
@@ -745,10 +777,9 @@ pub fn clear() void {
         // before this resize must not be flushed against a stale stride.
         has_dirty = false;
     } else if (fb_bytes_pp == 4) {
-        // 32bpp: one u64 covers two pixels.  The shadow stores 0x00RRGGBB, which
-        // is B,G,R,X in memory unless the mode reported red at byte 0 - the same
-        // byte swap flush() applies, so both paths agree.
-        const bg32: u32 = if (fb_red_first) (bg_col >> 16) | (bg_col << 16) else bg_col;
+        // 32bpp: one u64 covers two pixels, packed through the shared helper so
+        // this path and flush() can never disagree about byte order.
+        const bg32: u32 = packPixel32(bg_col);
         const bg_val64: u64 = (@as(u64, bg32) << 32) | bg32;
         var y: u32 = 0;
         while (y < fb_height) : (y += 1) {
@@ -899,14 +930,9 @@ pub fn flush() void {
         if (fb_bytes_pp == 4) {
             const dst: [*]volatile u32 = @ptrFromInt(fb_addr + @as(u64, y) * fb_pitch + @as(u64, x0) * 4);
             if (fb_red_first) {
-                // The shadow holds 0x00RRGGBB, which lands in memory as B,G,R,X.
-                // A mode reporting red at byte 0 needs the other order, so swap
-                // here too - the fast path used to hardcode BGRX and render a
-                // red-first mode with red and blue exchanged.
                 var x: u32 = 0;
                 while (x < w) : (x += 1) {
-                    const c = src[x];
-                    dst[x] = (c >> 16) | (c << 16);
+                    dst[x] = packPixel32(src[x]);
                 }
             } else {
                 var x: u32 = 0;
@@ -951,13 +977,13 @@ pub fn fillRect(px: u32, py: u32, pw: u32, ph: u32, r: u8, g: u8, b: u8) void {
     while (y < y1) : (y += 1) {
         if (fb_bytes_pp == 4) {
             const offset = @as(u64, y) * fb_pitch + @as(u64, x0) * 4;
-            const ptr: [*]volatile u8 = @ptrFromInt(fb_addr + offset);
+            const ptr: [*]volatile u32 = @ptrFromInt(fb_addr + offset);
+            // packPixel32 keeps this in step with lfbPut and flush() instead of
+            // hardcoding B,G,R,X, which was the only 32bpp writer that ignored the
+            // mode's channel order.
             var x: u32 = 0;
             while (x < w) : (x += 1) {
-                ptr[x * 4] = b;
-                ptr[x * 4 + 1] = g;
-                ptr[x * 4 + 2] = r;
-                ptr[x * 4 + 3] = 0;
+                ptr[x] = packPixel32(col);
             }
         } else {
             var x: u32 = 0;
@@ -1388,12 +1414,18 @@ fn renderScrollView() void {
         if (i < 32) indicator_buf[i] = ch;
     }
     const ind_len = indicator.len;
-    var ix: usize = 0;
-    while (ix < ind_len and ix < cols) : (ix += 1) {
-        if (rows > 0) {
-            const r = rows - 1;
-            screen_mirror[r][cols - 1 - (ind_len - 1 - ix)] = makeEntry(indicator_buf[ix]);
-            drawCharAt(cols - 1 - (ind_len - 1 - ix), r, indicator_buf[ix]);
+    // The column index is cols-1-(ind_len-1-ix) == cols-ind_len+ix, so the
+    // indicator only fits when the grid is at least ind_len wide.  Bounding the
+    // loop by `ix < cols` instead let the subtraction underflow for a narrow
+    // viewport and clobber cells *before* the intended row - the one mirror write
+    // in this file with no bounds guard (drawCharAt on the next line has one).
+    if (rows > 0 and ind_len > 0 and cols >= ind_len) {
+        const r = rows - 1;
+        var ix: usize = 0;
+        while (ix < ind_len) : (ix += 1) {
+            const c = cols - ind_len + ix;
+            screen_mirror[r][c] = makeEntry(indicator_buf[ix]);
+            drawCharAt(c, r, indicator_buf[ix]);
         }
     }
     flush();
