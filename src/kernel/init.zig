@@ -28,7 +28,7 @@ pub fn init() void {
     _ = scheduler.addKernelTask(&idleTask);
     _ = scheduler.addKernelTask(&helloTask);
 
-    if (@import("build_options").selftest) {
+    if (@import("config").features.selftest) {
         // Registered FIRST on purpose: test2 spends all its time in user code,
         // so a tick lands in ring 3 and has to switch to the selftest task.
         // Interleaved output in the log is the proof that preemption works.

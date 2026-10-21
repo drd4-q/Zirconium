@@ -12,7 +12,9 @@ const BlockHeader = struct {
     next: ?*BlockHeader,
 };
 
-const HEAP_INITIAL_PAGES: usize = 32; // 128 KB initial heap
+// The initial heap size comes from the declarative configuration
+// (`heap.kernel_kb` in config/kernel.json).
+const HEAP_INITIAL_PAGES: usize = @import("config").heap_kernel_bytes / 4096;
 const MIN_BLOCK_SIZE: usize = 16; // minimum allocation (header size rounded up)
 
 var heap_start: ?[*]u8 = null;

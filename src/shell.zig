@@ -1,11 +1,36 @@
 const std = @import("std");
 const root = @import("root");
+const config = @import("config");
 const vga = root.vga;
 const kb = @import("drivers/keyboard.zig");
 const mouse = @import("drivers/mouse.zig");
 const net = @import("net/mod.zig");
 const vga_fb = @import("system/framebuffer.zig");
-const gui = @import("system/gui.zig");
+
+// Optional subsystems are wrapped in a comptime-selected struct: when the
+// feature is off the branch that holds the @import is never analysed, so the
+// module is not linked into the kernel at all.  The `gui` feature covers the
+// window manager and the dillo browser, which is most of the framebuffer
+// code.
+const gui = if (config.features.gui) struct {
+    const mod = @import("system/gui.zig");
+    pub fn run() void {
+        mod.run();
+    }
+} else struct {
+    pub fn run() void {}
+};
+
+const dillo = if (config.features.gui) struct {
+    const mod = @import("programs/dillo.zig");
+    pub fn run(args: []const u8) void {
+        mod.run(args);
+    }
+} else struct {
+    pub fn run(args: []const u8) void {
+        _ = args;
+    }
+};
 
 const info = @import("programs/info.zig");
 const calc = @import("programs/calc.zig");
@@ -18,7 +43,14 @@ const sysinfo = @import("programs/sysinfo.zig");
 const mem_mod = @import("programs/mem.zig");
 const fib = @import("programs/fib.zig");
 const matrix = @import("programs/matrix.zig");
-const lua_prog = @import("programs/lua.zig");
+const lua_prog = if (config.features.lua) struct {
+    const mod = @import("programs/lua.zig");
+    pub fn run() void {
+        mod.run();
+    }
+} else struct {
+    pub fn run() void {}
+};
 const arp_cache = @import("net/arp_cache.zig");
 const dhcp_mod = @import("net/dhcp.zig");
 const dns_mod = @import("net/dns.zig");
@@ -31,7 +63,6 @@ const acpi = @import("arch/acpi.zig");
 const usb_prog = @import("programs/usb.zig");
 const usb_drv = @import("drivers/usb.zig");
 const klog = @import("system/kernel_log.zig");
-const dillo_prog = @import("programs/dillo.zig");
 
 const HISTORY_SIZE: usize = 16;
 const CMD_MAX: usize = 128;
@@ -50,7 +81,21 @@ const timer = @import("drivers/timer.zig");
 const CmdEntry = struct {
     name: []const u8,
     run: *const fn (args: []const u8) void,
+    /// The feature this command needs.  A command whose feature is off is
+    /// hidden from the help text and from tab completion, and says so if it
+    /// is typed anyway.
+    feature: ?config.Feature = null,
 };
+
+/// Is a command available in this build?
+///
+/// A command whose feature is switched off is not offered for tab completion
+/// and is not listed in the help text; typing it anyway reaches the handler,
+/// which says the feature is not built in.
+fn commandEnabled(entry: CmdEntry) bool {
+    const feature = entry.feature orelse return true;
+    return config.featureEnabled(feature);
+}
 
 const command_table = [_]CmdEntry{
     .{ .name = "help",       .run = printHelp },
@@ -67,15 +112,15 @@ const command_table = [_]CmdEntry{
     .{ .name = "clock",      .run = runClock },
     .{ .name = "fib",        .run = runFib },
     .{ .name = "matrix",     .run = cmdMatrix },
-    .{ .name = "lua",        .run = cmdLua },
+    .{ .name = "lua",        .run = cmdLua,     .feature = .lua },
     .{ .name = "user",       .run = cmdUser },
     .{ .name = "exec",       .run = cmdExec },
     .{ .name = "save",       .run = cmdSave },
-    .{ .name = "ping",       .run = ping_mod.run },
-    .{ .name = "net",        .run = runNet },
-    .{ .name = "get",        .run = web.run },
-    .{ .name = "wget",       .run = web.run },
-    .{ .name = "dillo",      .run = dillo_prog.run },
+    .{ .name = "ping",       .run = ping_mod.run, .feature = .network },
+    .{ .name = "net",        .run = runNet,       .feature = .network },
+    .{ .name = "get",        .run = web.run,      .feature = .network },
+    .{ .name = "wget",       .run = web.run,      .feature = .network },
+    .{ .name = "dillo",      .run = cmdDillo,   .feature = .gui },
     .{ .name = "echo",       .run = cmdEcho },
     .{ .name = "set",        .run = cmdSet },
     .{ .name = "unset",      .run = cmdUnset },
@@ -84,14 +129,14 @@ const command_table = [_]CmdEntry{
     .{ .name = "screen",     .run = screen_prog.run },
     .{ .name = "video",      .run = screen_prog.run },
     .{ .name = "resolution", .run = cmdResolution },
-    .{ .name = "gui",        .run = cmdGui },
-    .{ .name = "dhcp",       .run = runDhcp },
-    .{ .name = "arpcache",   .run = runArpcache },
-    .{ .name = "nslookup",   .run = cmdNslookup },
-    .{ .name = "smp",        .run = showSmp },
-    .{ .name = "cpuinfo",    .run = showSmp },
-    .{ .name = "usb",        .run = runUsb },
-    .{ .name = "lsusb",      .run = runUsb },
+    .{ .name = "gui",        .run = cmdGui,     .feature = .gui },
+    .{ .name = "dhcp",       .run = runDhcp,      .feature = .network },
+    .{ .name = "arpcache",   .run = runArpcache,  .feature = .network },
+    .{ .name = "nslookup",   .run = cmdNslookup,  .feature = .network },
+    .{ .name = "smp",        .run = showSmp,    .feature = .smp },
+    .{ .name = "cpuinfo",    .run = showSmp,    .feature = .smp },
+    .{ .name = "usb",        .run = runUsb,     .feature = .usb },
+    .{ .name = "lsusb",      .run = runUsb,     .feature = .usb },
     .{ .name = "klog",       .run = runKlog },
     .{ .name = "acpi",       .run = showAcpi },
     .{ .name = "ls",         .run = files.cmdLs },
@@ -354,6 +399,10 @@ fn runUptime(_: []const u8) void {
 
 // Programs that take over the screen and return to a fresh banner on exit.
 fn cmdLua(_: []const u8) void {
+    if (!config.features.lua) {
+        vga.write("lua: not built into this kernel\n");
+        return;
+    }
     lua_prog.run();
     vga.clear();
     printBanner();
@@ -363,7 +412,20 @@ fn cmdMatrix(_: []const u8) void {
     vga.clear();
     printBanner();
 }
+fn cmdDillo(args: []const u8) void {
+    if (!config.features.gui) {
+        vga.write("dillo: not built into this kernel\n");
+        return;
+    }
+    dillo.run(args);
+    vga.clear();
+    printBanner();
+}
 fn cmdGui(_: []const u8) void {
+    if (!config.features.gui) {
+        vga.write("gui: not built into this kernel\n");
+        return;
+    }
     gui.run();
     vga.clear();
     printBanner();
@@ -894,23 +956,34 @@ fn printHelp(_: []const u8) void {
     vga.write("    clock         Real-time clock\n");
     vga.write("    fib           Fibonacci sequence (F0-F40)\n");
     vga.write("    matrix        Matrix rain animation\n");
-    vga.write("    lua           Lua 5.x REPL interpreter\n");
+    if (config.features.lua) {
+        vga.write("    lua           Lua 5.x REPL interpreter\n");
+    }
     vga.write("    user          Run compiled-in user ELF\n");
     vga.write("    save [path]   Save user binary to ramfs\n");
     vga.write("    exec <path>   Run ELF or PE/EXE binary\n\n");
     vga.write("  Network:\n");
-    vga.write("    net           Network interface info\n");
-    vga.write("    ping [ip]     Ping (default: gateway)\n");
-    vga.write("    get <url>     Fetch URL (CLI web browser)\n");
-    vga.write("    dillo [url]   Dillo web browser (GUI / text)\n");
-    vga.write("    dhcp          Auto-configure IP via DHCP\n");
-    vga.write("    arpcache      Show ARP cache table\n");
-    vga.write("    nslookup <h>  DNS lookup\n\n");
+    if (config.features.network) {
+        vga.write("    net           Network interface info\n");
+        vga.write("    ping [ip]     Ping (default: gateway)\n");
+        vga.write("    get <url>     Fetch URL (CLI web browser)\n");
+        vga.write("    dhcp          Auto-configure IP via DHCP\n");
+        vga.write("    arpcache      Show ARP cache table\n");
+        vga.write("    nslookup <h>  DNS lookup\n");
+    }
+    if (config.features.gui) {
+        vga.write("    dillo [url]   Dillo web browser (GUI / text)\n");
+    }
+    vga.write("\n");
     vga.write("  CPU / Hardware:\n");
-    vga.write("    smp/cpuinfo   SMP & per-CPU status\n");
+    if (config.features.smp) {
+        vga.write("    smp/cpuinfo   SMP & per-CPU status\n");
+    }
     vga.write("    acpi          ACPI tables (RSDP, MADT)\n");
-    vga.write("    usb           USB controllers & devices status\n");
-    vga.write("    usb debug on  trace HID reports/keys on serial\n");
+    if (config.features.usb) {
+        vga.write("    usb           USB controllers & devices status\n");
+        vga.write("    usb debug on  trace HID reports/keys on serial\n");
+    }
     vga.write("    klog          kernel log status/flush/dump/clear\n");
     vga.write("    usb storage   USB mass storage & disk status\n");
     vga.write("    usb wifi      USB Wi-Fi adapter status\n\n");
@@ -931,7 +1004,9 @@ fn printHelp(_: []const u8) void {
     vga.write("    mount         List mounted filesystems\n\n");
     vga.write("  Input:\n");
     vga.write("    mouse         Show mouse info\n");
-    vga.write("    gui           Window manager demo (framebuffer)\n\n");
+    if (config.features.gui) {
+        vga.write("    gui           Window manager demo (framebuffer)\n\n");
+    }
     vga.write("  Display:\n");
     vga.write("    screen        Framebuffer info (mode/pitch/grid)\n");
     vga.write("    screen redraw Repaint the text console\n");
@@ -1084,6 +1159,7 @@ fn tabComplete(buf: []u8, len: usize) usize {
     var match_count: usize = 0;
     var last_match: []const u8 = "";
     for (command_table) |entry| {
+        if (!commandEnabled(entry)) continue;
         const cmd = entry.name;
         if (cmd.len >= prefix.len and eql(cmd[0..prefix.len], prefix)) {
             match_count += 1;
@@ -1103,6 +1179,7 @@ fn tabComplete(buf: []u8, len: usize) usize {
 
     var common_len: usize = last_match.len;
     for (command_table) |entry| {
+        if (!commandEnabled(entry)) continue;
         const cmd = entry.name;
         if (cmd.len >= prefix.len and eql(cmd[0..prefix.len], prefix)) {
             var k: usize = prefix.len;
@@ -1132,6 +1209,7 @@ fn tabComplete(buf: []u8, len: usize) usize {
 
     vga.putChar('\n');
     for (command_table) |entry| {
+        if (!commandEnabled(entry)) continue;
         const cmd = entry.name;
         if (cmd.len >= prefix.len and eql(cmd[0..prefix.len], prefix)) {
             vga.setColor(.light_cyan, .black);

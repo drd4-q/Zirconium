@@ -3,6 +3,11 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseFast });
     const selftest = b.option(bool, "selftest", "Run the embedded ring-3 boot self-test") orelse false;
+    const config_path = b.option(
+        []const u8,
+        "config",
+        "Path to the declarative kernel configuration (default: config/kernel.json)",
+    ) orelse "config/kernel.json";
 
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
@@ -27,6 +32,37 @@ pub fn build(b: *std.Build) void {
             .optimize = .Debug,
         }),
     });
+
+    // 1b. Build host tool gen_config, which compiles the declarative kernel
+    //     configuration into a Zig module the kernel imports as "config".
+    const gen_config = b.addExecutable(.{
+        .name = "gen_config",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/gen_config.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+
+    const run_gen_config = b.addRunArtifact(gen_config);
+    // Inherit the terminal: the generator's progress output is meant to be
+    // read, and a captured stderr makes the build system echo the whole
+    // command back as if it had failed.
+    run_gen_config.stdio = .inherit;
+    run_gen_config.addArg("--input");
+    // b.path() only accepts paths relative to the build root; an absolute
+    // path has to go through the cwd-relative variant.
+    const config_file: std.Build.LazyPath = if (std.fs.path.isAbsolute(config_path))
+        .{ .cwd_relative = config_path }
+    else
+        b.path(config_path);
+    run_gen_config.addFileArg(config_file);
+    run_gen_config.addArg("--output");
+    const config_out = run_gen_config.addOutputFileArg("config.zig");
+    if (selftest) {
+        // The command-line switch layers on top of the configuration file.
+        run_gen_config.addArgs(&.{ "--set-feature", "selftest=true" });
+    }
 
     // 2. Build user space test program
     const user_exe = b.addExecutable(.{
@@ -89,8 +125,6 @@ pub fn build(b: *std.Build) void {
     const tramp_out = run_bin2zig_t.addOutputFileArg("ap_tramp_bin.zig");
 
     // 4. Build kernel
-    const build_options = b.addOptions();
-    build_options.addOption(bool, "selftest", selftest);
     const exe = b.addExecutable(.{
         .name = "kernel",
         .root_module = b.createModule(.{
@@ -109,7 +143,9 @@ pub fn build(b: *std.Build) void {
         .use_llvm = true,
     });
 
-    exe.root_module.addOptions("build_options", build_options);
+    exe.root_module.addAnonymousImport("config", .{
+        .root_source_file = config_out,
+    });
     exe.root_module.addAssemblyFile(b.path("src/entry.S"));
     exe.root_module.addAssemblyFile(b.path("src/arch/isr.S"));
     exe.setLinkerScript(b.path("linker.ld"));

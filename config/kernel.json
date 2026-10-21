@@ -1,0 +1,83 @@
+{
+  "$comment": [
+    "Zirconium kernel configuration.",
+    "",
+    "This file is the single source of truth for what the kernel contains and",
+    "what it does at boot.  `zig build` compiles it into a Zig module that the",
+    "kernel reads at compile time; nothing in the kernel hardcodes a value that",
+    "lives here.",
+    "",
+    "Build-time overrides:",
+    "  -Dconfig=<path>        use a different configuration file",
+    "  -Dselftest=true        turn the `selftest` feature on (same as editing",
+    "                         features.selftest below)"
+  ],
+
+  "kernel": {
+    "name": "Zirconium",
+    "version": "0.3.0"
+  },
+
+  "timer": {
+    "$comment": "Tick rate of the system timer, in hertz.",
+    "hz": 100
+  },
+
+  "heap": {
+    "$comment": "Size of the kernel heap, in kibibytes.",
+    "kernel_kb": 128
+  },
+
+  "network": {
+    "$comment": "Static addressing used until (and unless) DHCP replaces it.",
+    "ip": "10.0.2.15",
+    "prefix": 24,
+    "gateway": "10.0.2.2",
+    "dns": "10.0.2.3"
+  },
+
+  "features": {
+    "$comment": [
+      "Compile-time feature switches.  A feature that is off removes its code",
+      "from the kernel entirely, and any boot stage that requires it is",
+      "dropped from the boot sequence."
+    ],
+    "usb": true,
+    "hid": true,
+    "network": true,
+    "storage": true,
+    "smp": true,
+    "gui": true,
+    "lua": true,
+    "fat32": true,
+    "ahci": true,
+    "usb_wifi": true,
+    "selftest": false
+  },
+
+  "boot": {
+    "$comment": [
+      "The boot sequence, in order.",
+      "",
+      "A stage may name a feature in `requires`.  If that feature is off, the",
+      "stage is dropped from the sequence, so turning `network` off removes the",
+      "network stage without having to edit this list as well."
+    ],
+    "stages": [
+      { "name": "gdt" },
+      { "name": "framebuffer" },
+      { "name": "system" },
+      { "name": "syscall64" },
+      { "name": "memory" },
+      { "name": "filesystem" },
+      { "name": "kernel" },
+      { "name": "pci" },
+      { "name": "storage", "requires": "storage" },
+      { "name": "network", "requires": "network" },
+      { "name": "input", "requires": "usb" },
+      { "name": "smp", "requires": "smp" },
+      { "name": "scheduler" },
+      { "name": "shell" }
+    ]
+  }
+}

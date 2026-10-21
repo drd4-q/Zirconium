@@ -12,9 +12,28 @@ const dhcp_mod = @import("dhcp.zig");
 pub const NicType = enum { none, e1000, rtl8169, usb_wifi };
 pub var active_nic: NicType = .none;
 
-pub var gateway_ip: [4]u8 = .{ 10, 0, 2, 2 };
-pub var our_ip: [4]u8 = .{ 10, 0, 2, 15 };
-pub var netmask: [4]u8 = .{ 255, 255, 255, 0 };
+// The static addressing comes from the declarative configuration
+// (`network` in config/kernel.json); DHCP overwrites it when it runs.
+pub var gateway_ip: [4]u8 = @import("config").net_gateway;
+pub var our_ip: [4]u8 = @import("config").net_ip;
+pub var netmask: [4]u8 = netmaskFromPrefix(@import("config").net_prefix);
+
+/// Expand a prefix length into a dotted-quad netmask.
+fn netmaskFromPrefix(prefix: u8) [4]u8 {
+    var mask: [4]u8 = .{ 0, 0, 0, 0 };
+    var bits: u8 = prefix;
+    var i: usize = 0;
+    while (i < 4) : (i += 1) {
+        if (bits >= 8) {
+            mask[i] = 0xFF;
+            bits -= 8;
+        } else if (bits > 0) {
+            mask[i] = @intCast(@as(u16, 0xFF) << @intCast(8 - bits) & 0xFF);
+            bits = 0;
+        }
+    }
+    return mask;
+}
 pub var our_mac: [6]u8 = undefined;
 pub var gateway_mac: [6]u8 = [_]u8{ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
 pub var mac_known: bool = false;
@@ -64,7 +83,7 @@ pub fn init() void {
     // Resolve the gateway during self-test builds so the legacy marker and
     // QEMU slirp path remain deterministic. Production boots stay lazy: the
     // first real packet calls ensureArp() and pays the wait only when needed.
-    if (@import("build_options").selftest) {
+    if (@import("config").features.selftest) {
         if (resolveGateway()) {
             port.serialWrite("[NET] Gateway MAC resolved\n");
         } else {

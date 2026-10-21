@@ -2,7 +2,9 @@ const port_io = @import("../arch/port.zig");
 const isr_mod = @import("../arch/isr.zig");
 
 const PIT_FREQ: u32 = 1193182;
-const TARGET_FREQ: u32 = 100;
+// The tick rate comes from the declarative configuration
+// (`timer.hz` in config/kernel.json).
+const TARGET_FREQ: u32 = @import("config").timer_hz;
 
 /// Written from the LAPIC/IRQ handler and read from every polling loop.
 /// A 64-bit store is not atomic on x86-64, so the update and the reads go

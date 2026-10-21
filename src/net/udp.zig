@@ -7,7 +7,7 @@ const e1000 = @import("../drivers/e1000.zig");
 const dns = @import("dns.zig");
 const dhcp = @import("dhcp.zig");
 
-pub var dns_server: [4]u8 = .{ 10, 0, 2, 3 };
+pub var dns_server: [4]u8 = @import("config").net_dns;
 pub const DNS_PORT: u16 = 53;
 pub const DHCP_SERVER_PORT: u16 = 67;
 pub const DHCP_CLIENT_PORT: u16 = 68;
