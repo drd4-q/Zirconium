@@ -107,8 +107,8 @@ pub fn run(args: []const u8) void {
     kb.flush();
 
     if (fb.active) {
-        scr_cols = @min(fb.cols, 160);
-        scr_rows = fb.rows;
+        scr_cols = @min(vga.getCols(), 160);
+        scr_rows = vga.getRows();
     } else {
         scr_cols = 80;
         scr_rows = 25;

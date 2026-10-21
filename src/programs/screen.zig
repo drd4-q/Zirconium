@@ -91,9 +91,9 @@ fn printInfo() void {
     vga.write("\n");
 
     vga.write("  Text grid: ");
-    vga.writeDec(fb.cols);
+    vga.writeDec(vga.getCols());
     vga.write("x");
-    vga.writeDec(fb.rows);
+    vga.writeDec(vga.getRows());
     vga.write(" cells (");
     vga.writeDec(fb.char_w);
     vga.write("x");
@@ -103,11 +103,11 @@ fn printInfo() void {
     vga.setColor(.light_green, .black);
     vga.write("  Text area: ");
     vga.setColor(.white, .black);
-    vga.writeDec(@as(u32, @intCast(fb.cols * fb.char_w)));
+    vga.writeDec(@as(u32, @intCast(vga.getCols() * fb.char_w)));
     vga.write("x");
-    vga.writeDec(@as(u32, @intCast(fb.rows * fb.char_h)));
+    vga.writeDec(@as(u32, @intCast(vga.getRows() * fb.char_h)));
     vga.write(" px");
-    if (fb.fb_width > fb.cols * fb.char_w or fb.fb_height > fb.rows * fb.char_h) {
+    if (fb.fb_width > vga.getCols() * fb.char_w or fb.fb_height > vga.getRows() * fb.char_h) {
         vga.setColor(.yellow, .black);
         vga.write("  (rest of the screen is background)");
     }
@@ -126,7 +126,7 @@ fn printInfo() void {
 }
 
 fn redrawConsole() void {
-    fb.redrawAllText();
+    vga.redrawAllText();
     vga.setColor(.light_green, .black);
     vga.write("  Console repainted from the screen mirror.\n\n");
     vga.setColor(.white, .black);

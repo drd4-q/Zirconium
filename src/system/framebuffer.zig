@@ -1,15 +1,66 @@
+/// Linear frame buffer surface.
+///
+/// Owns everything that is specific to a video mode: how the mode was
+/// discovered, how a pixel is laid out in memory, and the shadow buffer that
+/// decouples drawing from the (slow, volatile) real framebuffer.
+///
+/// The shadow always stores pixels as 0x00RRGGBB regardless of the mode's
+/// native byte order; `pack()` converts on the way out.  That is what makes a
+/// scroll correct: the old code copied shadow rows into the LFB byte-wise,
+/// which wrote red into the blue channel of every 24/32bpp mode.
 const std = @import("std");
 const root = @import("root");
+const font = @import("gfx/font.zig");
+const palette = @import("gfx/palette.zig");
+const surface_mod = @import("gfx/surface.zig");
 
-// Shadow buffer: all drawing happens here (fast RAM, packed 32-bit pixels),
-// then flush() copies only the dirty region to the real framebuffer in one
-// bulk pass. This avoids per-pixel volatile LFB writes and row-by-row
-// redraws visible as flicker.
+const serial = root.serial;
+
+pub const Surface = surface_mod.Surface;
+
+// ─── Mode state ─────────────────────────────────────────────────────
+
+pub var active: bool = false;
+
+/// Physical address of the linear frame buffer.
+pub var fb_addr: u64 = 0;
+/// Bytes per scanline, as reported by the firmware.  May exceed
+/// `width * bytes_pp`; the extra bytes are padding and must be skipped.
+pub var fb_pitch: u32 = 0;
+pub var fb_width: u32 = 0;
+pub var fb_height: u32 = 0;
+pub var fb_bpp: u32 = 0;
+/// Multiboot framebuffer type: 0 = indexed, 1 = direct colour, 2 = RGB.
+pub var fb_type: u32 = 0;
+
+/// The geometry the firmware actually programmed.  The viewport (fb_width /
+/// fb_height) is always clamped to this.
+pub var boot_width: u32 = 0;
+pub var boot_height: u32 = 0;
+pub var boot_pitch: u32 = 0;
+/// True when the viewport is smaller than the mode the firmware set.
+pub var viewport_scaled: bool = false;
+
+/// Bytes per pixel in the real framebuffer: 2 for RGB565, 3 for 24bpp,
+/// 4 for 32bpp.
+var fb_bytes_pp: u32 = 4;
+
+/// True when the mode stores red in the LOW byte (memory order R,G,B).
+///
+/// Almost every PC display is B,G,R,X in memory, which is why this used to be
+/// hardcoded - but a discrete GPU is free to report the opposite through the
+/// multiboot channel fields, and then every colour comes out with red and blue
+/// swapped.  Deriving it from the reported field positions costs nothing.
+var fb_red_first: bool = false;
+
+// ─── Shadow buffer ──────────────────────────────────────────────────
+
 var shadow: [*]u32 = undefined;
+/// Number of pixels the current shadow allocation can hold.
 var shadow_pixels: usize = 0;
-/// Width the current shadow allocation was sized for.  Every shadow row is
-/// indexed with the *current* fb_width, so a viewport change invalidates the
-/// buffer unless the stride is re-synced.
+/// Row stride of the shadow, in pixels.  Always equals the viewport width
+/// once `ensureShadow()` has succeeded; every shadow access goes through
+/// `shadowIndex()`, so there is exactly one place that decides the stride.
 var shadow_stride_px: u32 = 0;
 var dirty_x0: u32 = 0;
 var dirty_y0: u32 = 0;
@@ -17,23 +68,25 @@ var dirty_x1: u32 = 0;
 var dirty_y1: u32 = 0;
 var has_dirty: bool = false;
 
-// Covers every resolution the shell's `resolution` command supports,
-// plus common QEMU default modes like 1280x800 (GRUB may pick these on boot).
-// Covers every resolution up to 4K (3840x2160)
-const MAX_SHADOW_PIXELS: usize = 3840 * 2160;
-
 /// Upper bound of the identity map built by src/entry.S (64 PDs x 2 MB pages).
 const MAX_IDENTITY_MAP_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
-// Static preallocated early shadow buffer for boot/init (1024x768x32bpp).
-// Guarantees instant zero-lag drawing during early kernel initialization before PMM is online.
+/// Covers every resolution up to 4K (3840x2160).
+const MAX_SHADOW_PIXELS: usize = 3840 * 2160;
+
+/// Static preallocated early shadow buffer for boot/init (1024x768x32bpp).
+/// Guarantees instant zero-lag drawing during early kernel initialization
+/// before the PMM is online.
 const EARLY_SHADOW_MAX: usize = 1024 * 768;
 var early_shadow: [EARLY_SHADOW_MAX]u32 align(4096) = [_]u32{0} ** EARLY_SHADOW_MAX;
 var using_early_shadow: bool = false;
 
-// Static page tables for mapping framebuffer when fb_addr is above identity-mapped range
+/// Static page tables for mapping framebuffer when fb_addr is above the
+/// identity-mapped range.
 var early_page_tables: [16][512]u64 align(4096) = [_][512]u64{[_]u64{0} ** 512} ** 16;
 var early_pt_used: usize = 0;
+
+// ─── Page table mapping ─────────────────────────────────────────────
 
 fn mapFbRange(paddr: u64, size: u64) void {
     if (paddr == 0 or size == 0) return;
@@ -41,7 +94,6 @@ fn mapFbRange(paddr: u64, size: u64) void {
     // framebuffer beyond that would be silently aliased somewhere else; refuse
     // instead of corrupting unrelated memory.
     if (paddr + size > MAX_IDENTITY_MAP_BYTES) {
-        const serial = @import("serial.zig");
         serial.serialWrite("[FB] LFB range exceeds the 64 GB identity map; refusing to map\n");
         return;
     }
@@ -88,6 +140,8 @@ fn mapFbRange(paddr: u64, size: u64) void {
     }
 }
 
+// ─── Shadow allocation ──────────────────────────────────────────────
+
 fn allocShadow(pixels: u64) bool {
     const bytes = (pixels * 4 + 4095) & ~@as(u64, 4095);
     const pages = @as(usize, @intCast(bytes / 4096));
@@ -107,7 +161,14 @@ fn allocShadow(pixels: u64) bool {
     return true;
 }
 
-fn ensureShadow() bool {
+/// Make sure the shadow can back the current viewport.
+///
+/// Returns false when the shadow is missing or too small, in which case the
+/// caller must fall back to drawing straight into the LFB.  Every shadow
+/// access in this file is guarded by this function - the old code checked
+/// `shadow_pixels != 0`, which is not the same thing and let a viewport change
+/// write past the end of the allocation.
+pub fn ensureShadow() bool {
     const needed = @as(u64, fb_width) * fb_height;
     if (needed == 0 or needed > MAX_SHADOW_PIXELS) return false;
 
@@ -129,10 +190,7 @@ fn ensureShadow() bool {
     if (shadow_stride_px == fb_width and needed <= shadow_pixels) return true;
 
     // The viewport changed.  Re-stride in place when the existing allocation is
-    // still large enough, otherwise get a bigger one from the PMM.  On PMM
-    // failure this returns false with the OLD, smaller buffer still installed,
-    // which is only safe because every caller gates its indexing on this
-    // function's return value - there is no "bounded by fb_width" guarantee here.
+    // still large enough, otherwise get a bigger one from the PMM.
     if (needed <= shadow_pixels) {
         shadow_stride_px = fb_width;
         @memset(shadow[0..@intCast(needed)], 0);
@@ -142,52 +200,27 @@ fn ensureShadow() bool {
     return allocShadow(needed);
 }
 
-/// Derive the character grid from the current viewport.
-///
-/// The `@max(1, …)` is not cosmetic.  A viewport shorter than one character cell
-/// (the `resolution` command accepts anything down to 1 pixel) would make `rows`
-/// zero, and every `rows - 1` in the scroll and cursor code is a `usize`
-/// subtraction: it wraps to 2^64-1 and `scrollUp()` then walks the whole BSS
-/// clearing cells.  One character row is the smallest meaningful grid.
-fn recomputeGrid() void {
-    cols = @max(1, fb_width / char_w);
-    rows = @max(1, fb_height / char_h);
-    if (cols > MAX_COLS) cols = MAX_COLS;
-    if (rows > MAX_ROWS) rows = MAX_ROWS;
+/// Offset of pixel (x, y) inside the shadow.  The stride is `shadow_stride_px`,
+/// never `fb_width` directly: the two can differ for a moment during a
+/// viewport change and using the wrong one walks off the allocation.
+inline fn shadowIndex(x: u32, y: u32) usize {
+    return @as(usize, y) * shadow_stride_px + x;
 }
 
-pub var fb_addr: u64 = 0;
-pub var fb_pitch: u32 = 0;
-pub var fb_width: u32 = 0;
-pub var fb_height: u32 = 0;
-pub var fb_bpp: u32 = 0;
-pub var fb_type: u32 = 0;
-/// Bytes per pixel on the real LFB: 4 for the classic XRGB8888 layout, 3 when
-/// the bootloader only offered a 24bpp mode (common with VBE), 2 for RGB565.
-/// Everything that touches the LFB goes through lfbPut/lfbGet or branches on
-/// this.  16bpp matters on real hardware: when a 32bpp mode is unavailable GRUB
-/// happily lands on a 16bpp mode, and refusing it would leave us with no LFB at
-/// all (a black screen under UEFI, where the VGA text buffer is not displayed).
-var fb_bytes_pp: u32 = 4;
-
-inline fn lfbOffset(y: u32, x: u32) u64 {
-    return @as(u64, y) * fb_pitch + @as(u64, x) * fb_bytes_pp;
+/// True when the shadow is present and big enough for the current viewport.
+///
+/// `ensureShadow()` has to be called *first*: it is what allocates the shadow
+/// the first time round.  Testing `shadow_pixels != 0` before that call
+/// short-circuits on the very first draw, the shadow is never allocated, and
+/// every subsequent draw lands straight in the LFB - which is invisible until
+/// something needs the shadow, i.e. a scroll.
+inline fn shadowUsable() bool {
+    return ensureShadow();
 }
 
-/// True when the mode stores red in the LOW byte (memory order R,G,B).
-///
-/// Almost every PC display is B,G,R,X in memory, which is why this used to be
-/// hardcoded - but a discrete GPU is free to report the opposite through the
-/// multiboot channel fields, and then every colour comes out with red and blue
-/// swapped. Deriving it from the reported field positions costs nothing and
-/// removes the assumption. Defaults to B,G,R,X for the 16bpp and text paths,
-/// which have no channel fields at all.
-var fb_red_first: bool = false;
+// ─── Pixel packing ──────────────────────────────────────────────────
 
-/// Turn a shadow pixel (0x00RRGGBB) into the 32-bit word the LFB wants, honouring
-/// the mode's byte order.  BGRX is the identity; red-first needs 0x00BBGGRR, which
-/// is a red/blue exchange that leaves green alone - *not* `(c>>16)|(c<<16)`, that
-/// zeroes green and spills it into the reserved byte.
+/// Convert a 0x00RRGGBB shadow pixel into the word the mode wants.
 inline fn packPixel32(rgb: u32) u32 {
     if (!fb_red_first) return rgb;
     return ((rgb & 0x0000FF) << 16) | (rgb & 0x0000FF00) | ((rgb >> 16) & 0xFF);
@@ -233,59 +266,32 @@ fn lfbGet(x: u32, y: u32) u32 {
     return (@as(u32, p[2]) << 16) | (@as(u32, p[1]) << 8) | @as(u32, p[0]);
 }
 
-pub var cols: usize = 80;
-pub var rows: usize = 25;
-pub const char_w: usize = 8;
-pub const char_h: usize = 16;
-
-pub var cursor_row: usize = 0;
-pub var cursor_col: usize = 0;
-pub var fg_r: u8 = 255;
-pub var fg_g: u8 = 255;
-pub var fg_b: u8 = 255;
-pub var bg_r: u8 = 0;
-pub var bg_g: u8 = 0;
-pub var bg_b: u8 = 0;
-
-pub var active: bool = false;
-
-// Screen mirror: tracks what's on screen for scrollback
-const MAX_COLS: usize = 80;
-const MAX_ROWS: usize = 50;
-var screen_mirror: [MAX_ROWS][MAX_COLS]u16 = undefined; // char | (fg_color << 8) | (bg_color << 12)
-var screen_dirty: bool = false;
-
-fn clearMirror() void {
-    var r: usize = 0;
-    while (r < MAX_ROWS) : (r += 1) {
-        var c: usize = 0;
-        while (c < MAX_COLS) : (c += 1) {
-            screen_mirror[r][c] = 0;
-        }
-    }
+inline fn lfbOffset(y: u32, x: u32) u64 {
+    return @as(u64, y) * fb_pitch + @as(u64, x) * fb_bytes_pp;
 }
 
-// Scrollback buffer
-const SCROLLBACK_LINES: usize = 512;
-var scrollback: [SCROLLBACK_LINES][MAX_COLS]u16 = undefined;
-var sb_head: usize = 0;
-var sb_count: usize = 0;
+// ─── Mode discovery ─────────────────────────────────────────────────
 
-// Saved live screen for returning from scrollback
-var saved_screen: [MAX_ROWS][MAX_COLS]u16 = undefined;
-var saved_cursor_row: usize = 0;
-var saved_cursor_col: usize = 0;
-pub var scroll_view: bool = false;
-pub var scroll_view_line: usize = 0; // which line in scrollback is at top of screen
+inline fn rd16(p: [*]const u8, off: usize) u32 {
+    return @as(u32, p[off]) | (@as(u32, p[off + 1]) << 8);
+}
 
-/// Multiboot 1 flag bit 11: the VBE table, i.e. `vbe_control_info` at mbi+72 and
-/// `vbe_mode_info` at mbi+76.
+inline fn rd32(p: [*]const u8, off: usize) u32 {
+    return @as(u32, p[off]) |
+        (@as(u32, p[off + 1]) << 8) |
+        (@as(u32, p[off + 2]) << 16) |
+        (@as(u32, p[off + 3]) << 24);
+}
+
+/// Multiboot 1 flag bit 11: the VBE table, i.e. `vbe_control_info` at mbi+72
+/// and `vbe_mode_info` at mbi+76.
 ///
-/// This is the *spec* video source.  The driver used to ignore it completely and
-/// declare "no framebuffer info" whenever bit 12 was clear, which is wrong for
-/// any loader that implements the spec rather than GRUB's extension.  Under UEFI
-/// it is never set - GRUB gates `fill_vbe_info()` behind GRUB_MACHINE_HAS_VBE -
-/// but under BIOS it is exactly what describes the current mode.
+/// This is the *spec* video source.  The driver used to ignore it completely
+/// and declare "no framebuffer info" whenever bit 12 was clear, which is wrong
+/// for any loader that implements the spec rather than GRUB's extension.  Under
+/// UEFI it is never set - GRUB gates `fill_vbe_info()` behind
+/// GRUB_MACHINE_HAS_VBE - but under BIOS it is exactly what describes the
+/// current mode.
 ///
 /// The mode info block is the standard VESA VBE 3.0 structure, and only the
 /// linear fields are read: a banked mode has no usable framebuffer.
@@ -294,7 +300,6 @@ pub var scroll_view_line: usize = 0; // which line in scrollback is at top of sc
 ///   25 bits_per_pixel (u8)     54..59 lin_{red,green,blue}_{mask_size,field_position}
 ///   27 memory_model (u8)
 fn tryVbeInfo(mbi: [*]const u8, flags: u32) bool {
-    const serial = @import("serial.zig");
     if ((flags & (1 << 11)) == 0) return false;
 
     const ptr = rd32(mbi, 76);
@@ -326,8 +331,8 @@ fn tryVbeInfo(mbi: [*]const u8, flags: u32) bool {
     serial.serialWriteDec(lin_pitch);
     serial.serialWrite("\n");
 
-    // A direct-colour (0) or packed (6) memory model with a linear address and a
-    // packed depth is the only thing this driver can drive.  Model 7 is YUV.
+    // A direct-colour (0) or packed (6) memory model with a linear address and
+    // a packed depth is the only thing this driver can drive.  Model 7 is YUV.
     if (phys == 0 or w == 0 or h == 0) return false;
     if (model != 0 and model != 6) {
         serial.serialWrite("[FB] VBE memory model ");
@@ -347,17 +352,6 @@ fn tryVbeInfo(mbi: [*]const u8, flags: u32) bool {
     return true;
 }
 
-inline fn rd16(p: [*]const u8, off: usize) u32 {
-    return @as(u32, p[off]) | (@as(u32, p[off + 1]) << 8);
-}
-
-inline fn rd32(p: [*]const u8, off: usize) u32 {
-    return @as(u32, p[off]) |
-        (@as(u32, p[off + 1]) << 8) |
-        (@as(u32, p[off + 2]) << 16) |
-        (@as(u32, p[off + 3]) << 24);
-}
-
 /// Read six channel bytes at `off` and apply them if they look like a real
 /// packed layout.  Returns false when they do not, so the caller can try the
 /// other candidate offset.
@@ -375,11 +369,10 @@ fn readChannels(mbi: [*]const u8, off: usize, bpp: u32) bool {
     return true;
 }
 
-/// Decide the in-memory byte order from the reported channel field positions and
-/// record it.  A position of 0 for red means the mode is R,G,B in memory;
+/// Decide the in-memory byte order from the reported channel field positions
+/// and record it.  A position of 0 for red means the mode is R,G,B in memory;
 /// blue at 0 - nearly every PC display - means B,G,R.
 fn applyChannelOrder(red_pos: u8, green_pos: u8, blue_pos: u8, bpp: u32) void {
-    const serial = @import("serial.zig");
     if (red_pos < bpp and green_pos < bpp and blue_pos < bpp) {
         fb_red_first = (red_pos == 0 and blue_pos != 0);
     }
@@ -398,13 +391,10 @@ fn applyChannelOrder(red_pos: u8, green_pos: u8, blue_pos: u8, bpp: u32) void {
 ///
 /// The framebuffer fields live in GRUB's extension of the Multiboot 1 layout
 /// rather than in the 2001 spec, and every consumer guesses at the offsets
-/// differently - `framebuffer_depth` versus `framebuffer_bpp` is a 4-byte field
-/// at 108 versus a 1-byte field at 112, and they are read as single bytes.  When
-/// a machine behaves differently from QEMU there is no way to tell a misread
-/// offset from a genuinely absent field except by looking at the bytes, so print
-/// them.
+/// differently.  When a machine behaves differently from QEMU there is no way
+/// to tell a misread offset from a genuinely absent field except by looking at
+/// the bytes, so print them.
 fn dumpMbiVideo(mbi: [*]const u8, flags: u32) void {
-    const serial = @import("serial.zig");
     serial.serialWrite("[FB] mbi_flags=0x");
     serial.serialWriteHex(flags);
     serial.serialWrite(" bit11=");
@@ -430,7 +420,6 @@ fn dumpMbiVideo(mbi: [*]const u8, flags: u32) void {
 
 pub fn initFromMultiboot(mbi_ptr: u32) void {
     const mbi: [*]const u8 = @ptrFromInt(mbi_ptr);
-    const serial = @import("serial.zig");
 
     const flags = @as(u32, @intCast(mbi[0])) | (@as(u32, @intCast(mbi[1])) << 8) |
         (@as(u32, @intCast(mbi[2])) << 16) | (@as(u32, @intCast(mbi[3])) << 24);
@@ -533,14 +522,13 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
     boot_pitch = fb_pitch;
     viewport_scaled = false;
 
-    // Ensure framebuffer range is identity-mapped in page tables (crucial if fb_addr >= 8GB)
+    // Ensure framebuffer range is identity-mapped in page tables (crucial if
+    // fb_addr >= 8GB).
     const total_fb_bytes = @as(u64, fb_pitch) * fb_height;
     mapFbRange(fb_addr, total_fb_bytes);
 
-    recomputeGrid();
-
     active = true;
-    clearMirror();
+
     // The LFB probe is deliberately NOT run here: initFromMultiboot runs
     // before the IDT is installed (main.zig calls vga.initFb ahead of
     // system_init), so touching a framebuffer the firmware reported but did not
@@ -554,14 +542,10 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
     serial.serialWriteDec(fb_bytes_pp);
     serial.serialWrite("B type=");
     serial.serialWriteDec(fb_type);
-    serial.serialWrite(" grid=");
-    serial.serialWriteDec(cols);
-    serial.serialWrite("x");
-    serial.serialWriteDec(rows);
-    serial.serialWrite(" mbi_flags=0x");
-    serial.serialWriteHex(flags);
     serial.serialWrite("\n");
 }
+
+// ─── LFB probe ──────────────────────────────────────────────────────
 
 /// Verify the reported LFB is actually backed before anything draws to it.
 ///
@@ -570,20 +554,17 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
 /// installed is a triple fault: the machine reboots and *nothing* reaches the
 /// log, which is exactly the "forced mode reboots, keep hangs" signature seen
 /// on real hardware. So this refuses anything it cannot vouch for and is called
-/// from main.zig only after system_init has installed the IDT - a fault here is
-/// then a reportable exception, not a silent reboot.
+/// from main.zig only after system_init has installed the IDT.
 pub fn probeLfbSafe() void {
-    const serial = @import("serial.zig");
     if (!active) {
         serial.serialWrite("[FB] probe SKIP: no framebuffer\n");
         return;
     }
     const total = @as(u64, fb_pitch) * fb_height;
     // A pitch LARGER than width*bpp is normal and must be accepted: 24bpp VBE
-    // modes and anything with a scanline pad report one, and rejecting them
-    // silenced this very probe on the hardware it exists to diagnose.  The
-    // dangerous direction is a pitch too SMALL, where lfbOffset walks into the
-    // next scanline and eventually off the end of the aperture.
+    // modes and anything with a scanline pad report one.  The dangerous
+    // direction is a pitch too SMALL, where lfbOffset walks into the next
+    // scanline and eventually off the end of the aperture.
     const min_pitch = fb_width * fb_bytes_pp;
     if (fb_pitch == 0 or fb_pitch < min_pitch) {
         serial.serialWrite("[FB] probe SKIP: pitch ");
@@ -593,16 +574,13 @@ pub fn probeLfbSafe() void {
         serial.serialWrite(" (rows would shear and the last row runs off the LFB)\n");
         return;
     }
-    if (fb_pitch > min_pitch and fb_pitch - min_pitch >= fb_width) {
+    if (fb_pitch - min_pitch >= fb_width) {
         serial.serialWrite("[FB] note: pitch has ");
         serial.serialWriteDec(fb_pitch - min_pitch);
         serial.serialWrite(" bytes of padding per scanline\n");
     }
     // entry.S identity-maps the first 64 GB, so anything inside that window is
     // safe to touch without help from mapFbRange (which cannot map above it).
-    // Outside it the buffer is NOT backed, so switch the driver off rather than
-    // leave `active` set: the first vga.write would fault, and this function
-    // exists precisely to stop the machine dying on an unmapped LFB.
     if (fb_addr + total > MAX_IDENTITY_MAP_BYTES) {
         serial.serialWrite("[FB] probe SKIP: LFB at 0x");
         serial.serialWriteHex(@truncate(fb_addr));
@@ -610,8 +588,25 @@ pub fn probeLfbSafe() void {
         active = false;
         return;
     }
-    probeLfb(serial);
+    probeLfb();
     testPattern();
+}
+
+fn probeLfb() void {
+    serial.serialWrite("[FB] probing LFB at 0x");
+    serial.serialWriteHex(@truncate(fb_addr));
+    serial.serialWrite("...\n");
+    const saved = lfbGet(0, 0);
+    lfbPut(0, 0, 0x00FF00FF);
+    const readback = lfbGet(0, 0);
+    lfbPut(0, 0, saved);
+    if (readback == 0x00FF00FF) {
+        serial.serialWrite("[FB] probe OK: LFB is readable and writable\n");
+    } else {
+        serial.serialWrite("[FB] probe MISMATCH: wrote 0x00FF00FF, read 0x");
+        serial.serialWriteHex(readback);
+        serial.serialWrite("\n[FB] probe SKIP: LFB is not backed by the reported address\n");
+    }
 }
 
 /// Draw a recognisable full-screen pattern straight into the LFB, bypassing the
@@ -619,109 +614,56 @@ pub fn probeLfbSafe() void {
 ///
 /// This is the decisive test when the screen stays black: if the readback
 /// matches what we wrote, the buffer really is writable and the hardware is
-/// simply not scanning it out (a DisplayPort link that never came up after a
-/// mode change, or a bootloader's address that is not the real scanout). If the
-/// readback does not match, we are writing somewhere else entirely. A
-/// black-on-black screen cannot tell those apart, a colour-bar test can.
-///
-/// Same idea as Linux's `fbcon` solid_fill / drm-kms-selftest colorimage.
+/// simply not scanning it out. If the readback does not match, we are writing
+/// somewhere else entirely. A black-on-black screen cannot tell those apart, a
+/// colour-bar test can.
 pub fn testPattern() void {
-    const serial = @import("serial.zig");
     if (!active) return;
-    const total = @as(u64, fb_pitch) * fb_height;
-    if (fb_addr + total > MAX_IDENTITY_MAP_BYTES) return;
-
-    // 8 classic colour bars, full height, plus a white cross so a garbled
-    // stride is obvious at a glance.
-    const bars = [_]u32{ 0xFFFFFF, 0x00FFFF, 0x00FF00, 0xFF00FF, 0xFF0000, 0x0000FF, 0xFFFF00, 0xFFFFFF };
-    const n_bars: u32 = @intCast(bars.len);
-    const bar_w = fb_width / n_bars;
+    serial.serialWrite("[FB] drawing colour-bar test pattern...\n");
+    const bar_colors = [8]u32{
+        0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00,
+        0xFF00FF, 0x00FFFF, 0xFFFFFF, 0x000000,
+    };
     var y: u32 = 0;
     while (y < fb_height) : (y += 1) {
-        var b: u32 = 0;
-        while (b < n_bars) : (b += 1) {
-            const x0 = b * bar_w;
-            const x1 = if (b + 1 == n_bars) fb_width else x0 + bar_w;
-            const rgb = bars[b];
-            var x = x0;
-            while (x < x1) : (x += 1) lfbPut(x, y, rgb);
+        var x: u32 = 0;
+        while (x < fb_width) : (x += 1) {
+            const band = (x * 8) / fb_width;
+            const color = bar_colors[@min(band, 7)];
+            lfbPut(x, y, color);
         }
     }
-    const mid_x = fb_width / 2;
-    const mid_y = fb_height / 2;
-    var i: u32 = 0;
-    while (i < fb_width) : (i += 1) {
-        lfbPut(i, mid_y, 0x000000);
-    }
-    while (i < fb_height) : (i += 1) {
-        lfbPut(mid_x, i, 0x000000);
-    }
-
-    // Read back a few probes across the bars.  The last one sits just right of
-    // the vertical cross line, i.e. in bar 4.
-    const samples = [_]struct { x: u32, y: u32, want: u32, name: []const u8 }{
-        .{ .x = 1, .y = 1, .want = bars[0], .name = "bar0" },
-        .{ .x = bar_w * 2, .y = 1, .want = bars[2], .name = "bar2" },
-        .{ .x = bar_w * 4, .y = 1, .want = bars[4], .name = "bar4" },
-        .{ .x = bar_w * 6, .y = 1, .want = bars[6], .name = "bar6" },
-        .{ .x = @min(mid_x + 1, fb_width - 1), .y = 1, .want = bars[4], .name = "mid" },
-    };
+    // Read back a pixel from each band and compare.
     var ok: u32 = 0;
-    for (samples) |s| {
-        if (s.x >= fb_width or s.y >= fb_height) continue;
-        const got = lfbGet(s.x, s.y) & 0xFFFFFF;
-        const pass = got == s.want;
-        if (pass) ok += 1;
-        serial.serialWrite("[FB] test ");
-        serial.serialWrite(s.name);
-        serial.serialWrite(" want=");
-        serial.serialWriteHex(s.want);
-        serial.serialWrite(" got=");
-        serial.serialWriteHex(got);
-        serial.serialWrite(if (pass) " OK\n" else " MISMATCH\n");
+    var bad: u32 = 0;
+    y = fb_height / 2;
+    var band: u32 = 0;
+    while (band < 8) : (band += 1) {
+        const x = (fb_width * band) / 8 + 1;
+        if (x >= fb_width) continue;
+        const expect = bar_colors[band];
+        const got = lfbGet(x, y);
+        if (got == expect) {
+            ok += 1;
+        } else {
+            bad += 1;
+            serial.serialWrite("[FB] pattern band ");
+            serial.serialWriteDec(band);
+            serial.serialWrite(" expected 0x");
+            serial.serialWriteHex(expect);
+            serial.serialWrite(" got 0x");
+            serial.serialWriteHex(got);
+            serial.serialWrite("\n");
+        }
     }
-    serial.serialWrite("[FB] test pattern written, ");
+    serial.serialWrite("[FB] pattern readback: ");
     serial.serialWriteDec(ok);
-    serial.serialWrite(" of ");
-    serial.serialWriteDec(samples.len);
-    serial.serialWrite(" probes match\n");
+    serial.serialWrite(" ok, ");
+    serial.serialWriteDec(bad);
+    serial.serialWrite(" mismatched\n");
 }
 
-/// Touch every page of the reported LFB and read one pixel back. Callers must
-/// have verified the range is mapped and installed the IDT first.
-fn probeLfb(serial: @TypeOf(@import("serial.zig"))) void {
-    const total = @as(u64, fb_pitch) * fb_height;
-    const step: u64 = 4096;
-    var off: u64 = 0;
-    while (off < total) : (off += step) {
-        const p: [*]volatile u8 = @ptrFromInt(fb_addr + off);
-        p[0] = p[0];
-    }
-    // Read/write round trip on a pixel we are about to clear anyway.
-    const probe_rgb: u32 = 0x00A55A3C;
-    lfbPut(0, 0, probe_rgb);
-    const back = lfbGet(0, 0);
-    serial.serialWrite("[FB] probe ");
-    if ((back & 0xFFFFFF) == (probe_rgb & 0xFFFFFF)) {
-        serial.serialWrite("OK, LFB is mapped and writable (");
-    } else {
-        serial.serialWrite("MISMATCH, expected ");
-        serial.serialWriteHex(probe_rgb);
-        serial.serialWrite(" got ");
-        serial.serialWriteHex(back);
-        serial.serialWrite(" (");
-    }
-    serial.serialWriteDec(total);
-    serial.serialWrite(" bytes)\n");
-}
-
-/// Real hardware geometry reported by the bootloader.  fb_width/fb_height are
-/// the current viewport and are always clamped to these.
-pub var boot_width: u32 = 0;
-pub var boot_height: u32 = 0;
-pub var boot_pitch: u32 = 0;
-/// True when the viewport is smaller than the mode GRUB actually set.
-pub var viewport_scaled: bool = false;
+// ─── Viewport ───────────────────────────────────────────────────────
 
 /// Bytes per pixel of the real LFB (3 for 24bpp, 4 for 32bpp).
 pub fn bytesPerPixel() u32 {
@@ -744,10 +686,6 @@ pub fn setViewport(new_w: u32, new_h: u32) bool {
     fb_height = h;
     viewport_scaled = (w != boot_width or h != boot_height);
 
-    recomputeGrid();
-    cursor_row = 0;
-    cursor_col = 0;
-    clear();
     return exact;
 }
 
@@ -756,117 +694,32 @@ pub fn setResolution(new_w: u32, new_h: u32) void {
     _ = setViewport(new_w, new_h);
 }
 
-pub fn clear() void {
-    if (!active) return;
-    const bg_col: u32 = (@as(u32, bg_r) << 16) | (@as(u32, bg_g) << 8) | @as(u32, bg_b);
-    if (ensureShadow() and shadow_pixels != 0) {
-        @memset(shadow[0..shadow_pixels], bg_col);
-        markDirtyRect(0, 0, fb_width, fb_height);
-    } else if (fb_bytes_pp == 2) {
-        // 16bpp RGB565, one u16 per pixel.
-        const bg16: u16 = (@as(u16, bg_r >> 3) << 11) |
-            (@as(u16, bg_g >> 2) << 5) |
-            @as(u16, bg_b >> 3);
-        var y: u32 = 0;
-        while (y < fb_height) : (y += 1) {
-            const row: [*]volatile u16 = @ptrFromInt(fb_addr + @as(u64, y) * fb_pitch);
-            var x: u32 = 0;
-            while (x < fb_width) : (x += 1) row[x] = bg16;
-        }
-        // Nothing was written through the shadow, so a dirty rect left over from
-        // before this resize must not be flushed against a stale stride.
-        has_dirty = false;
-    } else if (fb_bytes_pp == 4) {
-        // 32bpp: one u64 covers two pixels, packed through the shared helper so
-        // this path and flush() can never disagree about byte order.
-        const bg32: u32 = packPixel32(bg_col);
-        const bg_val64: u64 = (@as(u64, bg32) << 32) | bg32;
-        var y: u32 = 0;
-        while (y < fb_height) : (y += 1) {
-            const row_ptr: [*]volatile u64 = @ptrFromInt(fb_addr + @as(u64, y) * fb_pitch);
-            const count64 = (@as(usize, fb_width) * 4) / 8;
-            var i: usize = 0;
-            while (i < count64) : (i += 1) {
-                row_ptr[i] = bg_val64;
-            }
-            // An odd pixel count leaves a 4-byte tail.
-            if (fb_width % 2 != 0) {
-                const tail: [*]volatile u32 = @ptrFromInt(fb_addr + @as(u64, y) * fb_pitch + @as(u64, count64) * 8);
-                tail[0] = bg32;
-            }
-        }
-        has_dirty = false;
-    } else {
-        // 24bpp: no padding word, so three bytes per pixel in the mode's order.
-        var y: u32 = 0;
-        while (y < fb_height) : (y += 1) {
-            const row: [*]volatile u8 = @ptrFromInt(fb_addr + @as(u64, y) * fb_pitch);
-            var x: u32 = 0;
-            while (x < fb_width) : (x += 1) {
-                if (fb_red_first) {
-                    row[x * 3 + 0] = bg_r;
-                    row[x * 3 + 1] = bg_g;
-                    row[x * 3 + 2] = bg_b;
-                } else {
-                    row[x * 3 + 0] = bg_b;
-                    row[x * 3 + 1] = bg_g;
-                    row[x * 3 + 2] = bg_r;
-                }
-            }
-        }
-        has_dirty = false;
-    }
-    clearMirror();
-    cursor_row = 0;
-    cursor_col = 0;
-    scroll_view = false;
-    flush();
-}
-
-pub fn setColorRGB(fg: u32, bg: u32) void {
-    fg_r = @intCast((fg >> 16) & 0xFF);
-    fg_g = @intCast((fg >> 8) & 0xFF);
-    fg_b = @intCast(fg & 0xFF);
-    bg_r = @intCast((bg >> 16) & 0xFF);
-    bg_g = @intCast((bg >> 8) & 0xFF);
-    bg_b = @intCast(bg & 0xFF);
-}
-
-pub fn setColorFromVga(fg_vga: u8, bg_vga: u8) void {
-    const table = [_]u32{
-        0x000000, 0x0000AA, 0x00AA00, 0x00AAAA,
-        0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
-        0x555555, 0x5555FF, 0x55FF55, 0x55FFFF,
-        0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
-    };
-    setColorRGB(table[fg_vga & 0x0F], table[bg_vga & 0x0F]);
-}
+// ─── Primitives ─────────────────────────────────────────────────────
 
 pub fn putPixel(x: u32, y: u32, r: u8, g: u8, b: u8) void {
     if (x >= fb_width or y >= fb_height) return;
-    if (ensureShadow() and x < fb_width and y < fb_height) {
-        shadow[@as(u64, y) * fb_width + x] = (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b);
+    const col: u32 = (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b);
+    if (shadowUsable()) {
+        shadow[shadowIndex(x, y)] = col;
         markDirty(x, y);
         return;
     }
-    lfbPut(x, y, (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b));
+    lfbPut(x, y, col);
 }
 
 pub fn getPixel(x: u32, y: u32) u32 {
     if (x >= fb_width or y >= fb_height) return 0;
     // ensureShadow(), not `shadow_pixels != 0`: after a viewport change the
-    // allocation can still exist while being too small for the new geometry, and
-    // indexing it with the new fb_width would read past the end.
-    if (ensureShadow() and x < fb_width and y < fb_height) {
-        return shadow[@as(u64, y) * fb_width + x];
+    // allocation can still exist while being too small for the new geometry.
+    if (shadowUsable()) {
+        return shadow[shadowIndex(x, y)];
     }
     return lfbGet(x, y);
 }
 
-// LFB-only accessors: bypass the shadow buffer and dirty tracking entirely.
-// Used for the mouse cursor so it updates at its own rate (directly on the
-// real framebuffer) instead of being batched into the screen renderer's
-// shadow -> flush pipeline.
+/// LFB-only accessors: bypass the shadow buffer and dirty tracking entirely.
+/// Used for the mouse cursor so it updates at its own rate instead of being
+/// batched into the screen renderer's shadow -> flush pipeline.
 pub fn rawPutPixel(x: u32, y: u32, r: u8, g: u8, b: u8) void {
     if (x >= fb_width or y >= fb_height) return;
     lfbPut(x, y, (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b));
@@ -879,8 +732,7 @@ pub fn rawPixel(x: u32, y: u32) u32 {
 
 pub fn markDirtyRect(x: u32, y: u32, w: u32, h: u32) void {
     if (w == 0 or h == 0) return;
-    // Saturating: a wrapping x1 would shrink the rect instead of growing it, and
-    // callers derive w/h from this via a subtraction.
+    // Saturating: a wrapping x1 would shrink the rect instead of growing it.
     const x1 = x +| w;
     const y1 = y +| h;
     if (!has_dirty) {
@@ -915,32 +767,33 @@ pub fn flush() void {
     has_dirty = false;
     if (x0 >= x1 or y0 >= y1) return;
     // The shadow can be smaller than the current geometry: clear() falls back to
-    // drawing straight to the LFB when the PMM cannot grow the buffer, and rows
-    // are addressed with the *new* fb_width.  Refuse rather than read past the
-    // allocation.
-    if (ensureShadow()) {
-        if (@as(u64, y1) * fb_width > shadow_pixels) return;
-    } else return;
+    // drawing straight to the LFB when the PMM cannot grow the buffer.
+    if (!ensureShadow()) return;
+    // Refuse rather than read past the allocation.  `shadowIndex` uses
+    // shadow_stride_px, so the bound has to be expressed in the same units.
+    if (@as(u64, y1) * shadow_stride_px > shadow_pixels) return;
 
     const w = x1 - x0;
     var y: u32 = y0;
     while (y < y1) : (y += 1) {
-        const row_off = @as(u64, y) * fb_width + x0;
+        const row_off = shadowIndex(x0, y);
         const src: [*]const u32 = shadow + row_off;
-        if (fb_bytes_pp == 4) {
+        if (fb_bytes_pp == 4 and !fb_red_first) {
+            // Fast path: the mode's native order is the same as the shadow's.
             const dst: [*]volatile u32 = @ptrFromInt(fb_addr + @as(u64, y) * fb_pitch + @as(u64, x0) * 4);
-            if (fb_red_first) {
-                var x: u32 = 0;
-                while (x < w) : (x += 1) {
-                    dst[x] = packPixel32(src[x]);
-                }
-            } else {
-                var x: u32 = 0;
-                while (x < w) : (x += 1) {
-                    dst[x] = src[x];
-                }
+            var x: u32 = 0;
+            while (x < w) : (x += 1) {
+                dst[x] = src[x];
+            }
+        } else if (fb_bytes_pp == 4) {
+            const dst: [*]volatile u32 = @ptrFromInt(fb_addr + @as(u64, y) * fb_pitch + @as(u64, x0) * 4);
+            var x: u32 = 0;
+            while (x < w) : (x += 1) {
+                dst[x] = packPixel32(src[x]);
             }
         } else {
+            // 16bpp and 24bpp go through the shared byte packer, so the mode's
+            // channel order is honoured here as well.
             var x: u32 = 0;
             while (x < w) : (x += 1) {
                 lfbPut(x0 + x, y, src[x]);
@@ -960,10 +813,10 @@ pub fn fillRect(px: u32, py: u32, pw: u32, ph: u32, r: u8, g: u8, b: u8) void {
     const w = x1 - x0;
     const col: u32 = (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b);
 
-    if (ensureShadow() and shadow_pixels != 0) {
+    if (shadowUsable()) {
         var y: u32 = y0;
         while (y < y1) : (y += 1) {
-            const row = shadow + @as(u64, y) * fb_width + x0;
+            const row = shadow + shadowIndex(x0, y);
             var x: u32 = 0;
             while (x < w) : (x += 1) {
                 row[x] = col;
@@ -978,9 +831,6 @@ pub fn fillRect(px: u32, py: u32, pw: u32, ph: u32, r: u8, g: u8, b: u8) void {
         if (fb_bytes_pp == 4) {
             const offset = @as(u64, y) * fb_pitch + @as(u64, x0) * 4;
             const ptr: [*]volatile u32 = @ptrFromInt(fb_addr + offset);
-            // packPixel32 keeps this in step with lfbPut and flush() instead of
-            // hardcoding B,G,R,X, which was the only 32bpp writer that ignored the
-            // mode's channel order.
             var x: u32 = 0;
             while (x < w) : (x += 1) {
                 ptr[x] = packPixel32(col);
@@ -995,25 +845,27 @@ pub fn fillRect(px: u32, py: u32, pw: u32, ph: u32, r: u8, g: u8, b: u8) void {
 }
 
 pub fn drawRectBorder(px: u32, py: u32, pw: u32, ph: u32, thickness: u32, r: u8, g: u8, b: u8) void {
+    if (thickness == 0 or pw == 0 or ph == 0) return;
     fillRect(px, py, pw, thickness, r, g, b);
-    fillRect(px, py + ph - thickness, pw, thickness, r, g, b);
+    fillRect(px, py + ph -| thickness, pw, thickness, r, g, b);
     fillRect(px, py, thickness, ph, r, g, b);
-    fillRect(px + pw - thickness, py, thickness, ph, r, g, b);
+    fillRect(px + pw -| thickness, py, thickness, ph, r, g, b);
 }
 
+/// Blit one glyph with explicit RGB colours (the GUI's entry point).
 pub fn drawGlyph(px: u32, py: u32, ch: u8, fr: u8, fg: u8, fb_col: u8, br: u8, bg: u8, bb: u8) void {
-    if (px + char_w > fb_width or py + char_h > fb_height) return;
-    const glyph = getGlyph(ch);
+    if (px + font.GLYPH_W > fb_width or py + font.GLYPH_H > fb_height) return;
+    const glyph = font.glyph(ch);
     const fg_pixel: u32 = (@as(u32, fr) << 16) | (@as(u32, fg) << 8) | @as(u32, fb_col);
     const bg_pixel: u32 = (@as(u32, br) << 16) | (@as(u32, bg) << 8) | @as(u32, bb);
 
-    if (ensureShadow() and shadow_pixels != 0) {
+    if (shadowUsable()) {
         var gy: usize = 0;
-        while (gy < char_h) : (gy += 1) {
+        while (gy < font.GLYPH_H) : (gy += 1) {
             const bits = glyph[gy];
-            const row = shadow + @as(u64, py + @as(u32, @intCast(gy))) * fb_width + px;
+            const row = shadow + shadowIndex(px, py + @as(u32, @intCast(gy)));
             var gx: usize = 0;
-            while (gx < char_w) : (gx += 1) {
+            while (gx < font.GLYPH_W) : (gx += 1) {
                 if ((@as(u8, 0x80) >> @intCast(gx)) & bits != 0) {
                     row[gx] = fg_pixel;
                 } else {
@@ -1021,531 +873,211 @@ pub fn drawGlyph(px: u32, py: u32, ch: u8, fr: u8, fg: u8, fb_col: u8, br: u8, b
                 }
             }
         }
-        markDirtyRect(px, py, @as(u32, @intCast(char_w)), @as(u32, @intCast(char_h)));
+        markDirtyRect(px, py, @as(u32, @intCast(font.GLYPH_W)), @as(u32, @intCast(font.GLYPH_H)));
         return;
     }
 
     var gy: usize = 0;
-    while (gy < char_h) : (gy += 1) {
+    while (gy < font.GLYPH_H) : (gy += 1) {
         const bits = glyph[gy];
         var gx: usize = 0;
-        while (gx < char_w) : (gx += 1) {
-            const x = px + @as(u32, @intCast(gx));
-            const y = py + @as(u32, @intCast(gy));
-            if ((@as(u8, 0x80) >> @intCast(gx)) & bits != 0) {
-                putPixel(x, y, fr, fg, fb_col);
-            } else {
-                putPixel(x, y, br, bg, bb);
-            }
+        while (gx < font.GLYPH_W) : (gx += 1) {
+            const on = ((@as(u8, 0x80) >> @intCast(gx)) & bits) != 0;
+            lfbPut(px + @as(u32, @intCast(gx)), py + @as(u32, @intCast(gy)), if (on) fg_pixel else bg_pixel);
         }
     }
 }
 
+/// Blit a string with explicit RGB colours (the GUI's entry point).
 pub fn drawString(px: u32, py: u32, s: []const u8, fr: u8, fg: u8, fb_col: u8, br: u8, bg: u8, bb: u8) void {
-    if (py + char_h > fb_height or px >= fb_width or s.len == 0) return;
-    const fg_pixel: u32 = (@as(u32, fr) << 16) | (@as(u32, fg) << 8) | @as(u32, fb_col);
-    const bg_pixel: u32 = (@as(u32, br) << 16) | (@as(u32, bg) << 8) | @as(u32, bb);
-
-    const max_chars = @min(s.len, @as(usize, @intCast((fb_width - px) / char_w)));
-    if (max_chars == 0) return;
-
-    if (ensureShadow() and shadow_pixels != 0) {
-        var c_idx: usize = 0;
-        while (c_idx < max_chars) : (c_idx += 1) {
-            const ch = s[c_idx];
-            const ch_x = px + @as(u32, @intCast(c_idx * char_w));
-            const glyph = getGlyph(ch);
-
-            var gy: usize = 0;
-            while (gy < char_h) : (gy += 1) {
-                const bits = glyph[gy];
-                const row = shadow + @as(u64, py + @as(u32, @intCast(gy))) * fb_width + ch_x;
-                var gx: usize = 0;
-                while (gx < char_w) : (gx += 1) {
-                    if ((@as(u8, 0x80) >> @intCast(gx)) & bits != 0) {
-                        row[gx] = fg_pixel;
-                    } else {
-                        row[gx] = bg_pixel;
-                    }
-                }
-            }
-        }
-        markDirtyRect(px, py, @as(u32, @intCast(max_chars * char_w)), @as(u32, @intCast(char_h)));
-        return;
-    }
-
     var x = px;
-    for (s[0..max_chars]) |ch| {
+    for (s) |ch| {
+        if (x + font.GLYPH_W > fb_width) break;
         drawGlyph(x, py, ch, fr, fg, fb_col, br, bg, bb);
-        x += char_w;
+        x += font.GLYPH_W;
     }
 }
 
-fn makeEntry(ch: u8) u16 {
-    const fg8 = vgaTo8(fg_r, fg_g, fg_b);
-    const bg8 = vgaTo8(bg_r, bg_g, bg_b);
-    return @as(u16, ch) | (@as(u16, fg8) << 8) | (@as(u16, bg8) << 12);
+// ─── Surface implementation ─────────────────────────────────────────
+
+fn vtblCellWidth(ctx: *anyopaque) u32 {
+    _ = ctx;
+    return @intCast(font.GLYPH_W);
 }
 
-fn vgaTo8(r: u8, g: u8, b: u8) u8 {
-    // Convert RGB to nearest VGA 4-bit color
-    const luminance: u32 = @as(u32, r) + @as(u32, g) + @as(u32, b);
-    if (luminance < 60) return 0; // black
-    if (r > 200 and g < 80 and b < 80) return 4; // red
-    if (r < 80 and g > 200 and b < 80) return 2; // green
-    if (r < 80 and g < 80 and b > 200) return 1; // blue
-    if (r > 200 and g > 200 and b < 80) return 14; // yellow
-    if (r > 200 and g < 80 and b > 200) return 5; // magenta
-    if (r < 80 and g > 200 and b > 200) return 3; // cyan
-    if (r > 200 and g > 200 and b > 200) return 15; // white
-    if (luminance < 200) return 8; // dark_gray
-    return 7; // light_gray
+fn vtblCellHeight(ctx: *anyopaque) u32 {
+    _ = ctx;
+    return @intCast(font.GLYPH_H);
 }
 
-fn drawCharAt(col: usize, row: usize, ch: u8) void {
-    if (col >= cols or row >= rows) return;
-    const px = @as(u32, @intCast(col * char_w));
-    const py = @as(u32, @intCast(row * char_h));
+fn vtblGridCols(ctx: *anyopaque) u32 {
+    const s: *FbSurface = @ptrCast(@alignCast(ctx));
+    return s.gridCols();
+}
 
-    const glyph = getGlyph(ch);
-    const fg_col: u32 = (@as(u32, fg_r) << 16) | (@as(u32, fg_g) << 8) | @as(u32, fg_b);
+fn vtblGridRows(ctx: *anyopaque) u32 {
+    const s: *FbSurface = @ptrCast(@alignCast(ctx));
+    return s.gridRows();
+}
+
+fn vtblPutCell(ctx: *anyopaque, col: u32, row: u32, ch: u8, fg: u8, bg: u8) void {
+    const s: *FbSurface = @ptrCast(@alignCast(ctx));
+    s.putCell(col, row, ch, fg, bg);
+}
+
+fn vtblClear(ctx: *anyopaque, bg: u8) void {
+    const s: *FbSurface = @ptrCast(@alignCast(ctx));
+    s.clear(bg);
+}
+
+fn vtblFlush(ctx: *anyopaque) void {
+    _ = ctx;
+    flush();
+}
+
+/// Scroll the shadow's text region up by `rows` cell rows.
+///
+/// Only the *shadow* is scrolled; the real framebuffer is refreshed by the
+/// normal flush path, which repacks every pixel according to the mode's
+/// channel order.  The old implementation copied shadow rows straight into the
+/// LFB byte-wise, which wrote the red channel into the blue slot of every
+/// 24/32bpp mode - a scroll visibly swapped red and blue.
+fn vtblScrollUp(ctx: *anyopaque, rows: u32, cols: u32) void {
+    _ = ctx;
+    scrollRegionUp(rows, cols);
+}
+
+/// Background colour used when the console scrolls a region.  Kept in sync
+/// with the console engine through `setConsoleBackground`.
+var bg_r: u8 = 0;
+var bg_g: u8 = 0;
+var bg_b: u8 = 0;
+
+pub fn setConsoleBackground(r: u8, g: u8, b: u8) void {
+    bg_r = r;
+    bg_g = g;
+    bg_b = b;
+}
+
+/// Scroll the console's text region up by one cell row.
+pub fn scrollRegionUp(rows: u32, cols: u32) void {
+    if (!active) return;
+    if (!shadowUsable()) return;
+    if (rows == 0) return; // the console scrolls one row at a time
+
+    const cell_h: u32 = @intCast(font.GLYPH_H);
+    const cell_w: u32 = @intCast(font.GLYPH_W);
+    const region_w = @min(cols * cell_w, fb_width);
+    const region_h = @min(rows * cell_h, fb_height);
+    if (region_h <= cell_h) return;
+
+    // Move every row up by one cell, then clear the exposed bottom row.  The
+    // console repaints that row's cells afterwards, but clearing it here keeps
+    // the shadow self-consistent even if the repaint is partial.
+    const stride = shadow_stride_px;
+    var y: u32 = 0;
+    while (y + cell_h < region_h) : (y += 1) {
+        const dst = shadow + @as(usize, y) * stride;
+        const src = shadow + @as(usize, y + cell_h) * stride;
+        @memcpy(dst[0..region_w], src[0..region_w]);
+    }
     const bg_col: u32 = (@as(u32, bg_r) << 16) | (@as(u32, bg_g) << 8) | @as(u32, bg_b);
-
-    if (ensureShadow() and shadow_pixels != 0 and px + char_w <= fb_width and py + char_h <= fb_height) {
-        var gy: usize = 0;
-        while (gy < char_h) : (gy += 1) {
-            const bits = glyph[gy];
-            const row_ptr = shadow + @as(u64, py + @as(u32, @intCast(gy))) * fb_width + px;
-            row_ptr[0] = if ((bits & 0x80) != 0) fg_col else bg_col;
-            row_ptr[1] = if ((bits & 0x40) != 0) fg_col else bg_col;
-            row_ptr[2] = if ((bits & 0x20) != 0) fg_col else bg_col;
-            row_ptr[3] = if ((bits & 0x10) != 0) fg_col else bg_col;
-            row_ptr[4] = if ((bits & 0x08) != 0) fg_col else bg_col;
-            row_ptr[5] = if ((bits & 0x04) != 0) fg_col else bg_col;
-            row_ptr[6] = if ((bits & 0x02) != 0) fg_col else bg_col;
-            row_ptr[7] = if ((bits & 0x01) != 0) fg_col else bg_col;
-        }
-        markDirtyRect(px, py, char_w, char_h);
-        return;
-    }
-
-    var gy: usize = 0;
-    while (gy < char_h) : (gy += 1) {
-        const bits = glyph[gy];
-        var gx: usize = 0;
-        while (gx < char_w) : (gx += 1) {
-            if ((@as(u8, 0x80) >> @intCast(gx)) & bits != 0) {
-                putPixel(px + @as(u32, @intCast(gx)), py + @as(u32, @intCast(gy)), fg_r, fg_g, fg_b);
-            } else {
-                putPixel(px + @as(u32, @intCast(gx)), py + @as(u32, @intCast(gy)), bg_r, bg_g, bg_b);
-            }
-        }
-    }
+    const bottom = shadow + @as(usize, region_h - 1) * stride;
+    @memset(bottom[0..region_w], bg_col);
+    markDirtyRect(0, 0, region_w, region_h);
 }
 
-/// Standard 16-colour VGA palette, shared by every mirror repaint.
-const vga_palette = [_]u32{
-    0x000000, 0x0000AA, 0x00AA00, 0x00AAAA,
-    0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA,
-    0x555555, 0x5555FF, 0x55FF55, 0x55FFFF,
-    0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
+/// State owned by the framebuffer surface.
+pub const FbSurface = struct {
+    /// Cached grid size, refreshed from the viewport when it changes.
+    grid_cols: u32 = 0,
+    grid_rows: u32 = 0,
+    grid_width: u32 = 0,
+    grid_height: u32 = 0,
+
+    pub fn gridCols(self: *FbSurface) u32 {
+        self.refreshGrid();
+        return self.grid_cols;
+    }
+
+    pub fn gridRows(self: *FbSurface) u32 {
+        self.refreshGrid();
+        return self.grid_rows;
+    }
+
+    fn refreshGrid(self: *FbSurface) void {
+        if (self.grid_width == fb_width and self.grid_height == fb_height) return;
+        self.grid_width = fb_width;
+        self.grid_height = fb_height;
+        self.grid_cols = fb_width / @as(u32, @intCast(font.GLYPH_W));
+        self.grid_rows = fb_height / @as(u32, @intCast(font.GLYPH_H));
+        if (self.grid_cols == 0) self.grid_cols = 1;
+        if (self.grid_rows == 0) self.grid_rows = 1;
+    }
+
+    /// Paint one character cell with palette-indexed colours.
+    pub fn putCell(self: *FbSurface, col: u32, row: u32, ch: u8, fg: u8, bg: u8) void {
+        _ = self;
+        const px = col * @as(u32, @intCast(font.GLYPH_W));
+        const py = row * @as(u32, @intCast(font.GLYPH_H));
+        if (px + @as(u32, @intCast(font.GLYPH_W)) > fb_width or
+            py + @as(u32, @intCast(font.GLYPH_H)) > fb_height) return;
+        const fg_rgb = palette.rgb(fg);
+        const bg_rgb = palette.rgb(bg);
+        const c = palette.split(fg_rgb);
+        const b = palette.split(bg_rgb);
+        drawGlyph(px, py, ch, c.r, c.g, c.b, b.r, b.g, b.b);
+    }
+
+    pub fn clear(self: *FbSurface, bg: u8) void {
+        _ = self;
+        const b = palette.split(palette.rgb(bg));
+        clearTo(b.r, b.g, b.b);
+    }
 };
 
-fn redrawRow(row: usize) void {
-    if (row >= rows) return;
-    for (0..cols) |col| {
-        const entry = screen_mirror[row][col];
-        const ch: u8 = @intCast(entry & 0xFF);
-        const fg = vga_palette[@intCast((entry >> 8) & 0x0F)];
-        const bg = vga_palette[@intCast((entry >> 12) & 0x0F)];
-        fg_r = @intCast((fg >> 16) & 0xFF);
-        fg_g = @intCast((fg >> 8) & 0xFF);
-        fg_b = @intCast(fg & 0xFF);
-        bg_r = @intCast((bg >> 16) & 0xFF);
-        bg_g = @intCast((bg >> 8) & 0xFF);
-        bg_b = @intCast(bg & 0xFF);
-        drawCharAt(col, row, if (ch == 0) ' ' else ch);
-    }
-}
-
-/// Repaint the whole text console from the screen mirror and push it to the LFB
-/// in one bulk flush.  Used by `screen redraw`, and to recover a console after
-/// something scribbled on the LFB directly.  The global colours and cursor are
-/// restored, so callers keep their palette.
-pub fn redrawAllText() void {
+/// Erase the whole viewport to one colour, through the shadow when possible.
+pub fn clearTo(r: u8, g: u8, b: u8) void {
     if (!active) return;
-    const saved_fg = .{ fg_r, fg_g, fg_b };
-    const saved_bg = .{ bg_r, bg_g, bg_b };
-    const saved_cursor = .{ cursor_row, cursor_col };
-    const saved_view = scroll_view;
-
-    scroll_view = false;
+    const col: u32 = (@as(u32, r) << 16) | (@as(u32, g) << 8) | @as(u32, b);
+    if (shadowUsable()) {
+        @memset(shadow[0..shadow_pixels], col);
+        markDirtyRect(0, 0, fb_width, fb_height);
+        return;
+    }
+    // No shadow: paint the LFB directly.
+    var y: u32 = 0;
+    while (y < fb_height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < fb_width) : (x += 1) {
+            lfbPut(x, y, col);
+        }
+    }
     has_dirty = false;
-    var r: usize = 0;
-    while (r < rows) : (r += 1) redrawRow(r);
-
-    fg_r = saved_fg[0];
-    fg_g = saved_fg[1];
-    fg_b = saved_fg[2];
-    bg_r = saved_bg[0];
-    bg_g = saved_bg[1];
-    bg_b = saved_bg[2];
-    cursor_row = saved_cursor[0];
-    cursor_col = saved_cursor[1];
-    scroll_view = saved_view;
-
-    markDirtyRect(0, 0, fb_width, fb_height);
-    flush();
 }
 
-pub fn scrollUp() void {
-    if (!active) return;
+/// Size of one character cell, in pixels.  The console grid is derived from
+/// these, so every consumer that needs the cell size reads it from here.
+pub const char_w: usize = font.GLYPH_W;
+pub const char_h: usize = font.GLYPH_H;
 
-    // Save top line to scrollback
-    scrollback[sb_head] = screen_mirror[0];
-    sb_head = (sb_head + 1) % SCROLLBACK_LINES;
-    if (sb_count < SCROLLBACK_LINES) sb_count += 1;
+/// The framebuffer surface.  A single static instance is enough: the
+/// framebuffer is a singleton resource.
+pub var fb_surface_instance: FbSurface = .{};
 
-    // Shift screen mirror up
-    var y: usize = 0;
-    while (y < rows - 1) : (y += 1) {
-        screen_mirror[y] = screen_mirror[y + 1];
-    }
-    // Clear bottom row in mirror
-    {
-        var c: usize = 0;
-        while (c < MAX_COLS) : (c += 1) {
-            screen_mirror[rows - 1][c] = 0;
-        }
-    }
-
-    const text_w = cols * char_w;
-    const row_px = char_h;
-    if (rows > 1 and shadow_pixels != 0) {
-        var py: usize = row_px;
-        while (py < rows * row_px) : (py += 1) {
-            const dst_sh: [*]u32 = shadow + @as(u64, py - row_px) * fb_width;
-            const src_sh: [*]const u32 = shadow + @as(u64, py) * fb_width;
-            @memcpy(dst_sh[0..text_w], src_sh[0..text_w]);
-
-            // Byte-wise row copy works for any bpp since both rows start at
-            // x=0 (offsets are just y * pitch).
-            const dst_lfb: [*]volatile u8 = @ptrFromInt(fb_addr + @as(u64, py - row_px) * fb_pitch);
-            const src_lfb: [*]const volatile u8 = @ptrFromInt(fb_addr + @as(u64, py) * fb_pitch);
-            const row_bytes = @as(usize, text_w) * fb_bytes_pp;
-            var b: usize = 0;
-            while (b < row_bytes) : (b += 1) {
-                dst_lfb[b] = src_lfb[b];
-            }
-        }
-
-        // Repaint the newly exposed bottom text row in shadow and flush it
-        const bottom_y0: u32 = @intCast((rows - 1) * char_h);
-        fillRect(0, bottom_y0, @intCast(text_w), @intCast(char_h), bg_r, bg_g, bg_b);
-        flush();
-    } else {
-        // No shadow buffer: redraw every row directly to the LFB.
-        for (0..rows) |ry| {
-            redrawRow(ry);
-        }
-    }
-}
-
-fn putCharInternal(ch: u8) void {
-    if (!active) return;
-
-    if (scroll_view) {
-        exitScrollView();
-    }
-
-    if (ch == '\n') {
-        cursor_col = 0;
-        cursor_row += 1;
-        if (cursor_row >= rows) {
-            scrollUp();
-            cursor_row = rows - 1;
-        }
-        return;
-    }
-    if (ch == '\r') {
-        cursor_col = 0;
-        return;
-    }
-    if (ch == '\t') {
-        const next = (cursor_col + 8) & ~@as(usize, 7);
-        if (next >= cols) {
-            cursor_col = 0;
-            cursor_row += 1;
-            if (cursor_row >= rows) {
-                scrollUp();
-                cursor_row = rows - 1;
-            }
-        } else {
-            cursor_col = next;
-        }
-        return;
-    }
-
-    if (cursor_row < rows and cursor_col < cols) {
-        screen_mirror[cursor_row][cursor_col] = makeEntry(ch);
-    }
-    drawCharAt(cursor_col, cursor_row, ch);
-    cursor_col += 1;
-    if (cursor_col >= cols) {
-        cursor_col = 0;
-        cursor_row += 1;
-        if (cursor_row >= rows) {
-            scrollUp();
-            cursor_row = rows - 1;
-        }
-    }
-}
-
-pub fn putChar(ch: u8) void {
-    putCharInternal(ch);
-    flush();
-}
-
-pub fn write(str: []const u8) void {
-    for (str) |ch| {
-        putCharInternal(ch);
-    }
-    flush();
-}
-
-pub fn writeDec(value: u64) void {
-    if (value == 0) {
-        putChar('0');
-        return;
-    }
-    var buf: [20]u8 = undefined;
-    var i: usize = 20;
-    var v = value;
-    while (v > 0) {
-        i -= 1;
-        buf[i] = @intCast('0' + (v % 10));
-        v /= 10;
-    }
-    while (i < 20) : (i += 1) {
-        putChar(buf[i]);
-    }
-}
-
-pub fn writeHexShort(value: u64) void {
-    const hex = "0123456789ABCDEF";
-    var started = false;
-    var i: usize = 16;
-    while (i > 0) {
-        i -= 1;
-        const nibble: u8 = @intCast((value >> @intCast(i * 4)) & 0xF);
-        if (nibble != 0 or started or i == 0) {
-            started = true;
-            putChar(hex[nibble]);
-        }
-    }
-}
-
-// Scrollback navigation
-pub fn scrollBack(lines: usize) void {
-    if (!active or sb_count == 0) return;
-
-    if (!scroll_view) {
-        // Save current live screen
-        saved_screen = screen_mirror;
-        saved_cursor_row = cursor_row;
-        saved_cursor_col = cursor_col;
-        scroll_view = true;
-        // Start viewing from the most recent scrollback line
-        scroll_view_line = sb_count;
-    }
-
-    if (scroll_view_line >= lines) {
-        scroll_view_line -= lines;
-    } else {
-        scroll_view_line = 1;
-    }
-
-    renderScrollView();
-}
-
-pub fn scrollForward(lines: usize) void {
-    if (!active or !scroll_view) return;
-
-    scroll_view_line += lines;
-    if (scroll_view_line >= sb_count) {
-        exitScrollView();
-        return;
-    }
-
-    renderScrollView();
-}
-
-fn renderScrollView() void {
-    // Render scrollback lines onto screen
-    var screen_row: usize = 0;
-    var sb_idx: usize = sb_count - scroll_view_line;
-    // sb_idx is the line at the top of the screen
-
-    while (screen_row < rows and sb_idx < sb_count) : (screen_row += 1) {
-        const ring_idx = (sb_head + SCROLLBACK_LINES - sb_count + sb_idx) % SCROLLBACK_LINES;
-        screen_mirror[screen_row] = scrollback[ring_idx];
-        redrawRow(screen_row);
-        sb_idx += 1;
-    }
-    // Restore saved screen below scrollback lines
-    while (screen_row < rows) : (screen_row += 1) {
-        screen_mirror[screen_row] = saved_screen[screen_row];
-        redrawRow(screen_row);
-    }
-
-    // Show indicator
-    const fgt = [_]u32{ 0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA, 0x555555, 0x5555FF, 0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF };
-    fg_r = @intCast((fgt[11] >> 16) & 0xFF);
-    fg_g = @intCast((fgt[11] >> 8) & 0xFF);
-    fg_b = @intCast(fgt[11] & 0xFF);
-    bg_r = @intCast((fgt[0] >> 16) & 0xFF);
-    bg_g = @intCast((fgt[0] >> 8) & 0xFF);
-    bg_b = @intCast(fgt[0] & 0xFF);
-
-    // Draw "[Page X/Y]" indicator at bottom
-    var indicator_buf: [32]u8 = undefined;
-    const indicator = "[Scrollback: PgUp/PgDn/Esc]";
-    for (indicator, 0..) |ch, i| {
-        if (i < 32) indicator_buf[i] = ch;
-    }
-    const ind_len = indicator.len;
-    // The column index is cols-1-(ind_len-1-ix) == cols-ind_len+ix, so the
-    // indicator only fits when the grid is at least ind_len wide.  Bounding the
-    // loop by `ix < cols` instead let the subtraction underflow for a narrow
-    // viewport and clobber cells *before* the intended row - the one mirror write
-    // in this file with no bounds guard (drawCharAt on the next line has one).
-    if (rows > 0 and ind_len > 0 and cols >= ind_len) {
-        const r = rows - 1;
-        var ix: usize = 0;
-        while (ix < ind_len) : (ix += 1) {
-            const c = cols - ind_len + ix;
-            screen_mirror[r][c] = makeEntry(indicator_buf[ix]);
-            drawCharAt(c, r, indicator_buf[ix]);
-        }
-    }
-    flush();
-}
-
-pub fn exitScrollView() void {
-    if (!active or !scroll_view) return;
-    scroll_view = false;
-    // Restore live screen
-    screen_mirror = saved_screen;
-    cursor_row = saved_cursor_row;
-    cursor_col = saved_cursor_col;
-    for (0..rows) |ry| {
-        redrawRow(ry);
-    }
-    flush();
-}
-
-// VGA 8x16 bitmap font (CP437 glyphs for printable ASCII 0x20-0x7E)
-const font_data = [95][16]u8{
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x18, 0x3C, 0x3C, 0x3C, 0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x66, 0x66, 0x66, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x6C, 0x6C, 0xFE, 0x6C, 0x6C, 0xFE, 0x6C, 0x6C, 0x00, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x18, 0x18, 0x7C, 0xC6, 0xC2, 0xC0, 0x7C, 0x06, 0x06, 0x86, 0xC6, 0x7C, 0x18, 0x18, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0xC2, 0xC6, 0x0C, 0x18, 0x30, 0x60, 0xC6, 0x86, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x38, 0x6C, 0x6C, 0x38, 0x76, 0xDC, 0xCC, 0xCC, 0xCC, 0x76, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x30, 0x30, 0x30, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x18, 0x0C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x30, 0x18, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x66, 0x3C, 0xFF, 0x3C, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x7E, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x18, 0x30, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x02, 0x06, 0x0C, 0x18, 0x30, 0x60, 0xC0, 0x80, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xCE, 0xDE, 0xF6, 0xE6, 0xC6, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x18, 0x38, 0x78, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x7C, 0xC6, 0x06, 0x0C, 0x18, 0x30, 0x60, 0xC0, 0xC6, 0xFE, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x7C, 0xC6, 0x06, 0x06, 0x3C, 0x06, 0x06, 0x06, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x0C, 0x1C, 0x3C, 0x6C, 0xCC, 0xFE, 0x0C, 0x0C, 0x0C, 0x1E, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xFE, 0xC0, 0xC0, 0xC0, 0xFC, 0x06, 0x06, 0x06, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x38, 0x60, 0xC0, 0xC0, 0xFC, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xFE, 0xC6, 0x06, 0x06, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x30, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0x7E, 0x06, 0x06, 0x06, 0x0C, 0x78, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x18, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x0C, 0x18, 0x30, 0x60, 0xC0, 0x60, 0x30, 0x18, 0x0C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x7E, 0x00, 0x00, 0x7E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x60, 0x30, 0x18, 0x0C, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x7C, 0xC6, 0xC6, 0x0C, 0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xDE, 0xDE, 0xDE, 0xDC, 0xC0, 0x7C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x10, 0x38, 0x6C, 0xC6, 0xC6, 0xFE, 0xC6, 0xC6, 0xC6, 0xC6, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xFC, 0x66, 0x66, 0x66, 0x7C, 0x66, 0x66, 0x66, 0x66, 0xFC, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x3C, 0x66, 0xC2, 0xC0, 0xC0, 0xC0, 0xC0, 0xC2, 0x66, 0x3C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xF8, 0x6C, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x6C, 0xF8, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xFE, 0x66, 0x62, 0x68, 0x78, 0x68, 0x60, 0x62, 0x66, 0xFE, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xFE, 0x66, 0x62, 0x68, 0x78, 0x68, 0x60, 0x60, 0x60, 0xF0, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x3C, 0x66, 0xC2, 0xC0, 0xC0, 0xC0, 0xCE, 0xC6, 0x66, 0x3A, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xFE, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x3C, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x1E, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0xCC, 0xCC, 0xCC, 0x78, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xE6, 0x66, 0x6C, 0x6C, 0x78, 0x78, 0x6C, 0x66, 0x66, 0xE6, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xF0, 0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x62, 0x66, 0xFE, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xC6, 0xEE, 0xFE, 0xFE, 0xD6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xC6, 0xE6, 0xF6, 0xFE, 0xDE, 0xCE, 0xC6, 0xC6, 0xC6, 0xC6, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xFC, 0x66, 0x66, 0x66, 0x7C, 0x60, 0x60, 0x60, 0x60, 0xF0, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xD6, 0xDE, 0x7C, 0x0C, 0x0E, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xFC, 0x66, 0x66, 0x66, 0x7C, 0x6C, 0x66, 0x66, 0x66, 0xE6, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x7C, 0xC6, 0xC6, 0x60, 0x38, 0x0C, 0x06, 0xC6, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xFF, 0xDB, 0x99, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x6C, 0x38, 0x10, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xD6, 0xD6, 0xFE, 0xEE, 0x6C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xC6, 0xC6, 0x6C, 0x7C, 0x38, 0x38, 0x7C, 0x6C, 0xC6, 0xC6, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xC6, 0xC6, 0xC6, 0x6C, 0x38, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xFE, 0xC6, 0x86, 0x0C, 0x18, 0x30, 0x60, 0xC2, 0xC6, 0xFE, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x3C, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x80, 0xC0, 0x60, 0x30, 0x18, 0x0C, 0x06, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x3C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x10, 0x38, 0x6C, 0xC6, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00 },
-    .{ 0x30, 0x30, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x78, 0x0C, 0x7C, 0xCC, 0xCC, 0xCC, 0x76, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xE0, 0x60, 0x60, 0x78, 0x6C, 0x66, 0x66, 0x66, 0x66, 0x7C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x7C, 0xC6, 0xC0, 0xC0, 0xC0, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x1C, 0x0C, 0x0C, 0x3C, 0x6C, 0xCC, 0xCC, 0xCC, 0xCC, 0x76, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x7C, 0xC6, 0xFE, 0xC0, 0xC0, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x1C, 0x36, 0x32, 0x30, 0x78, 0x30, 0x30, 0x30, 0x30, 0x78, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x76, 0xCC, 0xCC, 0xCC, 0xCC, 0x7C, 0x0C, 0xCC, 0x78, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xE0, 0x60, 0x60, 0x6C, 0x76, 0x66, 0x66, 0x66, 0x66, 0xE6, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x18, 0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x06, 0x06, 0x00, 0x0E, 0x06, 0x06, 0x06, 0x06, 0x06, 0x06, 0x66, 0x3C, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0xE0, 0x60, 0x60, 0x66, 0x6C, 0x78, 0x78, 0x6C, 0x66, 0xE6, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0xEC, 0xFE, 0xD6, 0xD6, 0xD6, 0xD6, 0xC6, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0xDC, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0xDC, 0x66, 0x66, 0x66, 0x66, 0x7C, 0x60, 0x60, 0xF0, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x76, 0xCC, 0xCC, 0xCC, 0xCC, 0x7C, 0x0C, 0x0C, 0x1E, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0xDC, 0x76, 0x66, 0x60, 0x60, 0x60, 0xF0, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x7C, 0xC6, 0x60, 0x38, 0x0C, 0xC6, 0x7C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x10, 0x30, 0x30, 0xFC, 0x30, 0x30, 0x30, 0x30, 0x36, 0x1C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0x76, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0x6C, 0x38, 0x10, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0xC6, 0xC6, 0xD6, 0xD6, 0xFE, 0xEE, 0x6C, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0xC6, 0x6C, 0x38, 0x38, 0x38, 0x6C, 0xC6, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7E, 0x06, 0x0C, 0xF8, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x00, 0x00, 0x00, 0xFE, 0xCC, 0x18, 0x30, 0x60, 0xC6, 0xFE, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x0E, 0x18, 0x18, 0x18, 0x70, 0x18, 0x18, 0x18, 0x18, 0x0E, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x70, 0x18, 0x18, 0x18, 0x0E, 0x18, 0x18, 0x18, 0x18, 0x70, 0x00, 0x00, 0x00, 0x00 },
-    .{ 0x00, 0x00, 0x76, 0xDC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 },
-};
-
-fn getGlyph(ch: u8) *const [16]u8 {
-    if (ch >= 0x20 and ch <= 0x7E) {
-        return &font_data[ch - 0x20];
-    }
-    return &font_data['?' - 0x20];
+/// Surface handle for the framebuffer.
+pub fn surface() Surface {
+    return .{
+        .ctx = @ptrCast(&fb_surface_instance),
+        .vtable = &.{
+            .cell_width = vtblCellWidth,
+            .cell_height = vtblCellHeight,
+            .grid_cols = vtblGridCols,
+            .grid_rows = vtblGridRows,
+            .put_cell = vtblPutCell,
+            .clear = vtblClear,
+            .flush = vtblFlush,
+            .scroll_up = vtblScrollUp,
+        },
+    };
 }

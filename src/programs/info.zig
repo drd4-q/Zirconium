@@ -63,9 +63,9 @@ pub fn run() void {
         vga.write("VGA text (0xB8000)\n");
     }
     vga.write("  Text cells: ");
-    vga.writeDec(fb.cols);
+    vga.writeDec(vga.getCols());
     vga.write(" x ");
-    vga.writeDec(fb.rows);
+    vga.writeDec(vga.getRows());
     vga.write(" (");
     vga.writeDec(fb.char_w);
     vga.write("x");

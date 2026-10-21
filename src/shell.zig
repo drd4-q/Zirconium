@@ -650,9 +650,9 @@ fn cmdResolution(args: []const u8) void {
         vga.write("x");
         vga.writeDec(vga_fb.fb_height);
         vga.write(" (");
-        vga.writeDec(vga_fb.cols);
+        vga.writeDec(vga.getCols());
         vga.write("x");
-        vga.writeDec(vga_fb.rows);
+        vga.writeDec(vga.getRows());
         vga.write(" chars)\n");
         if (vga_fb.viewport_scaled) {
             vga.setColor(.yellow, .black);
@@ -705,9 +705,9 @@ fn cmdResolution(args: []const u8) void {
     vga.write("x");
     vga.writeDec(vga_fb.fb_height);
     vga.write(" (");
-    vga.writeDec(vga_fb.cols);
+    vga.writeDec(vga.getCols());
     vga.write("x");
-    vga.writeDec(vga_fb.rows);
+    vga.writeDec(vga.getRows());
     vga.write(" chars) inside ");
     vga.writeDec(vga_fb.boot_width);
     vga.write("x");
@@ -1205,17 +1205,12 @@ fn readLineEnhanced(buf: []u8, max_len: usize) usize {
                     pos = 0;
                 }
             } else if (ch == kb.KEY_PAGE_UP) {
-                if (vga_fb.active) {
-                    vga_fb.scrollBack(vga_fb.rows - 1);
-                } else {
-                    vga.scrollBackText(vga.getRows() - 1);
-                }
+                // One console, one scrollback: the framebuffer and the VGA
+                // text buffer used to keep separate histories, so this had to
+                // branch on which one was live.
+                vga.scrollBackText(vga.getRows() - 1);
             } else if (ch == kb.KEY_PAGE_DOWN) {
-                if (vga_fb.active) {
-                    vga_fb.scrollForward(vga_fb.rows - 1);
-                } else {
-                    vga.scrollForwardText(vga.getRows() - 1);
-                }
+                vga.scrollForwardText(vga.getRows() - 1);
             } else if (ch == kb.KEY_TAB) {
                 pos = tabComplete(buf, pos);
             } else if (ch >= 0x20 and ch < 0x7F) {
