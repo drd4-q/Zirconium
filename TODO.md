@@ -123,6 +123,18 @@
 - [ ] Real time-of-day clock feeding gettimeofday/clock_gettime/_time64 (currently PIT ticks since boot)
 - [ ] Math double-args (sin/pow/...) need XMM state in InterruptFrame before UCRT math can bind
 
+### DynamicalKVM (hypervisor)
+- [x] Declarative guest profiles (device set, CPU model, display, RAM) — `src/kvm/profile.zig`
+- [x] Auto device selection from what the guest does while probing — `profile.autoSelect()`
+- [x] Resource partitioning: cores and RAM per guest, manual or automatic — `src/kvm/resources.zig`
+- [x] Core masks: each guest's threads bound to disjoint host CPUs
+- [x] Virtual displays and the compositor (host / solo / tile / focus) — `src/system/gfx/{output,display}.zig`
+- [x] Shell driver: `kvm` (add/rm/layout/focus/policy/budget/view) — `src/programs/kvm.zig`
+- [ ] CPU emulator: the vCPUs are still guest-console renderers
+- [ ] Guest memory: a guest's RAM is not mapped yet (the virtual display is)
+- [ ] Real device model: the 8259/8254/APIC/IOAPIC/virtio devices the profiles describe
+- [ ] Load a real guest kernel and probe it (the auto-selection path needs a guest to observe)
+
 ### Driver improvements
 - [x] PS/2 mouse driver
 - [x] Virtio-blk disk driver (PCI discovery, MMIO, single virtqueue, read/write sectors, blockdev registration)

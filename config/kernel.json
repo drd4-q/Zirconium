@@ -52,6 +52,7 @@
     "fat32": true,
     "ahci": true,
     "usb_wifi": true,
+    "kvm": true,
     "selftest": false
   },
 

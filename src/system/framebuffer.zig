@@ -844,6 +844,45 @@ pub fn fillRect(px: u32, py: u32, pw: u32, ph: u32, r: u8, g: u8, b: u8) void {
     }
 }
 
+/// Blit a 0x00RRGGBB pixel buffer into the shadow, scaled to fit a rectangle.
+///
+/// Nearest-neighbour: a virtual display is usually a different size from the
+/// window it is shown in, and a guest's own output must not be filtered - the
+/// compositor shows exactly the pixels the guest produced, just at a
+/// different scale.  The destination is clipped to the viewport.
+pub fn blitScaled(
+    src: [*]const u32,
+    src_stride_px: u32,
+    src_w: u32,
+    src_h: u32,
+    dst_x: u32,
+    dst_y: u32,
+    dst_w: u32,
+    dst_h: u32,
+) void {
+    if (src_w == 0 or src_h == 0 or dst_w == 0 or dst_h == 0) return;
+    if (!shadowUsable()) return;
+
+    const x0 = dst_x;
+    const y0 = dst_y;
+    const x1 = @min(dst_x + dst_w, fb_width);
+    const y1 = @min(dst_y + dst_h, fb_height);
+    if (x0 >= x1 or y0 >= y1) return;
+
+    var dy = y0;
+    while (dy < y1) : (dy += 1) {
+        const sy = ((dy - y0) * src_h) / dst_h;
+        const srow = src + @as(usize, sy) * src_stride_px;
+        const drow = shadow + shadowIndex(x0, dy);
+        var dx = x0;
+        while (dx < x1) : (dx += 1) {
+            const sx = ((dx - x0) * src_w) / dst_w;
+            drow[dx - x0] = srow[sx];
+        }
+    }
+    markDirtyRect(x0, y0, x1 - x0, y1 - y0);
+}
+
 pub fn drawRectBorder(px: u32, py: u32, pw: u32, ph: u32, thickness: u32, r: u8, g: u8, b: u8) void {
     if (thickness == 0 or pw == 0 or ph == 0) return;
     fillRect(px, py, pw, thickness, r, g, b);

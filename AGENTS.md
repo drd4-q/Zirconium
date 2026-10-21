@@ -83,7 +83,7 @@ Editing either source retriggers codegen on the next `zig build`; no manual step
 
 `config/kernel.json` is the single source of truth for what the kernel contains and what it does at boot. `tools/gen_config.zig` (a host tool invoked by `build.zig`) parses it, validates it, and emits a `config` module that the kernel imports as `@import("config")`.
 
-- **Features** (`features.*` → `config.features.<name>`): `usb`, `hid`, `network`, `storage`, `smp`, `gui`, `lua`, `fat32`, `ahci`, `usb_wifi`, `selftest`. A feature that is off removes its code: the optional subsystems are reached through a comptime-selected wrapper (`const gui = if (config.features.gui) struct { const mod = @import("system/gui.zig"); … } else struct { … };`), so the untaken branch is never analysed and the module is not linked. A build with `gui`, `lua`, `network`, `smp`, `usb`, `storage` and `usb_wifi` off is ~260 KB smaller.
+- **Features** (`features.*` → `config.features.<name>`): `usb`, `hid`, `network`, `storage`, `smp`, `gui`, `lua`, `fat32`, `ahci`, `usb_wifi`, `kvm`, `selftest`. A feature that is off removes its code: the optional subsystems are reached through a comptime-selected wrapper (`const gui = if (config.features.gui) struct { const mod = @import("system/gui.zig"); … } else struct { … };`), so the untaken branch is never analysed and the module is not linked. A build with `gui`, `lua`, `network`, `smp`, `usb`, `storage` and `usb_wifi` off is ~260 KB smaller.
 - **Tunables**: `timer.hz` → `config.timer_hz` (the tick rate), `heap.kernel_kb` → `config.heap_kernel_bytes`, `network.ip`/`gateway`/`dns`/`prefix` → `config.net_ip` / `net_gateway` / `net_dns` / `net_prefix`. Nothing in the kernel hardcodes these any more.
 - **The boot sequence** (`boot.stages` → `config.boot_stages`): an ordered list of stage names. A stage may name a feature in `requires`; if that feature is off, the generator **drops the stage** (and says so), so switching a feature off cannot leave half-initialised code behind.
 - `config.featureEnabled(f)` looks a feature up by name; the shell's `command_table` entries carry an optional `.feature`, and a command whose feature is off is hidden from the help text and from tab completion.
@@ -92,8 +92,9 @@ Editing either source retriggers codegen on the next `zig build`; no manual step
 
 **Layout:**
 - `src/arch/` — gdt (per-CPU GDT/TSS, `MAX_CPUS=64`), idt (256 entries; INT 0x80 **and** the Win32 INT 0x81 thunk gate, both DPL 3), pic, port, isr (`isr.S` + `isr.zig`; `isr.S` also defines `syscall_entry_64` and `sys_exit_return`), acpi (MADT scan), smp + `trampoline.S/.ld`, msr, syscall64 (STAR/LSTAR/FMASK/SCE MSRs).
-- `src/kernel/` — pmm, vmm (incl. COW fault resolution), kalloc, scheduler, task, address_space, elf (ELF64 loader), pe (PE32+ loader), binfmt (format sniffing + personalities), linux_syscalls (Linux ABI table), winapi (Win32 emulation), fdtable, uaccess, process, seedfs, syscall, init.
-- `src/system/` — serial, vga (a re-export of `gfx/mod.zig`), framebuffer (the LFB driver), `gfx/` (surface interface, console engine, VGA-text surface, palette, font), gui, tty, init, panic, env.
+- `src/kernel/` — pmm, vmm (incl. COW fault resolution), kalloc, scheduler, task, address_space, elf (ELF64 loader), pe (PE32+ loader), binfmt (format sniffing + personalities), linux_syscalls (Linux ABI table), winapi (Win32 emulation), fdtable, uaccess, process, seedfs, syscall, init, **boot** (the configured boot sequence).
+- `src/system/` — serial, vga (a re-export of `gfx/mod.zig`), framebuffer (the LFB driver), `gfx/` (surface interface, console engine, VGA-text surface, palette, font, **output** = a virtual display, **display** = the compositor), gui, tty, init, panic, env.
+- `src/kvm/` — DynamicalKVM: mod, machine, profile, resources.
 - `src/system/env.zig` — kernel-wide KEY=VALUE environment table; the shell manages it (`set`/`unset`/`env`, `echo` with `$KEY` expansion) and Win32 PE programs read it via emulated `GetEnvironmentVariableA`/`GetEnvironmentStringsW`. Static storage, no allocation.
 - `src/drivers/` — keyboard (IRQ1), mouse (PS/2), input (unified input facade, see USB), timer, apic, pci, e1000, rtl8169, virtio_blk, ahci, xhci (poll-based xHCI HID drain behind `usb.zig:pollHid`), usb (re-export shim) + `usb/` (16-file stack, see below).
 - `src/net/` — arp, arp_cache, ip, icmp, tcp, udp, dns, dhcp, http; `mod.zig` is the public surface **and** the NIC dispatcher.
@@ -168,6 +169,36 @@ The text console exists **once**, and draws through a `Surface` (`src/system/gfx
 - **`shadowUsable()` must call `ensureShadow()` first.** Testing `shadow_pixels != 0` before it short-circuits on the very first draw, the shadow is never allocated, and every draw lands straight in the LFB — invisible until something needs the shadow, i.e. a scroll (the screen then fills up and the rest of the output is lost).
 - `redrawRow` must not mutate the console's colours while repainting, and `vga.putChar` must not re-derive the colours on every character: a program that sets a custom colour loses it otherwise.
 - The PgUp/PgDn scrollback is **one** implementation now; the shell used to branch on `vga_fb.active` because the VGA-text and framebuffer consoles kept separate histories.
+
+
+## DynamicalKVM
+
+`src/kvm/` — the hypervisor. The kernel itself has **no programs of its own**: it is a hypervisor with a device model, and everything the operator sees comes from a guest (Linux, Android, XNU, BSD). The host's own shell exists to *drive* the machines, not to be one.
+
+- `profile.zig` — **what machine a guest is shown.** A guest kernel is written against a machine: Linux 2.4 on a 1998 i386 expects an 8259 PIC, an 8254 PIT, one core and a 1024x768 15-bit framebuffer. Emulating the *wrong* machine is not "more capable", it is broken — the guest takes a fallback path it was never tested on. So each guest gets a profile: the device set, the CPU model, the RAM, and the display.
+  - `CpuModel` is the "weak CPU" part: `i386` (no SSE, no APIC), `pentium` (SSE), `core2` (SSE2, local APIC), `x86_64` (everything). A guest that never used SSE gets a Pentium, not a Core 2 — the *absence* of a feature is what makes the guest take its intended fallback path.
+  - `DisplaySpec` is the "weak GPU" part: an old guest gets 640x480 16bpp, a modern one 1280x800 32bpp. A guest has a fixed idea of its screen size and pixel format, and a mismatch shows up as a corrupted console.
+  - `autoSelect(observations)` is the **auto-detection** path. The hypervisor records what the guest actually did while probing (`Observations`: did it program the 8259, did it read the I/O APIC, did it touch the local APIC, did it scan PCI, which CPUID leaves did it ask for, did it announce a screen size) and then picks the machine that fits. The rules, in order: the interrupt controller the guest *uses* decides whether there is an I/O APIC; the strongest feature it asked for sets the CPU (never more); no PCI scan means no PCI bus, and therefore no virtio devices.
+- `resources.zig` — **how many cores and how much RAM each guest gets.** Two policies: `manual` (the operator's numbers stand) and `auto` (the hypervisor divides the host's resources, weighted by what each guest asked for — a 1 GB Android guest and a 32 MB Linux 2.4 guest get very different shares, and both get enough to boot). The partitioner also produces the **core masks**: the host CPUs a machine's threads are bound to. The masks are disjoint, so two machines never fight over the same core — the "re-addressing the threads" part.
+- `machine.zig` — one guest: its profile, its budget, its display, its vCPUs. **The CPU emulator is not here yet**: a vCPU runs a *guest console* renderer that draws the machine's identity, its emulated processor, its resources and a live counter into the machine's virtual display. That exercises the whole display path — several independent displays, composited side by side or one at a time, each updating on its own — and it is exactly the surface a real emulator will draw into.
+- `kvm.poll()` runs the guests. It is called from `scheduler.pollDeferred()` (the shell's input loop), **not** from the tick handler: emulating a guest is not a bounded operation, and the tick handler must never block. The partitioner's `time_share` divides the emulated quanta between the machines, so a machine with a smaller budget visibly advances less per tick.
+
+### Displays and the compositor
+
+`src/system/gfx/output.zig` — a **virtual display**: the host-side view of one guest's video memory. Allocated from the PMM in whole pages and exposed as a physical address, precisely so it can be mapped into a guest's address space later without changing anything above it. Pixels are 0x00RRGGBB, the same layout the framebuffer shadow uses.
+
+`src/system/gfx/display.zig` — the **compositor**. It owns the physical framebuffer and decides what is on it:
+
+| Layout | What is shown |
+|---|---|
+| `host` | the Zirconium console has the whole screen (the normal mode) |
+| `solo` | one guest fills the screen |
+| `tile` | **every guest at once, in a grid** |
+| `focus` | the focused guest fills the screen, with a strip along the bottom showing the others |
+
+The layout is a *mode*, not a window manager: a guest either has the screen, a cell in a grid, or nothing. That is the right shape for a hypervisor — there is no desktop to drag windows around on, there are machines. Compositing uses **nearest-neighbour** scaling (`fb.blitScaled`): a guest's output is shown exactly as the guest produced it, just at a different size. Switching back to `host` has to repaint the console, because the guest layouts composite over the whole screen.
+
+The shell command `kvm` drives it: `kvm list` (the known profiles), `kvm add <name> [profile]`, `kvm rm <id>`, `kvm layout <mode>`, `kvm focus <id|next|prev>`, `kvm policy <auto|manual>`, `kvm budget <id> <cores> <ram_mb>`, and `kvm view [seconds] [layout]` — the full-screen viewer, where **Tab** moves between the systems, a digit focuses one directly, **t** cycles the layout, clicking a thumbnail in the strip moves the focus there, and **Esc** goes back to the host.
 
 ## Kernel / toolchain conventions
 

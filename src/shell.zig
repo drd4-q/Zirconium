@@ -21,6 +21,18 @@ const gui = if (config.features.gui) struct {
     pub fn run() void {}
 };
 
+const kvm_prog = if (config.features.kvm) struct {
+    const mod = @import("programs/kvm.zig");
+    pub fn run(args: []const u8) void {
+        mod.run(args);
+    }
+} else struct {
+    pub fn run(args: []const u8) void {
+        _ = args;
+        vga.write("kvm: not built into this kernel\n");
+    }
+};
+
 const dillo = if (config.features.gui) struct {
     const mod = @import("programs/dillo.zig");
     pub fn run(args: []const u8) void {
@@ -154,6 +166,7 @@ const command_table = [_]CmdEntry{
     .{ .name = "uptime",     .run = runUptime },
     .{ .name = "mount",      .run = runMount },
     .{ .name = "nano",       .run = cmdNano },
+    .{ .name = "kvm",        .run = kvm_prog.run, .feature = .kvm },
 };
 
 var cmd_buf: [CMD_MAX]u8 = undefined;
@@ -1006,6 +1019,9 @@ fn printHelp(_: []const u8) void {
     vga.write("    mouse         Show mouse info\n");
     if (config.features.gui) {
         vga.write("    gui           Window manager demo (framebuffer)\n\n");
+    }
+    if (config.features.kvm) {
+        vga.write("    kvm           DynamicalKVM: run several guests at once\n\n");
     }
     vga.write("  Display:\n");
     vga.write("    screen        Framebuffer info (mode/pitch/grid)\n");

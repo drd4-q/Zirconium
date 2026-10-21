@@ -32,6 +32,7 @@ const feature_names = [_][]const u8{
     "fat32",
     "ahci",
     "usb_wifi",
+    "kvm",
     "selftest",
 };
 

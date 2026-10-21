@@ -555,6 +555,11 @@ pub fn scheduleTick(frame: ?*isr.InterruptFrame) void {
 pub fn pollDeferred() void {
     @import("../drivers/usb.zig").poll();
     @import("../drivers/usb.zig").pollHid();
+    // The guests run here rather than in the tick handler: emulating a guest
+    // is not a bounded operation, and the tick handler must never block.
+    if (@import("config").features.kvm) {
+        @import("../kvm/mod.zig").poll();
+    }
     if (tick_count % 100 == 0) {
         @import("../net/mod.zig").tick();
     }
