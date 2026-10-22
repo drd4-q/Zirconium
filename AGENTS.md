@@ -222,6 +222,41 @@ A machine's RAM is one contiguous block of host memory, so the two differ by a c
 - The guest's RAM is mapped into the guest driver's address space (`GUEST_RAM_VADDR`), so the driver can build page tables in it - which is exactly what a guest kernel does at boot. The mapping's offset *is* the guest physical address, so the driver can compute a guest physical address for anything it writes.
 - The device grew `CMD_TRANSLATE`, `CMD_READ_MEM` and `CMD_WRITE_MEM`. A 64-bit value does not fit in the 32-bit argument registers, so it is passed in two of them (ARG1 and ARG2) and comes back in two result registers (RESULT0 and RESULT1).
 
+### The virtual CPU, and guests that actually run
+
+`src/vm/cpu.zig` — the interpreter. It implements the opcodes a guest uses while it brings itself up, and it traps on anything else rather than guessing. Two rules keep it honest:
+
+- **Every memory access goes through the guest's page tables.** The host address is whatever the walk says, and a guest that touches a page it does not own faults, exactly as on real hardware.
+- **The flags are computed properly.** A guest's boot path branches on them, and an emulator that gets `ZF` wrong does not fail loudly — it takes the wrong branch and hangs somewhere else.
+
+The traps worth writing down, because each one cost a debugging session:
+
+- **The CMP group lays its forms out differently from every other group.** Every other group has /1 as "r/m8, imm8" and /2 as "r/m, r"; the CMP group has /1 as "r/m, r" and /2 as "r/m8, imm8". Decoding them the same way eats a byte that is not an immediate, which desynchronises the instruction stream — and that looks like the guest jumping off into nowhere a few instructions later, with no hint of what went wrong.
+- **A RIP-relative displacement is signed.** Taking it as unsigned puts the effective address millions of bytes off.
+- **The immediate follows the *operand* size.** `movw $imm16, %dx` carries a two-byte immediate, and reading four desynchronises the stream.
+- **`in al, dx` puts the value in AL** and leaves the rest of RAX alone. Putting it anywhere else means a guest that polls a status register then tests a *different* bit spins forever.
+- **The page walker returns a host address.** A huge page short-circuits the walk, and its branch has to end at the same place as the normal one — returning the *guest* address there makes every access land in the wrong place.
+
+`src/vm/uart.zig` — the guest's **virtual 8250**. The guest's console is a serial port, exactly as on a real PC, so the guest needs one. It does *not* get the host's: a guest that programmed the host's UART would change the host's baud rate and mix its characters into the host's log. The DLAB bit redirects **only** offsets 0 and 1 to the divisor latch — redirecting every register leaves the guest unable to clear DLAB at all, and every later read of the status register returns nonsense.
+
+`src/vm/loader.zig` — the **guest kernel loader**. It reads the image through the host's VFS (a guest kernel is just a file on the host's disk), parses the ELF, places the `PT_LOAD` segments in the guest's RAM, and builds the **Multiboot 1** boot information block. Multiboot is the cheapest protocol that Linux, NetBSD and FreeBSD all understand: the guest's entry is called in 32-bit protected mode with `EAX = 0x2BADB002` and `EBX` pointing at the information block. The loader verifies the segments against the file after copying them and reads the magic back — a guest that cannot find the magic will not boot, and "the magic is not where I put it" is much easier to find from the host than from inside the guest.
+
+`src/vm/mmu.zig` — the **initial page tables**. The guest inherits its RAM mapped identically and the hypervisor's device at a fixed guest physical address (4 GB, above the RAM, where a real PC would have a device). A guest's physical memory has to be contiguous, so the hypervisor reserves **one** block and carves it up; asking the memory manager for a contiguous run per machine fails as soon as two machines exist, because the first has already taken the top of the pool. The page table entries hold **guest** physical addresses — it is the walk that turns them into host addresses — and the walk resolves a device mapping through the machine's *device regions*, because the device is not in the guest's RAM.
+
+`samples/guest_hello.S` — a **guest kernel**, in assembly on purpose: the interpreter implements a specific set of instructions, and a hand-written guest is a list of exactly those. It checks the Multiboot magic, finds the ZVP, reads its version, asks which machine it was given, pings the hypervisor and halts. `tools/create_guest_disk.py` builds it and puts it on the disk at `/vms/`.
+
+The whole thing runs today:
+
+```
+[linux] [GUEST] ZVM guest: hello
+[linux] [GUEST] multiboot boot
+[linux] [GUEST] found the ZVP device
+[linux] [GUEST] ZVP version 1 0000000000000001
+[linux] [GUEST] machine 0
+[linux] [GUEST] the hypervisor answered
+[linux] [GUEST] guest: done
+```
+
 ### Displays and the compositor
 
 `src/system/gfx/output.zig` — a **virtual display**: the host-side view of one guest's video memory. Allocated from the PMM in whole pages and exposed as a physical address, precisely so it can be mapped into a guest's address space later without changing anything above it. Pixels are 0x00RRGGBB, the same layout the framebuffer shadow uses.

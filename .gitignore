@@ -26,3 +26,6 @@ prompt.txt
 # used to dirty the working tree after each `zig build` + test cycle)
 __pycache__/
 *.pyc
+
+# Built guest kernels (tools/create_guest_disk.py makes them)
+samples/guests/

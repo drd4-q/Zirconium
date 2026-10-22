@@ -9,7 +9,12 @@ var early_dropped: u32 = 0;
 var live_sink: ?LogSink = null;
 var in_sink: bool = false;
 
-fn outb(port_addr: u16, val: u8) void {
+/// Write one byte to a port I/O address.
+///
+/// Public so a guest's port I/O can be emulated against the same device: the
+/// hypervisor's 8250 is the guest's console until the guest has a virtual one
+/// of its own, so a guest that writes to COM1 lands in the host's log.
+pub fn outb(port_addr: u16, val: u8) void {
     asm volatile ("outb %%al, %%dx"
         :
         : [val] "{al}" (val),

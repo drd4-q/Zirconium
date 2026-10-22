@@ -190,6 +190,13 @@ pub const Zvp = struct {
         self.putReg(REG_RAM_SIZE, @truncate(self.memory.ram_bytes));
         self.putReg(REG_SERVICED, 0);
         self.serviced_sequence = 0;
+        serial.serialWrite("[ZVM]   ZVP regs at 0x");
+        serial.serialWriteHex(@intCast(@intFromPtr(self.regs.ptr)));
+        serial.serialWrite(" magic=0x");
+        serial.serialWriteHex(self.getReg(REG_MAGIC));
+        serial.serialWrite(" version=0x");
+        serial.serialWriteHex(self.getReg(REG_VERSION));
+        serial.serialWrite("\n");
     }
 
     /// Build the PCI configuration space the guest will read.

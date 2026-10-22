@@ -559,6 +559,7 @@ pub fn loadGuests() void {
         m.guest_mbinfo_gpa = loaded.mbinfo_gpa;
         m.guest_stack_gpa = loaded.stack_gpa;
         m.guest_bytes = loaded.bytes;
+        _ = m.startGuest();
 
         serial.serialWrite("[ZVM] Machine ");
         serial.serialWriteDec(i);

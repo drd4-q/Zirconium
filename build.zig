@@ -120,7 +120,7 @@ pub fn build(b: *std.Build) void {
     const guest_exe = b.addExecutable(.{
         .name = "guest_kernel",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("samples/guest_kernel.zig"),
+            .root_source_file = b.path("samples/guest_root.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -130,7 +130,8 @@ pub fn build(b: *std.Build) void {
     // own layout, and the sample is here to exercise the loader, not the
     // handoff.  The stub and its linker script are in the tree, ready for
     // the CPU emulator milestone.
-    guest_exe.entry = .{ .symbol_name = "guest64_entry" };
+    guest_exe.root_module.addAssemblyFile(b.path("samples/guest_hello.S"));
+    guest_exe.entry = .{ .symbol_name = "guest_entry" };
     guest_exe.image_base = 0x100000;
 
     // 3. Run bin2zig to generate user_test_bin.zig

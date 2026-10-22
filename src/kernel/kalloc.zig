@@ -131,10 +131,15 @@ pub fn kfree(ptr: [*]u8) void {
     free_count += 1;
     used_size -= block.size + @sizeOf(BlockHeader);
 
-    // Insert FIRST, then merge: mergeBlocks unlinks absorbed neighbours, so
-    // merging before insertion would re-insert a node that prev already
-    // swallowed (classic double-free on the next allocation cycle).
-    addToFreeList(block);
+    // The block is **already** in the list.  The list holds every block in
+    // the heap, free or not: `splitBlock` marks a block as not free and
+    // links the remainder in after it, rather than taking the block out.  So
+    // the block must not be inserted again here.
+    //
+    // Inserting it a second time walks the list until it reaches the block
+    // itself, and then sets `block.next = block` - a self-referential list.
+    // Every later walk of the free list spins forever, and the *next* free of
+    // that address is where the kernel stops making progress.
     mergeBlocks(block);
 }
 

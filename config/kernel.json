@@ -103,7 +103,7 @@
       {
         "name": "linux",
         "profile": "linux-x86_64",
-        "image": "/vms/linux.elf",
+        "image": "/mnt/disk/vms/linux.elf",
         "autostart": true,
         "cores": 0,
         "ram_mb": 0,
@@ -112,7 +112,7 @@
       {
         "name": "bsd",
         "profile": "bsd-x86_64",
-        "image": "/vms/bsd.elf",
+        "image": "/mnt/disk/vms/bsd.elf",
         "autostart": true,
         "cores": 0,
         "ram_mb": 0,

@@ -146,6 +146,35 @@ pub fn load(memory: Memory, image: []const u8, path: []const u8) LoadError!Loade
             zeroInGuest(memory, p_vaddr + p_filesz, p_memsz - p_filesz);
         }
 
+        // Compare what landed in the guest's memory with the file.  A
+        // mismatch here is the difference between a guest that runs and one
+        // that decodes garbage.
+        {
+            var k: u64 = 0;
+            var bad: u64 = 0;
+            while (k < p_filesz and bad < 8) : (k += 1) {
+                const want = image[p_offset + k];
+                const got = memory.readByte(p_vaddr + k) orelse 0;
+                if (want != got) {
+                    bad += 1;
+                    serial.serialWrite("[ZVM]   segment mismatch at +0x");
+                    serial.serialWriteHex(k);
+                    serial.serialWrite(": file=0x");
+                    serial.serialWriteHex(want);
+                    serial.serialWrite(" mem=0x");
+                    serial.serialWriteHex(got);
+                    serial.serialWrite("\n");
+                }
+            }
+            if (bad == 0) {
+                serial.serialWrite("[ZVM]   segment at 0x");
+                serial.serialWriteHex(p_vaddr);
+                serial.serialWrite(" (");
+                serial.serialWriteDec(p_filesz);
+                serial.serialWrite(" bytes) verified\n");
+            }
+        }
+
         loaded += @intCast(p_filesz);
         segments += 1;
     }
@@ -220,6 +249,16 @@ fn buildMbinfo(memory: Memory, cmdline: []const u8) void {
         checksum +%= readGuestU32(memory, MBINFO_GPA + i * 4);
     }
     putU32(memory, MBINFO_GPA + MBINFO_SIZE - 4, 0x1000_0000 - checksum);
+
+    // Read it back: a guest that cannot find the magic will not boot, and
+    // "the magic is not where I put it" is much easier to find here than from
+    // inside the guest.
+    const check = readGuestU32(memory, MBINFO_GPA + MBINFO_SIZE - 12);
+    serial.serialWrite("[ZVM]   mbinfo magic at 0x");
+    serial.serialWriteHex(MBINFO_GPA + MBINFO_SIZE - 12);
+    serial.serialWrite(" = 0x");
+    serial.serialWriteHex(check);
+    serial.serialWrite("\n");
 }
 
 /// Copy bytes into the guest's memory.

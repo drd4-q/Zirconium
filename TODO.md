@@ -138,8 +138,12 @@
 - [x] The hypervisor's own device (ZVP): PCI config space, MMIO registers, shared window, doorbell protocol — `src/kvm/devices/zvp.zig`
 - [x] The guest driver, in ring 3, proving the device end to end — `src/user/kvm_test.zig`
 - [x] The shared UAPI both sides include — `src/kvm/proto.zig`
-- [ ] CPU emulator: the vCPUs are still guest-console renderers
+- [x] A virtual CPU: an x86-64 interpreter with the guest's page tables, a virtual 8250 and a Multiboot 1 handoff
+- [x] A guest that really runs: it boots, finds the device, reads its identity and talks to the hypervisor
+- [x] The guest loader: the image comes off the host's disk through the VFS
+- [ ] CPU emulator: still only the opcodes a guest needs while it boots; a real Linux needs many more
 - [ ] The 32-bit Multiboot stub of the sample guest is written but not linked: putting a 32-bit stub and 64-bit code in one image needs the linker's own layout (`samples/guest_stub.S` and `samples/guest_kernel.ld` are ready)
+- [ ] A real guest: Linux or BSD needs the rest of the instruction set, interrupts, a PCI bus and virtio
 - [ ] Serve the ZVP's PCI configuration space from a real PCI model, so a guest finds it by scanning the bus
 - [ ] Map the guest's devices into its address space (the ZVP's BARs) rather than into the driver's
 - [ ] Interrupt the guest when the ZVP has something to say, instead of polling it

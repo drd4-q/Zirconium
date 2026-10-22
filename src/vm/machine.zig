@@ -25,6 +25,9 @@ const profile_mod = @import("profile.zig");
 const resources_mod = @import("resources.zig");
 const identity_mod = @import("identity.zig");
 const zvp_mod = @import("devices/zvp.zig");
+const cpu_mod = @import("cpu.zig");
+const mmu_mod = @import("mmu.zig");
+const proto = @import("proto.zig");
 
 pub const Output = output_mod.Output;
 pub const Profile = profile_mod.Profile;
@@ -32,6 +35,7 @@ pub const Observations = profile_mod.Observations;
 pub const Budget = resources_mod.Budget;
 pub const Identity = identity_mod.Identity;
 pub const Zvp = zvp_mod.Zvp;
+pub const Cpu = cpu_mod.Cpu;
 
 pub const State = enum {
     /// Created, not yet probed.
@@ -62,6 +66,9 @@ pub const Machine = struct {
     identity: Identity = .{},
     /// The hypervisor's own device, as this machine sees it.
     device: Zvp = .{},
+    /// The virtual CPU.  It keeps its state between slices, so a guest that
+    /// is stopped and started again carries on where it was.
+    cpu: Cpu = .{},
     /// The index of this machine's display in the compositor's output list.
     /// The compositor owns the buffer; the machine writes into it.
     output_index: usize = 0,
@@ -131,11 +138,93 @@ pub const Machine = struct {
         if (self.state == .paused) return;
         if (self.state == .created) self.state = .running;
 
-        var q: u8 = 0;
-        while (q < quanta) : (q += 1) {
-            self.emulated_ticks +%= 1;
+        if (self.guest_loaded) {
+            self.runCpu(quanta);
+        } else {
+            // No guest yet: the machine shows what it is instead of running
+            // something, so an operator can see it come up.
+            var q: u8 = 0;
+            while (q < quanta) : (q += 1) {
+                self.emulated_ticks +%= 1;
+            }
+            self.render();
         }
-        self.render();
+    }
+
+    /// Execute a slice of the guest's instructions.
+    fn runCpu(self: *Machine, quanta: u8) void {
+        // A quantum is a few hundred instructions: enough for the guest to
+        // make progress, small enough that a guest that spins cannot take the
+        // host's CPU away from the other machines.
+        const budget: u64 = @as(u64, quanta) * 256;
+        self.cpu.run(budget);
+        self.emulated_ticks +%= self.cpu.instructions;
+
+        // Hand the guest's console output to the host's log.
+        if (!self.cpu.uart.drained()) {
+            const text = self.cpu.uart.take();
+            serial.serialWrite("[");
+            serial.serialWrite(self.nameSlice());
+            serial.serialWrite("] ");
+            serial.serialWrite(text);
+        }
+
+        if (self.cpu.trapped) {
+            const err = self.cpu.trap;
+            const rip = self.cpu.trap_rip;
+            self.cpu.trapped = false;
+            serial.serialWrite("[ZVM] Machine ");
+            serial.serialWriteDec(self.id);
+            serial.serialWrite(" '");
+            serial.serialWrite(self.nameSlice());
+            serial.serialWrite("' trapped at guest 0x");
+            serial.serialWriteHex(rip);
+            serial.serialWrite(": ");
+            serial.serialWrite(@errorName(err));
+            serial.serialWrite("\n");
+            // A trapped guest is stopped, not restarted: running it again
+            // would trap again in the same place.
+            self.state = .paused;
+        }
+    }
+
+    /// Prepare the virtual CPU and start the guest.
+    ///
+    /// The guest inherits its RAM mapped identically and the hypervisor's
+    /// device at a fixed guest physical address, and starts at the entry
+    /// point its image declared, with the boot information in the first
+    /// argument register.
+    pub fn startGuest(self: *Machine) bool {
+        if (!self.guest_loaded) return false;
+
+        const ok = mmu_mod.setupInitialTables(
+            &self.device.memory,
+            self.device.regs_phys,
+            self.device.window_phys,
+        );
+        if (!ok) {
+            serial.serialWrite("[ZVM] Machine ");
+            serial.serialWriteDec(self.id);
+            serial.serialWrite(": could not build the guest's page tables\n");
+            return false;
+        }
+
+        self.cpu = .{};
+        self.cpu.memory = self.device.memory;
+        self.cpu.identity = self.identity;
+        self.cpu.rip = self.guest_entry_gpa;
+        self.cpu.regs[cpu_mod.RSP] = self.guest_stack_gpa;
+        self.cpu.regs[cpu_mod.RDI] = self.guest_mbinfo_gpa;
+        self.cpu.regs[cpu_mod.RSI] = self.guest_mbinfo_gpa;
+
+        serial.serialWrite("[ZVM] Machine ");
+        serial.serialWriteDec(self.id);
+        serial.serialWrite(" '");
+        serial.serialWrite(self.nameSlice());
+        serial.serialWrite("': started at guest 0x");
+        serial.serialWriteHex(self.guest_entry_gpa);
+        serial.serialWrite("\n");
+        return true;
     }
 
     /// Draw the guest console into this machine's virtual display.
