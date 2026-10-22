@@ -129,8 +129,14 @@
 - [x] Resource partitioning: cores and RAM per guest, manual or automatic — `src/kvm/resources.zig`
 - [x] Core masks: each guest's threads bound to disjoint host CPUs
 - [x] Virtual displays and the compositor (host / solo / tile / focus) — `src/system/gfx/{output,display}.zig`
-- [x] Shell driver: `kvm` (add/rm/layout/focus/policy/budget/view) — `src/programs/kvm.zig`
+- [x] Shell driver: `kvm` (add/rm/layout/focus/policy/budget/dev/guest/view) — `src/programs/kvm.zig`
+- [x] Per-machine identity: a different plausible computer for every guest, and a different one on every boot — `src/kvm/identity.zig`
+- [x] The hypervisor's own device (ZVP): PCI config space, MMIO registers, shared window, doorbell protocol — `src/kvm/devices/zvp.zig`
+- [x] The guest driver, in ring 3, proving the device end to end — `src/user/kvm_test.zig`
+- [x] The shared UAPI both sides include — `src/kvm/proto.zig`
 - [ ] CPU emulator: the vCPUs are still guest-console renderers
+- [ ] Serve the ZVP's PCI configuration space from a real PCI model, so a guest finds it by scanning the bus
+- [ ] Interrupt the guest when the ZVP has something to say, instead of polling it
 - [ ] Guest memory: a guest's RAM is not mapped yet (the virtual display is)
 - [ ] Real device model: the 8259/8254/APIC/IOAPIC/virtio devices the profiles describe
 - [ ] Load a real guest kernel and probe it (the auto-selection path needs a guest to observe)

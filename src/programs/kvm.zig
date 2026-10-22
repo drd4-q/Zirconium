@@ -8,6 +8,8 @@
 //!   kvm focus <id|next|prev>- change the focused machine
 //!   kvm policy <auto|manual>- how the resources are divided
 //!   kvm budget <id> <cores> <ram_mb> - set one machine's budget by hand
+//!   kvm dev [id]         - show a machine's device as a guest sees it
+//!   kvm guest [id]       - run the guest driver against a machine
 //!   kvm view [seconds] [layout] - full-screen viewer (Tab = next, Esc = back)
 //!
 //! `tile` shows every machine at once; `solo` and `focus` show one and let
@@ -30,6 +32,10 @@ fn vgaWriteDec(v: u64) void {
     vga.writeDec(v);
 }
 
+fn vgaWriteHexShort(v: u64) void {
+    vga.writeHexShort(v);
+}
+
 fn parseUint(text: []const u8) ?u32 {
     return std.fmt.parseInt(u32, text, 10) catch null;
 }
@@ -37,7 +43,7 @@ fn parseUint(text: []const u8) ?u32 {
 pub fn run(args: []const u8) void {
     const trimmed = std.mem.trim(u8, args, " \t");
     if (trimmed.len == 0) {
-        kvm.printStatus(vgaWrite, vgaWriteDec);
+        kvm.printStatus(vgaWrite, vgaWriteDec, vgaWriteHexShort);
         return;
     }
 
@@ -179,6 +185,38 @@ pub fn run(args: []const u8) void {
         return;
     }
 
+    if (std.mem.eql(u8, sub, "dev")) {
+        var index: usize = 0;
+        if (it.next()) |text| {
+            index = @intCast(parseUint(text) orelse 0);
+        }
+        const m = kvm.getMachine(index) orelse {
+            vga.write("kvm dev: no such machine\n");
+            return;
+        };
+        showDevice(m);
+        return;
+    }
+
+    if (std.mem.eql(u8, sub, "guest")) {
+        // Run the guest driver against a machine: the round trip over the
+        // hypervisor's own device.
+        var index: usize = 0;
+        if (it.next()) |text| {
+            index = @intCast(parseUint(text) orelse 0);
+        }
+        kvm.runGuestDriver(index) catch |err| {
+            vga.setColor(.light_red, .black);
+            vga.write("kvm guest failed: ");
+            vga.write(@errorName(err));
+            vga.write("\n");
+            vga.setColor(.white, .black);
+            return;
+        };
+        vga.write("Guest driver finished.\n");
+        return;
+    }
+
     if (std.mem.eql(u8, sub, "view")) {
         var seconds: u32 = 0;
         var start_layout: kvm.Layout = .focus;
@@ -226,6 +264,67 @@ fn cycleLayout() void {
         .host => .focus,
     };
     kvm.setLayout(next);
+}
+
+/// Show a machine's device the way a guest would see it.
+///
+/// The configuration space is printed in the classic PCI layout, because
+/// that is what a guest's driver reads.  The vendor and device IDs are the
+/// machine's own, so this is the identity a guest would bind to.
+fn showDevice(m: *kvm.Machine) void {
+    vga.setColor(.light_cyan, .black);
+    vga.write("Device of machine ");
+    vga.writeDec(m.id);
+    vga.write(" '");
+    vga.write(m.nameSlice());
+    vga.write("'\n\n");
+    vga.setColor(.white, .black);
+
+    const cs = &m.device.config_space;
+    vga.write("  PCI configuration space:\n");
+    vga.write("    vendor  device  class      BAR0       BAR2\n");
+    vga.write("    ");
+    vga.writeHexShort(readLe16(cs, 0x00));
+    vga.write("    ");
+    vga.writeHexShort(readLe16(cs, 0x02));
+    vga.write("    ");
+    vga.writeHexShort((@as(u32, cs[0x0B]) << 16) | (@as(u32, cs[0x0A]) << 8) | @as(u32, cs[0x09]));
+    vga.write("    ");
+    vga.writeHexShort(readLe32(cs, 0x10));
+    vga.write("    ");
+    vga.writeHexShort(readLe32(cs, 0x18));
+    vga.write("\n\n");
+
+    vga.write("  Identity:\n");
+    vga.write("    persona:    ");
+    vga.write(m.identity.personaName());
+    vga.write("\n    OEM:        ");
+    vga.write(m.identity.oemId());
+    vga.write("\n    manufacturer: ");
+    vga.write(m.identity.manufacturer());
+    vga.write("\n    product:    ");
+    vga.write(m.identity.product());
+    vga.write("\n    cpu:        ");
+    vga.write(m.identity.cpuBrand());
+    vga.write("\n    uuid:       ");
+    for (m.identity.uuid) |b| {
+        vga.writeHexShort(b);
+        vga.write("-");
+    }
+    vga.write("\n    hypervisor: ");
+    vga.write(if (m.identity.hypervisor_leaf_present) "VISIBLE" else "invisible");
+    vga.write("\n\n");
+}
+
+fn readLe16(buf: []const u8, at: usize) u16 {
+    return @as(u16, buf[at]) | (@as(u16, buf[at + 1]) << 8);
+}
+
+fn readLe32(buf: []const u8, at: usize) u32 {
+    return @as(u32, buf[at]) |
+        (@as(u32, buf[at + 1]) << 8) |
+        (@as(u32, buf[at + 2]) << 16) |
+        (@as(u32, buf[at + 3]) << 24);
 }
 
 /// The full-screen viewer.

@@ -23,11 +23,15 @@ const font = @import("../system/gfx/font.zig");
 const output_mod = @import("../system/gfx/output.zig");
 const profile_mod = @import("profile.zig");
 const resources_mod = @import("resources.zig");
+const identity_mod = @import("identity.zig");
+const zvp_mod = @import("devices/zvp.zig");
 
 pub const Output = output_mod.Output;
 pub const Profile = profile_mod.Profile;
 pub const Observations = profile_mod.Observations;
 pub const Budget = resources_mod.Budget;
+pub const Identity = identity_mod.Identity;
+pub const Zvp = zvp_mod.Zvp;
 
 pub const State = enum {
     /// Created, not yet probed.
@@ -53,6 +57,11 @@ pub const Machine = struct {
     id: u32 = 0,
     name: [16]u8 = [_]u8{0} ** 16,
     profile: Profile = undefined,
+    /// The identity this machine is presented with.  Every machine gets a
+    /// different one, so two guests never see the same computer.
+    identity: Identity = .{},
+    /// The hypervisor's own device, as this machine sees it.
+    device: Zvp = .{},
     /// The index of this machine's display in the compositor's output list.
     /// The compositor owns the buffer; the machine writes into it.
     output_index: usize = 0,

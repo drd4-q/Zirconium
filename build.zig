@@ -89,6 +89,25 @@ pub fn build(b: *std.Build) void {
     user2_exe.entry = .{ .symbol_name = "_start" };
     user2_exe.image_base = 0x2000000;
 
+    // 2c. The guest driver for the hypervisor's own device.  It is a
+    //     freestanding ring-3 program, exactly like the user tests, and it
+    //     talks to the device through the shared protocol header.
+    const kvm_test_exe = b.addExecutable(.{
+        .name = "kvm_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/user/kvm_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    kvm_test_exe.entry = .{ .symbol_name = "_start" };
+    kvm_test_exe.image_base = 0x2000000;
+    // The protocol header is shared with the hypervisor: the guest driver
+    // and the device it drives cannot disagree about the interface.
+    kvm_test_exe.root_module.addAnonymousImport("kvm_proto", .{
+        .root_source_file = b.path("src/kvm/proto.zig"),
+    });
+
     // 3. Run bin2zig to generate user_test_bin.zig
     const run_bin2zig = b.addRunArtifact(bin2zig);
     run_bin2zig.addArg("-i");
@@ -117,6 +136,12 @@ pub fn build(b: *std.Build) void {
 
     const tramp_bin = tramp_exe.addObjCopy(.{ .format = .bin });
     const tramp_bin_file = tramp_bin.getOutput();
+
+    const run_bin2zig_kvm = b.addRunArtifact(bin2zig);
+    run_bin2zig_kvm.addArg("-i");
+    run_bin2zig_kvm.addFileArg(kvm_test_exe.getEmittedBin());
+    run_bin2zig_kvm.addArg("-o");
+    const kvm_test_out = run_bin2zig_kvm.addOutputFileArg("kvm_test_bin.zig");
 
     const run_bin2zig_t = b.addRunArtifact(bin2zig);
     run_bin2zig_t.addArg("-i");
@@ -160,6 +185,9 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addAnonymousImport("ap_tramp_bin", .{
         .root_source_file = tramp_out,
+    });
+    exe.root_module.addAnonymousImport("kvm_test_bin", .{
+        .root_source_file = kvm_test_out,
     });
 
     b.installArtifact(exe);

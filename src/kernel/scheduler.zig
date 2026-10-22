@@ -143,6 +143,27 @@ pub fn addUserTask(entry_vaddr: u64, _: u64, _: u64) ?u32 {
 }
 
 pub fn addElfUserTask(elf_data: []const u8) ?u32 {
+    return addElfUserTaskMapped(elf_data, &.{});
+}
+
+/// An extra page mapping for a user task: a piece of hardware the task is
+/// allowed to touch.  This is how a guest driver reaches a device's
+/// registers.
+pub const ExtraMapping = struct {
+    /// Where in the task's virtual address space the page appears.
+    vaddr: u64,
+    /// The physical page it is backed by.
+    paddr: u64,
+    /// How many bytes.
+    size: u64,
+};
+
+/// Load an ELF into a new user task and map any extra pages into it.
+///
+/// The mappings are the guest's view of the hardware: a device's register
+/// block and its shared window.  The task can read and write them exactly
+/// as it would a device mapped into its own page tables.
+pub fn addElfUserTaskMapped(elf_data: []const u8, extra: []const ExtraMapping) ?u32 {
     const t = newUserTaskSlot() orelse return null;
 
     if (address_space.AddressSpace.create()) |addr_space| {
@@ -156,6 +177,12 @@ pub fn addElfUserTask(elf_data: []const u8) ?u32 {
             t.address_space = null;
             return null;
         };
+
+        // The hardware the task is allowed to touch.
+        for (extra) |m| {
+            addr_space.mapUserRange(m.vaddr, m.paddr, m.size, vmm.PAGE_WRITE);
+        }
+
         t.entry_point = entry_vaddr;
         return registerUser(t, entry_vaddr, "User ELF");
     } else {
@@ -535,6 +562,14 @@ pub fn yieldCurrent() void {
 /// the very tick that would release it cannot arrive while IF is clear.
 pub fn scheduleTick(frame: ?*isr.InterruptFrame) void {
     tick_count += 1;
+
+    // The hypervisor's own devices are serviced from the tick: a guest
+    // spinning in a wait loop needs an answer from the hypervisor, and the
+    // tick is the only thing that runs while the guest has the CPU.  The
+    // service is bounded and never blocks.
+    if (@import("config").features.kvm) {
+        @import("../kvm/mod.zig").serviceDevices();
+    }
 
     if (frame) |f| {
         const cur_signed = current_task;
