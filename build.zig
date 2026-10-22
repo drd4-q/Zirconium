@@ -43,6 +43,12 @@ pub fn build(b: *std.Build) void {
             .optimize = .Debug,
         }),
     });
+    // The guest profiles are pure data, so the generator can read the same
+    // table the kernel uses: a profile that is spelled wrong in the
+    // configuration is a build error, not a machine that never comes up.
+    gen_config.root_module.addAnonymousImport("vm_profiles", .{
+        .root_source_file = b.path("src/vm/profiles.zig"),
+    });
 
     const run_gen_config = b.addRunArtifact(gen_config);
     // Inherit the terminal: the generator's progress output is meant to be
@@ -105,8 +111,27 @@ pub fn build(b: *std.Build) void {
     // The protocol header is shared with the hypervisor: the guest driver
     // and the device it drives cannot disagree about the interface.
     kvm_test_exe.root_module.addAnonymousImport("kvm_proto", .{
-        .root_source_file = b.path("src/kvm/proto.zig"),
+        .root_source_file = b.path("src/vm/proto.zig"),
     });
+
+    // 2d. The sample guest kernel: a 32-bit Multiboot stub plus the 64-bit
+    //     half.  It is embedded in the kernel, so a ZVM with no guest image
+    //     on its disk still has one to load.
+    const guest_exe = b.addExecutable(.{
+        .name = "guest_kernel",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("samples/guest_kernel.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    // The 32-bit Multiboot stub (samples/guest_stub.S) is *not* linked in yet:
+    // putting a 32-bit stub and 64-bit code in one image needs the linker's
+    // own layout, and the sample is here to exercise the loader, not the
+    // handoff.  The stub and its linker script are in the tree, ready for
+    // the CPU emulator milestone.
+    guest_exe.entry = .{ .symbol_name = "guest64_entry" };
+    guest_exe.image_base = 0x100000;
 
     // 3. Run bin2zig to generate user_test_bin.zig
     const run_bin2zig = b.addRunArtifact(bin2zig);
@@ -142,6 +167,12 @@ pub fn build(b: *std.Build) void {
     run_bin2zig_kvm.addFileArg(kvm_test_exe.getEmittedBin());
     run_bin2zig_kvm.addArg("-o");
     const kvm_test_out = run_bin2zig_kvm.addOutputFileArg("kvm_test_bin.zig");
+
+    const run_bin2zig_guest = b.addRunArtifact(bin2zig);
+    run_bin2zig_guest.addArg("-i");
+    run_bin2zig_guest.addFileArg(guest_exe.getEmittedBin());
+    run_bin2zig_guest.addArg("-o");
+    const guest_out = run_bin2zig_guest.addOutputFileArg("guest_kernel_bin.zig");
 
     const run_bin2zig_t = b.addRunArtifact(bin2zig);
     run_bin2zig_t.addArg("-i");
@@ -188,6 +219,9 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addAnonymousImport("kvm_test_bin", .{
         .root_source_file = kvm_test_out,
+    });
+    exe.root_module.addAnonymousImport("guest_kernel_bin", .{
+        .root_source_file = guest_out,
     });
 
     b.installArtifact(exe);

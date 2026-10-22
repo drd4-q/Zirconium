@@ -70,6 +70,17 @@ pub const Resources = struct {
     /// Per-machine ceilings on the core count, taken from their profile.
     core_ceilings: [MAX_MACHINES]u8 = [_]u8{0} ** MAX_MACHINES,
     machine_count: usize = 0,
+    /// The one contiguous block the guests' RAM is carved out of.
+    ///
+    /// A guest's physical memory has to be contiguous: guest physical
+    /// address X is at `ram_base + X`, and the guest's page tables point
+    /// straight at it.  So the hypervisor reserves **one** block and hands
+    /// out slices of it, rather than letting the memory manager find a
+    /// contiguous run per machine - which fails as soon as two machines
+    /// exist, because the first one has already taken the top of the pool.
+    ram_pool_base: u64 = 0,
+    ram_pool_bytes: u64 = 0,
+    ram_pool_used: u64 = 0,
 
     pub fn setTotalCores(self: *Resources, cores: u8) void {
         self.total_cores = if (cores == 0) 1 else @min(cores, MAX_CORES);
@@ -147,6 +158,22 @@ pub const Resources = struct {
 
         self.assignMasks();
         self.assignTimeShares();
+        self.roundRamToPages();
+    }
+
+    /// Round every machine's RAM down to a whole number of pages.
+    ///
+    /// The shares are computed by division and do not land on a page
+    /// boundary.  A guest's RAM is a run of pages, and rounding the shares
+    /// *up* would make the total larger than the pool the hypervisor
+    /// reserved - the last machine would be squeezed out by a few kilobytes.
+    /// Rounding down loses at most a page per machine and always fits.
+    fn roundRamToPages(self: *Resources) void {
+        const page: usize = 4096;
+        var i: usize = 0;
+        while (i < self.machine_count) : (i += 1) {
+            self.budgets[i].ram_bytes = (self.budgets[i].ram_bytes / page) * page;
+        }
     }
 
     /// The ceiling on a machine's core count, taken from its profile.
@@ -204,6 +231,31 @@ pub const Resources = struct {
             const share = (@as(usize, self.budgets[i].cores) * 100) / total;
             self.budgets[i].time_share = @intCast(@max(share, 1));
         }
+    }
+
+    /// Carve a slice of the guests' RAM pool.
+    ///
+    /// The slice is rounded up to a whole number of pages, and the pool
+    /// offset is kept page-aligned: a guest's RAM is a run of pages, and a
+    /// slice that starts in the middle of one would not be mappable.
+    ///
+    /// Returns null when the pool is exhausted, which happens when the
+    /// partitioner gave out more than the pool holds - it divides the
+    /// hypervisor's share, so that should not happen, but a manual budget
+    /// can ask for more.
+    pub fn carveRam(self: *Resources, bytes: u64) ?struct { base: u64, size: u64 } {
+        if (bytes == 0) return null;
+
+        const page: u64 = 4096;
+        const wanted = (bytes + page - 1) & ~(page - 1);
+
+        // Keep the offset page-aligned.
+        const used = (self.ram_pool_used + page - 1) & ~(page - 1);
+        if (used + wanted > self.ram_pool_bytes) return null;
+
+        const base = self.ram_pool_base + used;
+        self.ram_pool_used = used + wanted;
+        return .{ .base = base, .size = wanted };
     }
 
     /// The budget of one machine.

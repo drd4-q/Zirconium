@@ -1,6 +1,7 @@
 //! The `kvm` command: drive DynamicalKVM.
 //!
-//!   kvm                     - show the hypervisor's state
+//!   vm                      - show the hypervisor's state
+//!   kvm                     - the same thing, under its old name
 //!   kvm list                - list the known guest profiles
 //!   kvm add <name> [profile]- create a machine (profile defaults to "auto")
 //!   kvm rm <id>             - remove a machine
@@ -17,7 +18,7 @@
 const std = @import("std");
 const root = @import("root");
 const vga = root.vga;
-const kvm = @import("../kvm/mod.zig");
+const kvm = @import("../vm/mod.zig");
 const display = @import("../system/gfx/display.zig");
 const fb = @import("../system/framebuffer.zig");
 const kb = @import("../drivers/keyboard.zig");

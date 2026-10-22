@@ -77,8 +77,47 @@
       { "name": "network", "requires": "network" },
       { "name": "input", "requires": "usb" },
       { "name": "smp", "requires": "smp" },
+      { "name": "machines", "requires": "kvm" },
+      { "name": "guests", "requires": "kvm" },
       { "name": "scheduler" },
       { "name": "shell" }
+    ]
+  },
+
+  "machines": {
+    "$comment": [
+      "The machines this ZVM runs.  This is the heart of the configuration: a",
+      "virtual machine monitor is defined by the machines it runs, not by the",
+      "host's own features.",
+      "",
+      "  name      - the name the operator sees",
+      "  profile   - the machine the guest is shown; 'auto' lets the",
+      "              hypervisor decide from what the guest turns out to need",
+      "  image     - the guest's kernel image, on the host's filesystem",
+      "  autostart - whether the machine is started at boot",
+      "  cores     - vCPUs to give it; 0 lets the partitioner decide",
+      "  ram_mb    - RAM to give it; 0 lets the partitioner decide",
+      "  order     - the order the machines are started in"
+    ],
+    "list": [
+      {
+        "name": "linux",
+        "profile": "linux-x86_64",
+        "image": "/vms/linux.elf",
+        "autostart": true,
+        "cores": 0,
+        "ram_mb": 0,
+        "order": 0
+      },
+      {
+        "name": "bsd",
+        "profile": "bsd-x86_64",
+        "image": "/vms/bsd.elf",
+        "autostart": true,
+        "cores": 0,
+        "ram_mb": 0,
+        "order": 1
+      }
     ]
   }
 }

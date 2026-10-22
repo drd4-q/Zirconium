@@ -166,6 +166,7 @@ const command_table = [_]CmdEntry{
     .{ .name = "uptime",     .run = runUptime },
     .{ .name = "mount",      .run = runMount },
     .{ .name = "nano",       .run = cmdNano },
+    .{ .name = "vm",         .run = kvm_prog.run, .feature = .kvm },
     .{ .name = "kvm",        .run = kvm_prog.run, .feature = .kvm },
 };
 
@@ -206,7 +207,19 @@ pub fn run() void {
 
     while (true) {
         vga.setColor(.light_green, .black);
-        vga.write("zig> ");
+        // The prompt names the focused machine: this console supervises the
+        // machines, and "which one am I talking to" is the first question.
+        if (config.features.kvm and @import("vm/mod.zig").machineCount() > 0) {
+            vga.write("zvm");
+            vga.write("@");
+            const focused = @import("vm/mod.zig").getMachine(@import("vm/mod.zig").focused());
+            if (focused) |m| {
+                vga.write(m.nameSlice());
+            }
+            vga.write("> ");
+        } else {
+            vga.write("zvm> ");
+        }
         vga.setColor(.white, .black);
         // Mirror the prompt over serial: it is the handshake marker for
         // headless automation driving the console through QEMU stdio.
@@ -220,6 +233,11 @@ pub fn run() void {
     }
 }
 
+/// The supervisor's banner.
+///
+/// This console belongs to the hypervisor, not to a guest: it is where the
+/// machines are supervised, not where programs are run.  The machines the
+/// ZVM brought up are listed underneath, because they are the point.
 fn printBanner() void {
     vga.setColor(.light_cyan, .black);
     vga.write("  ____                _                   \n");
@@ -228,8 +246,38 @@ fn printBanner() void {
     vga.write(" | |_| |  __/ (_|  __/ | | || | | | | | |\n");
     vga.write(" |____/ \\___|\\___\\___|\\__|\\_,_|_| |_| |_|\n");
     vga.setColor(.white, .black);
-    vga.write("\n  Zirconium v0.3.0 — Bare-metal x86_64\n");
-    vga.write("  Type 'help' for commands.\n\n");
+    vga.write("\n  ZVM ");
+    vga.write(config.kernel_version);
+    vga.write(" - virtual machine monitor\n");
+    vga.write("  Type 'help' for commands, 'vm' for the machines.\n\n");
+
+    // The machines that came up.
+    if (config.features.kvm) {
+        const vm = @import("vm/mod.zig");
+        if (vm.machineCount() > 0) {
+            vga.setColor(.light_gray, .black);
+            vga.write("  Machines:\n");
+            var i: usize = 0;
+            while (i < vm.machineCount()) : (i += 1) {
+                const m = vm.getMachine(i) orelse continue;
+                vga.write("    [");
+                vga.writeDec(i);
+                vga.write("] ");
+                vga.write(m.nameSlice());
+                vga.write("  ");
+                if (m.guest_loaded) {
+                    vga.setColor(.light_green, .black);
+                    vga.write("guest loaded");
+                } else {
+                    vga.setColor(.light_red, .black);
+                    vga.write("no guest");
+                }
+                vga.setColor(.light_gray, .black);
+                vga.write("\n");
+            }
+            vga.write("\n");
+        }
+    }
 }
 
 fn execute(cmd: []const u8) void {
@@ -1021,7 +1069,9 @@ fn printHelp(_: []const u8) void {
         vga.write("    gui           Window manager demo (framebuffer)\n\n");
     }
     if (config.features.kvm) {
-        vga.write("    kvm           DynamicalKVM: run several guests at once\n\n");
+        vga.write("    vm            The machines this ZVM runs (list, focus, view)\n");
+        vga.write("    vm guest [id] Run the guest driver against a machine\n");
+        vga.write("    vm dev [id]   Show a machine's device as a guest sees it\n\n");
     }
     vga.write("  Display:\n");
     vga.write("    screen        Framebuffer info (mode/pitch/grid)\n");

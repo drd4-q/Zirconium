@@ -15,8 +15,14 @@
 //! command-line switch on top of the file (the kernel's `-Dselftest=true`).
 
 const std = @import("std");
+const profiles = @import("vm_profiles");
 
 // ─── The schema ─────────────────────────────────────────────────────
+
+/// Is this a profile the kernel knows?
+fn isKnownProfile(name: []const u8) bool {
+    return profiles.findProfile(name) != null;
+}
 
 /// Every feature the kernel knows about.  The kernel's `config.Feature` enum
 /// is generated from this list, so adding a feature here and using
@@ -50,6 +56,8 @@ const stage_names = [_][]const u8{
     "kernel",
     "pci",
     "storage",
+    "machines",
+    "guests",
     "network",
     "input",
     "smp",
@@ -64,6 +72,35 @@ const Config = struct {
     network: Network,
     features: std.json.Value,
     boot: Boot,
+    /// The machines the hypervisor runs.  This is the heart of the
+    /// configuration: a ZVM is defined by the machines it runs, not by the
+    /// host's own features.
+    machines: Machines = .{},
+};
+
+/// The machines the hypervisor runs.
+const Machines = struct {
+    list: []const MachineSpec = &.{},
+};
+
+/// One machine the hypervisor runs.
+const MachineSpec = struct {
+    /// The name the operator sees.
+    name: []const u8,
+    /// The profile: the machine the guest is shown.  "auto" means the
+    /// hypervisor decides from what the guest turns out to need.
+    profile: []const u8 = "auto",
+    /// Where the guest's kernel image is, on the host's filesystem.
+    image: []const u8 = "",
+    /// Whether the machine is started at boot.
+    autostart: bool = true,
+    /// How many vCPUs to give it.  0 means "let the partitioner decide".
+    cores: u8 = 0,
+    /// How much RAM to give it, in megabytes.  0 means "let the partitioner
+    /// decide".
+    ram_mb: u32 = 0,
+    /// The order the machines are started in.  Lower starts first.
+    order: u32 = 0,
 };
 
 const Kernel = struct {
@@ -230,8 +267,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // ─── Resolve the boot sequence ────────────────────────────────
-    var stages: std.ArrayList(StageSpec) = .empty;
-    for (config.boot.stages) |spec| {
+    var stages: std.ArrayList(StageSpec) = .empty;    for (config.boot.stages) |spec| {
         if (!isKnown(&stage_names, spec.name)) {
             std.debug.print("gen_config: unknown boot stage '{s}'\n", .{spec.name});
             return error.UnknownStage;
@@ -250,6 +286,38 @@ pub fn main(init: std.process.Init) !void {
         }
         try stages.append(allocator, spec);
     }
+
+    // ─── Resolve the machines ─────────────────────────────────────
+    // A machine is a real thing the hypervisor will run, so the
+    // configuration is checked hard: a machine with no name, or two with
+    // the same one, would be a mystery at boot.
+    var machines: std.ArrayList(MachineSpec) = .empty;
+    for (config.machines.list) |spec| {
+        if (spec.name.len == 0) {
+            std.debug.print("gen_config: a machine has no name\n", .{});
+            return error.UnnamedMachine;
+        }
+        for (machines.items) |existing| {
+            if (std.mem.eql(u8, existing.name, spec.name)) {
+                std.debug.print("gen_config: two machines are called '{s}'\n", .{spec.name});
+                return error.DuplicateMachine;
+            }
+        }
+        if (spec.profile.len != 0 and !std.mem.eql(u8, spec.profile, "auto")) {
+            if (!isKnownProfile(spec.profile)) {
+                std.debug.print("gen_config: machine '{s}' wants the unknown profile '{s}'\n", .{ spec.name, spec.profile });
+                return error.UnknownProfile;
+            }
+        }
+        try machines.append(allocator, spec);
+    }
+    // Start order: by `order`, then by the order in the file.  A stable sort
+    // keeps the file's order for the machines that do not say.
+    std.mem.sort(MachineSpec, machines.items, {}, struct {
+        fn lessThan(_: void, a: MachineSpec, b: MachineSpec) bool {
+            return a.order < b.order;
+        }
+    }.lessThan);
 
     // ─── Validate the tunables ───────────────────────────────────
     if (config.timer.hz == 0 or config.timer.hz > 1000) {
@@ -327,6 +395,45 @@ pub fn main(init: std.process.Init) !void {
     try w.writeAll("pub const boot_stages = [_]Stage{\n");
     for (stages.items) |spec| {
         try w.print("    .{s},\n", .{spec.name});
+    }
+    try w.writeAll("};\n\n");
+
+    // The machines the hypervisor runs.  This is the heart of the
+    // configuration: a ZVM is defined by the machines it runs.
+    try w.writeAll(
+        \\/// One machine the hypervisor runs.
+        \\pub const MachineSpec = struct {
+        \\    /// The name the operator sees.
+        \\    name: []const u8,
+        \\    /// The profile: the machine the guest is shown.  "auto" means the
+        \\    /// hypervisor decides from what the guest turns out to need.
+        \\    profile: []const u8 = "auto",
+        \\    /// Where the guest's kernel image is, on the host's filesystem.
+        \\    image: []const u8 = "",
+        \\    /// Whether the machine is started at boot.
+        \\    autostart: bool = true,
+        \\    /// How many vCPUs to give it.  0 means "let the partitioner decide".
+        \\    cores: u8 = 0,
+        \\    /// How much RAM to give it, in megabytes.  0 means "let the
+        \\    /// partitioner decide".
+        \\    ram_mb: u32 = 0,
+        \\    /// The order the machines are started in.  Lower starts first.
+        \\    order: u32 = 0,
+        \\};
+        \\
+        \\
+    );
+    try w.writeAll("/// The machines the hypervisor runs, in start order.\npub const machines = [_]MachineSpec{\n");
+    for (machines.items) |m| {
+        try w.print("    .{{ .name = \"{s}\", .profile = \"{s}\", .image = \"{s}\", .autostart = {s}, .cores = {d}, .ram_mb = {d}, .order = {d} }},\n", .{
+            m.name,
+            m.profile,
+            m.image,
+            if (m.autostart) "true" else "false",
+            m.cores,
+            m.ram_mb,
+            m.order,
+        });
     }
     try w.writeAll("};\n\n");
 

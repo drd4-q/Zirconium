@@ -568,7 +568,7 @@ pub fn scheduleTick(frame: ?*isr.InterruptFrame) void {
     // tick is the only thing that runs while the guest has the CPU.  The
     // service is bounded and never blocks.
     if (@import("config").features.kvm) {
-        @import("../kvm/mod.zig").serviceDevices();
+        @import("../vm/mod.zig").serviceDevices();
     }
 
     if (frame) |f| {
@@ -593,7 +593,7 @@ pub fn pollDeferred() void {
     // The guests run here rather than in the tick handler: emulating a guest
     // is not a bounded operation, and the tick handler must never block.
     if (@import("config").features.kvm) {
-        @import("../kvm/mod.zig").poll();
+        @import("../vm/mod.zig").poll();
     }
     if (tick_count % 100 == 0) {
         @import("../net/mod.zig").tick();

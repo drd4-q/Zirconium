@@ -57,6 +57,8 @@ fn runStage(stage: config.Stage) void {
         .kernel => stageKernel(),
         .pci => stagePci(),
         .storage => stageStorage(),
+        .machines => stageMachines(),
+        .guests => stageGuests(),
         .network => stageNetwork(),
         .input => stageInput(),
         .smp => stageSmp(),
@@ -173,6 +175,21 @@ fn stageStorage() void {
     }
     serial.serialWrite("[BOOT] Kernel log enabled\n");
     vga.write("[BOOT] Storage initialized\n");
+}
+
+/// Create the machines the configuration asks for.
+///
+/// This is the autoload: the machines come up without the operator having
+/// to type anything.  It runs after the storage stage so that a machine can
+/// be given a disk later, and before the network stage so the network is up
+/// when the guests start asking for it.
+fn stageMachines() void {
+    @import("../vm/mod.zig").autoload();
+}
+
+/// Load the guest kernels of the autoloaded machines.
+fn stageGuests() void {
+    @import("../vm/mod.zig").loadGuests();
 }
 
 fn stageNetwork() void {

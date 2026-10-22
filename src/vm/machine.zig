@@ -73,6 +73,18 @@ pub const Machine = struct {
     observations: Observations = .{},
     /// Ticks of emulated time this machine has run for.
     emulated_ticks: u64 = 0,
+    /// The guest's kernel has been loaded into this machine's memory.
+    guest_loaded: bool = false,
+    /// The guest physical address of the entry point.
+    guest_entry_gpa: u64 = 0,
+    /// The guest physical address of the boot information block.
+    guest_mbinfo_gpa: u64 = 0,
+    /// The guest physical address of the initial stack top.
+    guest_stack_gpa: u64 = 0,
+    /// How many bytes of the guest image were loaded.
+    guest_bytes: usize = 0,
+    /// Where the guest's image was read from.
+    guest_image: [64]u8 = [_]u8{0} ** 64,
     /// The colour used for this machine's decorations, so several machines
     /// are told apart at a glance in the tiled view.
     accent: u32 = 0x40C0FF,
@@ -88,6 +100,19 @@ pub const Machine = struct {
     pub fn nameSlice(self: *const Machine) []const u8 {
         const n = std.mem.indexOfScalar(u8, &self.name, 0) orelse self.name.len;
         return self.name[0..n];
+    }
+
+    /// The path the guest's image was loaded from.
+    pub fn guestImagePath(self: *const Machine) []const u8 {
+        const n = std.mem.indexOfScalar(u8, &self.guest_image, 0) orelse self.guest_image.len;
+        return self.guest_image[0..n];
+    }
+
+    /// Record where the guest's image comes from.
+    pub fn setGuestImage(self: *Machine, path: []const u8) void {
+        @memset(&self.guest_image, 0);
+        const n = @min(path.len, self.guest_image.len - 1);
+        @memcpy(self.guest_image[0..n], path[0..n]);
     }
 
     pub fn setName(self: *Machine, value: []const u8) void {

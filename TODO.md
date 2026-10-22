@@ -129,12 +129,17 @@
 - [x] Resource partitioning: cores and RAM per guest, manual or automatic — `src/kvm/resources.zig`
 - [x] Core masks: each guest's threads bound to disjoint host CPUs
 - [x] Virtual displays and the compositor (host / solo / tile / focus) — `src/system/gfx/{output,display}.zig`
-- [x] Shell driver: `kvm` (add/rm/layout/focus/policy/budget/dev/guest/view) — `src/programs/kvm.zig`
+- [x] Shell driver: `vm` (add/rm/layout/focus/policy/budget/dev/guest/view) — `src/programs/kvm.zig`
+- [x] The autoload: the machines come up from the configuration, unprompted — `config.machines`, `vm.autoload()`
+- [x] The guest kernel loader: ELF into the guest's RAM, with a Multiboot 1 boot information block — `src/vm/loader.zig`
+- [x] A built-in sample guest, so a ZVM with an empty disk still has something to load — `samples/guest_kernel.zig`
+- [x] The supervisor console: the banner lists the machines, the prompt names the focused one
 - [x] Per-machine identity: a different plausible computer for every guest, and a different one on every boot — `src/kvm/identity.zig`
 - [x] The hypervisor's own device (ZVP): PCI config space, MMIO registers, shared window, doorbell protocol — `src/kvm/devices/zvp.zig`
 - [x] The guest driver, in ring 3, proving the device end to end — `src/user/kvm_test.zig`
 - [x] The shared UAPI both sides include — `src/kvm/proto.zig`
 - [ ] CPU emulator: the vCPUs are still guest-console renderers
+- [ ] The 32-bit Multiboot stub of the sample guest is written but not linked: putting a 32-bit stub and 64-bit code in one image needs the linker's own layout (`samples/guest_stub.S` and `samples/guest_kernel.ld` are ready)
 - [ ] Serve the ZVP's PCI configuration space from a real PCI model, so a guest finds it by scanning the bus
 - [ ] Map the guest's devices into its address space (the ZVP's BARs) rather than into the driver's
 - [ ] Interrupt the guest when the ZVP has something to say, instead of polling it

@@ -29,6 +29,7 @@ pub const profile = @import("profile.zig");
 pub const resources = @import("resources.zig");
 pub const identity = @import("identity.zig");
 pub const zvp = @import("devices/zvp.zig");
+pub const loader = @import("loader.zig");
 pub const machine_mod = @import("machine.zig");
 pub const display = @import("../system/gfx/display.zig");
 pub const fb = @import("../system/framebuffer.zig");
@@ -51,6 +52,9 @@ var initialized: bool = false;
 /// The seed every machine's identity is derived from.  It is different on
 /// every boot, so the identities are different on every boot.
 var boot_seed: u64 = 0;
+/// Set while a batch of machines is being created, so the partition is
+/// computed once at the end rather than after every machine.
+var suspend_repartition: bool = false;
 /// A counter that makes each machine's identity differ from the others'.
 var machine_serial: u64 = 0;
 
@@ -74,6 +78,28 @@ pub fn init() void {
     // nothing for them.
     const free_pages = @import("../kernel/pmm.zig").free_pages;
     res.total_ram_bytes = (free_pages * 4096) * 3 / 4;
+
+    // The guests' RAM is one contiguous block, carved up per machine.  A
+    // guest's physical memory has to be contiguous - guest physical address X
+    // is at ram_base + X and its page tables point straight at that - so the
+    // block is reserved once, here, rather than the memory manager being
+    // asked for a contiguous run per machine.
+    const pmm = @import("../kernel/pmm.zig");
+    const pool_pages = res.total_ram_bytes / 4096;
+    if (pool_pages != 0) {
+        if (pmm.allocPages(pool_pages)) |pool| {
+            res.ram_pool_base = pool;
+            res.ram_pool_bytes = pool_pages * 4096;
+            // The partitioner divides the pool, so the total it works with
+            // has to be the pool and not the (unrounded) number it came from:
+            // the pool is a whole number of pages and the total is not, and
+            // the last machine would be squeezed out by the difference.
+            res.total_ram_bytes = res.ram_pool_bytes;
+        } else {
+            serial.serialWrite("[KVM] Could not reserve a contiguous block for the guests' RAM\n");
+            res.total_ram_bytes = 0;
+        }
+    }
 
     serial.serialWrite("[KVM] DynamicalKVM ready: ");
     serial.serialWriteDec(cpu_count);
@@ -196,11 +222,10 @@ pub fn addMachine(name: []const u8, profile_name: []const u8) !u32 {
     machines[machine_count] = m;
     machine_count += 1;
 
-    // A new machine changes the partition, so recompute it.
-    repartition();
-
-    // And give it the RAM its budget says it gets.
-    allocateRam(machine_count - 1);
+    // A new machine changes the partition, so recompute it - and with it the
+    // RAM every machine gets.  The autoload creates several machines and
+    // partitions once at the end, so the repartition is suspended until then.
+    if (!suspend_repartition) repartition();
 
     serial.serialWrite("[KVM] Machine ");
     serial.serialWriteDec(m.id);
@@ -245,51 +270,52 @@ pub fn removeMachine(index: usize) void {
     repartition();
 }
 
-/// Give a machine the RAM its budget says it gets.
+/// Give every machine the RAM its budget says it gets.
 ///
-/// The RAM is one contiguous block of host memory, so the guest's physical
-/// address X is at `ram_base + X`.  The guest kernel manages it from there;
-/// the hypervisor only has to know where it is so it can walk the guest's
-/// page tables.
-fn allocateRam(index: usize) void {
-    if (index >= machine_count) return;
-    const bytes = res.budget(index).ram_bytes;
-    if (bytes == 0) return;
+/// The RAM is carved out of the one contiguous pool, in order, so the slices
+/// are adjacent and the guests' physical memory is really contiguous.  The
+/// partitioner divides the pool between the machines, so the slices always
+/// fit.
+fn allocateAllRam() void {
+    res.ram_pool_used = 0;
 
-    const pmm = @import("../kernel/pmm.zig");
-    const pages = bytes / 4096;
-    const phys = pmm.allocPages(pages) orelse {
-        serial.serialWrite("[KVM] Could not allocate ");
-        serial.serialWriteDec(bytes / (1024 * 1024));
-        serial.serialWrite(" MB of RAM for machine ");
-        serial.serialWriteDec(index);
+    var i: usize = 0;
+    while (i < machine_count) : (i += 1) {
+        const bytes = res.budget(i).ram_bytes;
+        if (bytes == 0) continue;
+
+        const slice = res.carveRam(bytes) orelse {
+            serial.serialWrite("[ZVM] Could not give machine ");
+            serial.serialWriteDec(i);
+            serial.serialWrite(" its ");
+            serial.serialWriteDec(bytes / (1024 * 1024));
+            serial.serialWrite(" MB: the guests' RAM pool is exhausted\n");
+            continue;
+        };
+
+        machines[i].device.setMemory(.{
+            .ram_base = slice.base,
+            .ram_bytes = slice.size,
+            .cr3_gpa = 0,
+        });
+        serial.serialWrite("[ZVM] Machine ");
+        serial.serialWriteDec(i);
+        serial.serialWrite(" RAM: ");
+        serial.serialWriteDec(slice.size / (1024 * 1024));
+        serial.serialWrite(" MB at 0x");
+        serial.serialWriteHex(slice.base);
         serial.serialWrite("\n");
-        return;
-    };
-
-    machines[index].device.setMemory(.{
-        .ram_base = phys,
-        .ram_bytes = pages * 4096,
-        .cr3_gpa = 0,
-    });
-    serial.serialWrite("[KVM] Machine ");
-    serial.serialWriteDec(index);
-    serial.serialWrite(" RAM: ");
-    serial.serialWriteDec(pages * 4096 / (1024 * 1024));
-    serial.serialWrite(" MB at 0x");
-    serial.serialWriteHex(phys);
-    serial.serialWrite("\n");
+    }
 }
 
 /// Recompute the partition from the current machine list.
 pub fn repartition() void {
     res.machine_count = machine_count;
-    if (res.policy == .manual) {
-        // Only the masks are rebuilt; the operator's numbers stand.
-        res.autoPartition();
-        return;
-    }
     res.autoPartition();
+    // The budgets changed, so the RAM has to be handed out again.  The pool is
+    // one block that is never freed, so re-carving it is just resetting an
+    // offset.
+    allocateAllRam();
 }
 
 /// Switch between manual and automatic resource allocation.
@@ -451,13 +477,112 @@ pub fn runGuestDriver(machine_index: usize) !void {
     @import("../kernel/scheduler.zig").runTask(task_id);
 }
 
+/// Create every machine the configuration asks for.
+///
+/// This is the **autoload**: a ZVM is defined by the machines it runs, and
+/// they come up without the operator having to type anything.  The list is
+/// `machines` in `config/kernel.json`; the generator has already checked
+/// that the profiles exist and that no two machines share a name.
+pub fn autoload() void {
+    if (!initialized) init();
+
+    const config = @import("config");
+    if (config.machines.len == 0) {
+        serial.serialWrite("[ZVM] No machines configured\n");
+        return;
+    }
+
+    serial.serialWrite("[ZVM] Creating ");
+    serial.serialWriteDec(config.machines.len);
+    serial.serialWrite(" machine(s) from the configuration\n");
+
+    suspend_repartition = true;
+    defer suspend_repartition = false;
+
+    for (config.machines) |spec| {
+        const id = addMachine(spec.name, spec.profile) catch |err| {
+            serial.serialWrite("[ZVM] Could not create machine '");
+            serial.serialWrite(spec.name);
+            serial.serialWrite("': ");
+            serial.serialWrite(@errorName(err));
+            serial.serialWrite("\n");
+            continue;
+        };
+        _ = id;
+
+        // A machine with an explicit budget overrides the partitioner's
+        // choice: the operator asked for this machine specifically.
+        if (spec.cores != 0 or spec.ram_mb != 0) {
+            const m = &machines[machine_count - 1];
+            const cores = if (spec.cores != 0) spec.cores else m.budget.cores;
+            const ram: u32 = if (spec.ram_mb != 0) spec.ram_mb else @intCast(m.budget.ram_bytes / (1024 * 1024));
+            setBudget(machine_count - 1, cores, ram);
+        }
+
+        if (spec.image.len != 0) {
+            machines[machine_count - 1].setGuestImage(spec.image);
+        }
+    }
+
+    // Now that every machine exists, the partition can be computed once.
+    repartition();
+}
+
+/// Load the guest kernels of the autoloaded machines.
+///
+/// The image is a file on the host's disk, so a guest kernel is just
+/// something the operator copied onto it.  The loader places it in the
+/// guest's memory and builds the boot information the guest expects.
+pub fn loadGuests() void {
+    if (machine_count == 0) return;
+
+    var i: usize = 0;
+    while (i < machine_count) : (i += 1) {
+        const m = &machines[i];
+        const path = m.guestImagePath();
+
+        const loaded = loader.loadFromPath(m.device.memory, path) catch |err| {
+            serial.serialWrite("[ZVM] Machine ");
+            serial.serialWriteDec(i);
+            serial.serialWrite(" '");
+            serial.serialWrite(m.nameSlice());
+            serial.serialWrite("': could not load ");
+            serial.serialWrite(path);
+            serial.serialWrite(" (");
+            serial.serialWrite(@errorName(err));
+            serial.serialWrite(")\n");
+            continue;
+        };
+
+        m.guest_loaded = true;
+        m.guest_entry_gpa = loaded.entry_gpa;
+        m.guest_mbinfo_gpa = loaded.mbinfo_gpa;
+        m.guest_stack_gpa = loaded.stack_gpa;
+        m.guest_bytes = loaded.bytes;
+
+        serial.serialWrite("[ZVM] Machine ");
+        serial.serialWriteDec(i);
+        serial.serialWrite(" '");
+        serial.serialWrite(m.nameSlice());
+        serial.serialWrite("': loaded ");
+        serial.serialWriteDec(loaded.bytes);
+        serial.serialWrite(" bytes from ");
+        serial.serialWrite(loaded.path);
+        serial.serialWrite(", entry at guest 0x");
+        serial.serialWriteHex(loaded.entry_gpa);
+        serial.serialWrite(", boot info at 0x");
+        serial.serialWriteHex(loaded.mbinfo_gpa);
+        serial.serialWrite("\n");
+    }
+}
+
 /// Print the state of the hypervisor.
 pub fn printStatus(
     writeFn: *const fn (s: []const u8) void,
     writeDecFn: *const fn (v: u64) void,
     writeHexShortFn: *const fn (v: u64) void,
 ) void {
-    writeFn("=== DynamicalKVM ===\n\n");
+    writeFn("=== ZVM ===\n\n");
     writeFn("  Machines: ");
     writeDecFn(machine_count);
     writeFn(" / ");
