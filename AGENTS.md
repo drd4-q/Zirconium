@@ -199,6 +199,19 @@ The text console exists **once**, and draws through a `Surface` (`src/system/gfx
   - `Zvp.service()` runs **from the tick handler**, because a guest spinning in a wait loop needs an answer and the tick is the only thing that runs while the guest has the CPU. It must not block, so a guest that posts a message leaves it behind and `flushLog()` writes it out later, from the deferred path.
 - `src/user/kvm_test.zig` — a **guest driver**, in ring 3, that behaves exactly as a guest kernel's driver would: find the device, check the magic, ping it, ask what machine it has been given, check that the hypervisor bit is clear, report its observations, post a message, set the accent colour. It is built as a freestanding ELF (`kvm_test_bin`, built by `build.zig` like the other user tests) and the hypervisor's registers and shared window are mapped into its address space by `scheduler.addElfUserTaskMapped()`. **The same code will run unchanged under the CPU emulator**, where the registers are reached through a guest page table instead of a mapping the hypervisor set up. Run it with `kvm guest [id]`.
 
+### Guest memory and the MMU
+
+`src/kvm/mmu.zig` — the guest's memory and the page walker. Two address spaces are in play, and confusing them is the classic bug:
+
+- The **guest physical** address: what the guest's page tables talk about, a number in the guest's own address space starting at zero.
+- The **host physical** address: where those bytes actually live.
+
+A machine's RAM is one contiguous block of host memory, so the two differ by a constant: `host = ram_base + guest`. `Memory.translate()` walks PML4 -> PDPT -> PD -> PT exactly as the hardware does, reading each level out of the guest's RAM, and short-circuits on a huge page. It returns the *host* physical address, which is what a CPU emulator needs.
+
+- Each machine's RAM is allocated from the PMM according to its budget. The hypervisor keeps **a quarter of the free memory for itself** (`total_ram_bytes` is three quarters of the pool): the guests' display buffers, the kernel heap and the shadow buffer all come out of the same pool, and handing every free page to a guest would leave nothing for them.
+- The guest's RAM is mapped into the guest driver's address space (`GUEST_RAM_VADDR`), so the driver can build page tables in it - which is exactly what a guest kernel does at boot. The mapping's offset *is* the guest physical address, so the driver can compute a guest physical address for anything it writes.
+- The device grew `CMD_TRANSLATE`, `CMD_READ_MEM` and `CMD_WRITE_MEM`. A 64-bit value does not fit in the 32-bit argument registers, so it is passed in two of them (ARG1 and ARG2) and comes back in two result registers (RESULT0 and RESULT1).
+
 ### Displays and the compositor
 
 `src/system/gfx/output.zig` — a **virtual display**: the host-side view of one guest's video memory. Allocated from the PMM in whole pages and exposed as a physical address, precisely so it can be mapped into a guest's address space later without changing anything above it. Pixels are 0x00RRGGBB, the same layout the framebuffer shadow uses.

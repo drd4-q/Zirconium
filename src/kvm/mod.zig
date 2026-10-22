@@ -68,9 +68,12 @@ pub fn init() void {
     const cpu_count = @import("../arch/smp.zig").cpuCount();
     res.setTotalCores(@intCast(@min(cpu_count, @as(usize, resources.MAX_CORES))));
 
-    // Memory the host can hand out: everything the PMM has free.
+    // Memory the host can hand out.  Not all of it: the hypervisor needs
+    // memory of its own - the guests' display buffers, the kernel heap, the
+    // shadow buffer - and handing every free page to a guest would leave
+    // nothing for them.
     const free_pages = @import("../kernel/pmm.zig").free_pages;
-    res.total_ram_bytes = free_pages * 4096;
+    res.total_ram_bytes = (free_pages * 4096) * 3 / 4;
 
     serial.serialWrite("[KVM] DynamicalKVM ready: ");
     serial.serialWriteDec(cpu_count);
@@ -196,6 +199,9 @@ pub fn addMachine(name: []const u8, profile_name: []const u8) !u32 {
     // A new machine changes the partition, so recompute it.
     repartition();
 
+    // And give it the RAM its budget says it gets.
+    allocateRam(machine_count - 1);
+
     serial.serialWrite("[KVM] Machine ");
     serial.serialWriteDec(m.id);
     serial.serialWrite(" '");
@@ -237,6 +243,42 @@ pub fn removeMachine(index: usize) void {
     machine_count -= 1;
     res.machine_count = machine_count;
     repartition();
+}
+
+/// Give a machine the RAM its budget says it gets.
+///
+/// The RAM is one contiguous block of host memory, so the guest's physical
+/// address X is at `ram_base + X`.  The guest kernel manages it from there;
+/// the hypervisor only has to know where it is so it can walk the guest's
+/// page tables.
+fn allocateRam(index: usize) void {
+    if (index >= machine_count) return;
+    const bytes = res.budget(index).ram_bytes;
+    if (bytes == 0) return;
+
+    const pmm = @import("../kernel/pmm.zig");
+    const pages = bytes / 4096;
+    const phys = pmm.allocPages(pages) orelse {
+        serial.serialWrite("[KVM] Could not allocate ");
+        serial.serialWriteDec(bytes / (1024 * 1024));
+        serial.serialWrite(" MB of RAM for machine ");
+        serial.serialWriteDec(index);
+        serial.serialWrite("\n");
+        return;
+    };
+
+    machines[index].device.setMemory(.{
+        .ram_base = phys,
+        .ram_bytes = pages * 4096,
+        .cr3_gpa = 0,
+    });
+    serial.serialWrite("[KVM] Machine ");
+    serial.serialWriteDec(index);
+    serial.serialWrite(" RAM: ");
+    serial.serialWriteDec(pages * 4096 / (1024 * 1024));
+    serial.serialWrite(" MB at 0x");
+    serial.serialWriteHex(phys);
+    serial.serialWrite("\n");
 }
 
 /// Recompute the partition from the current machine list.
@@ -380,14 +422,26 @@ pub fn runGuestDriver(machine_index: usize) !void {
     const kvm_test_bin = @import("kvm_test_bin");
     const proto = @import("proto.zig");
 
-    const mappings = [_]@import("../kernel/scheduler.zig").ExtraMapping{
+    // The guest's RAM is mapped too, so the driver can build page tables in
+    // it - which is exactly what a guest kernel does at boot.
+    var mappings = [_]@import("../kernel/scheduler.zig").ExtraMapping{
         .{ .vaddr = proto.REGS_VADDR, .paddr = m.device.regs_phys, .size = proto.REGS_SIZE },
         .{ .vaddr = proto.WINDOW_VADDR, .paddr = m.device.window_phys, .size = proto.WINDOW_SIZE },
+        .{ .vaddr = proto.GUEST_RAM_VADDR, .paddr = 0, .size = 0 },
     };
+    var mapping_count: usize = 2;
+    if (m.device.memory.ram_bytes != 0) {
+        mappings[2] = .{
+            .vaddr = proto.GUEST_RAM_VADDR,
+            .paddr = m.device.memory.ram_base,
+            .size = m.device.memory.ram_bytes,
+        };
+        mapping_count = 3;
+    }
 
     const task_id = @import("../kernel/scheduler.zig").addElfUserTaskMapped(
         &kvm_test_bin.data,
-        &mappings,
+        mappings[0..mapping_count],
     ) orelse return error.CannotCreateTask;
 
     serial.serialWrite("[KVM] Running the guest driver against machine ");

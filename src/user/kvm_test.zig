@@ -86,11 +86,20 @@ var sequence: u32 = 0;
 /// waits for the hypervisor to echo that number back, so a stale answer
 /// from the previous command can never be mistaken for this one.
 fn command(cmd: u32, arg0: u32, arg1: u32) u32 {
+    return commandEx(cmd, arg0, arg1, 0);
+}
+
+/// A command with a third argument.
+///
+/// The argument registers are 32 bits wide, so a 64-bit value is passed in
+/// two of them.
+fn commandEx(cmd: u32, arg0: u32, arg1: u32, arg2: u32) u32 {
     sequence +%= 1;
     const mine = sequence;
 
     wr(proto.REG_ARG0, arg0);
     wr(proto.REG_ARG1, arg1);
+    wr(proto.REG_ARG2, arg2);
     wr(proto.REG_CMD, cmd);
     wr(proto.REG_DOORBELL, mine);
 
@@ -199,8 +208,164 @@ pub export fn _start() callconv(.c) noreturn {
     _ = command(proto.CMD_SET_ACCENT, 0x00FF8844, 0);
     write(out, "[GUEST] Accent colour set\n");
 
+    // ── The MMU: build page tables and have the hypervisor walk them ──
+    if (!mmuTest(out)) {
+        exit(1);
+    }
+
     write(out, "[GUEST] ZVP driver test PASSED\n");
     exit(0);
+}
+
+/// A command whose result is 64 bits wide.
+///
+/// The result registers are 32 bits each, so a 64-bit answer comes back in
+/// two of them: RESULT0 is the low half and RESULT1 the high half.
+fn command64(cmd: u32, arg0: u32, arg1: u32) u64 {
+    const low = command(cmd, arg0, arg1);
+    if (low == 0xFFFF_FFFF) return low;
+    return low | (@as(u64, rd(proto.REG_RESULT1)) << 32);
+}
+
+/// Test the guest's memory map.
+///
+/// A guest kernel builds its own page tables at boot and points its CR3 at
+/// them; the hypervisor has to walk those tables to find the guest's memory.
+/// This builds the same four levels a kernel would, in the guest's own RAM,
+/// and asks the hypervisor to translate an address through them.
+///
+/// The four tables live in the guest's RAM, at guest physical addresses the
+/// driver computes from the RAM's base - which is what a guest kernel does
+/// when it maps its own page tables.
+fn mmuTest(out: u64) bool {
+    const ram_base = rd(proto.REG_RAM_BASE);
+    const ram_size = rd(proto.REG_RAM_SIZE);
+    if (ram_size == 0) {
+        write(out, "[GUEST]   no RAM: skipping the MMU test\n");
+        return true;
+    }
+    write(out, "[GUEST] Guest RAM: ");
+    writeDec(out, ram_size / (1024 * 1024));
+    write(out, " MB at 0x");
+    writeHex(out, ram_base);
+    write(out, "\n");
+
+    // The guest's RAM, mapped into this task so the driver can write to it.
+    const ram: [*]volatile u8 = @ptrFromInt(proto.GUEST_RAM_VADDR);
+
+    // The guest physical addresses of the four page tables.  They go at the
+    // start of the guest's RAM, one page each.
+    const pml4_gpa: u64 = 0x1000;
+    const pdpt_gpa: u64 = 0x2000;
+    const pd_gpa: u64 = 0x3000;
+    const pt_gpa: u64 = 0x4000;
+    // The page the guest maps, and the guest virtual address it maps it at.
+    const page_gpa: u64 = 0x10000;
+    const guest_va: u64 = 0x0000_0000_0040_0000;
+
+    // ── Build the page tables ─────────────────────────────────────
+    // Every table is a page of 512 eight-byte entries, all zero except the
+    // one that matters.  The guest's RAM is mapped so that its offset *is*
+    // its guest physical address.
+    clearPage(ram, pml4_gpa);
+    clearPage(ram, pdpt_gpa);
+    clearPage(ram, pd_gpa);
+    clearPage(ram, pt_gpa);
+
+    // PML4[0] -> PDPT
+    writeEntry(ram, pml4_gpa, (guest_va >> 39) & 0x1FF, pdpt_gpa | 0x03);
+    // PDPT -> PD
+    writeEntry(ram, pdpt_gpa, (guest_va >> 30) & 0x1FF, pd_gpa | 0x03);
+    // PD -> PT
+    writeEntry(ram, pd_gpa, (guest_va >> 21) & 0x1FF, pt_gpa | 0x03);
+    // PT -> the page
+    writeEntry(ram, pt_gpa, (guest_va >> 12) & 0x1FF, page_gpa | 0x03);
+
+    // Put a recognisable value in the mapped page.
+    writeGuestWord(ram, page_gpa, 0x5A5A_DEAD_BEEF_CAFE);
+
+    // ── Ask the hypervisor to walk them ──────────────────────────
+    const host_pa = command(proto.CMD_TRANSLATE, guest_va, pml4_gpa);
+    if (host_pa == 0xFFFF_FFFF) {
+        write(out, "[GUEST]   TRANSLATE failed (error ");
+        writeDec(out, rd(proto.REG_RESULT1));
+        write(out, ")\n");
+        return false;
+    }
+    write(out, "[GUEST]   guest VA 0x");
+    writeHex(out, guest_va);
+    write(out, " -> host PA 0x");
+    writeHex(out, host_pa);
+    write(out, "\n");
+
+    // The translation must land on the guest's page, inside the guest's RAM.
+    const expected = ram_base + page_gpa;
+    if (host_pa != expected) {
+        write(out, "[GUEST]   WRONG: expected 0x");
+        writeHex(out, expected);
+        write(out, "\n");
+        return false;
+    }
+
+    // And reading the guest's memory through the device must find the value
+    // the driver wrote.
+    const value = command64(proto.CMD_READ_MEM, page_gpa, 0);
+    if (value != 0x5A5A_DEAD_BEEF_CAFE) {
+        write(out, "[GUEST]   READ_MEM returned 0x");
+        writeHex(out, value);
+        write(out, " (expected 0x5A5ADEADBEEFCAFE)\n");
+        return false;
+    }
+    write(out, "[GUEST]   guest memory reads back correctly\n");
+
+    // A page that is not mapped must fail, not silently succeed.
+    const bad = command(proto.CMD_TRANSLATE, 0x0000_0000_0080_0000, pml4_gpa);
+    if (bad != 0xFFFF_FFFF) {
+        write(out, "[GUEST]   an unmapped address translated - the MMU is wrong\n");
+        return false;
+    }
+    write(out, "[GUEST]   an unmapped address is correctly rejected\n");
+
+    // And the hypervisor must be able to write into the guest's memory.
+    // The value is 64 bits, so it goes in two argument registers.
+    _ = commandEx(proto.CMD_WRITE_MEM, page_gpa, 0x9ABC_DEF0, 0x1234_5678);
+    const back = command64(proto.CMD_READ_MEM, page_gpa, 0);
+    if (back != 0x1234_5678_9ABC_DEF0) {
+        write(out, "[GUEST]   WRITE_MEM did not take effect\n");
+        return false;
+    }
+    write(out, "[GUEST]   the hypervisor can write the guest's memory\n");
+
+    return true;
+}
+
+/// Zero one page of the guest's RAM.
+///
+/// The RAM is mapped so that the offset into the mapping *is* the guest
+/// physical address: guest physical X is at `ram_base + X` in the host, and
+/// the mapping puts `ram_base` at the start of the region's virtual address.
+fn clearPage(ram: [*]volatile u8, gpa: u64) void {
+    var i: usize = 0;
+    while (i < 4096) : (i += 1) {
+        ram[gpa + i] = 0;
+    }
+}
+
+/// Write a page table entry into the guest's RAM.
+fn writeEntry(ram: [*]volatile u8, table_gpa: u64, index: u64, value: u64) void {
+    const offset = table_gpa + index * 8;
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        ram[offset + i] = @truncate(value >> @intCast(i * 8));
+    }
+}
+
+/// Write a 64-bit word into the guest's RAM.
+fn writeGuestWord(ram: [*]volatile u8, gpa: u64, value: u64) void {
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        ram[gpa + i] = @truncate(value >> @intCast(i * 8));
+    }
 }
 
 inline fn readLe32(at: usize) u32 {

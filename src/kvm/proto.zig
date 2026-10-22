@@ -48,6 +48,10 @@ pub const REG_PCI_DEVICE: usize = 0x054;
 /// flag.  A sequence number is unambiguous - the guest waits for the exact
 /// number it rang, so a stale answer from the previous command can never be
 /// mistaken for the current one.
+/// The host physical address of the guest's RAM.
+pub const REG_RAM_BASE: usize = 0x060;
+/// How much RAM the guest has.
+pub const REG_RAM_SIZE: usize = 0x064;
 pub const REG_DOORBELL: usize = 0x058;
 /// The command sequence the hypervisor has finished servicing.
 pub const REG_SERVICED: usize = 0x05C;
@@ -70,10 +74,16 @@ pub const CMD_CLOCK: u32 = 5;
 pub const CMD_OBSERVE: u32 = 6;
 /// Which machine this is.
 pub const CMD_MACHINE: u32 = 7;
-/// The accent colour is set through the argument register.
-pub const CMD_COUNT: u32 = 8;
+/// Translate a guest virtual address through the guest's own page tables.
+pub const CMD_TRANSLATE: u32 = 8;
+/// Read a word out of the guest's RAM.
+pub const CMD_READ_MEM: u32 = 9;
+/// Write a word into the guest's RAM.
+pub const CMD_WRITE_MEM: u32 = 10;
+/// The number of commands the device knows.
+pub const CMD_COUNT: u32 = 11;
 
-pub const MAX_CMD: u32 = 8;
+pub const MAX_CMD: u32 = 11;
 
 // ─── Status ─────────────────────────────────────────────────────────
 
@@ -111,6 +121,9 @@ pub const OBS_LEGACY_BOOT: u32 = 8;
 pub const REGS_VADDR: u64 = 0x0000_7000_0000;
 /// The user virtual address the shared window is mapped at.
 pub const WINDOW_VADDR: u64 = 0x0000_7010_0000;
+/// The user virtual address the guest's RAM is mapped at, when the
+/// hypervisor maps it into a guest's address space.
+pub const GUEST_RAM_VADDR: u64 = 0x0000_7200_0000;
 
 /// The size of the register block.
 pub const REGS_SIZE: usize = 4096;

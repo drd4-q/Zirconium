@@ -29,6 +29,7 @@ const pmm = root.pmm;
 const serial = root.serial;
 const identity_mod = @import("../identity.zig");
 const proto = @import("../proto.zig");
+const mmu_mod = @import("../mmu.zig");
 
 pub const Identity = identity_mod.Identity;
 
@@ -49,6 +50,9 @@ pub const CMD_CLOCK = proto.CMD_CLOCK;
 pub const CMD_OBSERVE = proto.CMD_OBSERVE;
 pub const CMD_MACHINE = proto.CMD_MACHINE;
 pub const MAX_CMD = proto.MAX_CMD;
+pub const CMD_TRANSLATE = proto.CMD_TRANSLATE;
+pub const CMD_READ_MEM = proto.CMD_READ_MEM;
+pub const CMD_WRITE_MEM = proto.CMD_WRITE_MEM;
 
 pub const STATUS_IDLE = proto.STATUS_IDLE;
 pub const STATUS_BUSY = proto.STATUS_BUSY;
@@ -58,6 +62,8 @@ pub const STATUS_ERROR = proto.STATUS_ERROR;
 pub const EVENT_CLOCK_SYNC = proto.EVENT_CLOCK_SYNC;
 pub const EVENT_RESET = proto.EVENT_RESET;
 
+pub const Memory = mmu_mod.Memory;
+
 const REG_MAGIC = proto.REG_MAGIC;
 const REG_VERSION = proto.REG_VERSION;
 const REG_CAPS = proto.REG_CAPS;
@@ -66,6 +72,7 @@ const REG_CMD = proto.REG_CMD;
 const REG_STATUS = proto.REG_STATUS;
 const REG_ARG0 = proto.REG_ARG0;
 const REG_ARG1 = proto.REG_ARG1;
+const REG_ARG2 = proto.REG_ARG2;
 const REG_RESULT0 = proto.REG_RESULT0;
 const REG_RESULT1 = proto.REG_RESULT1;
 const REG_EVENT = proto.REG_EVENT;
@@ -76,6 +83,8 @@ const REG_WINDOW_SIZE = proto.REG_WINDOW_SIZE;
 const REG_MACHINE_INDEX = proto.REG_MACHINE_INDEX;
 const REG_PCI_VENDOR = proto.REG_PCI_VENDOR;
 const REG_PCI_DEVICE = proto.REG_PCI_DEVICE;
+const REG_RAM_BASE = proto.REG_RAM_BASE;
+const REG_RAM_SIZE = proto.REG_RAM_SIZE;
 const REG_DOORBELL = proto.REG_DOORBELL;
 const REG_SERVICED = proto.REG_SERVICED;
 
@@ -86,6 +95,9 @@ pub const Zvp = struct {
     machine_index: u32 = 0,
     /// The identity the device presents.
     identity: Identity = .{},
+    /// The guest's memory: its RAM and its page tables.  The device owns it
+    /// because the device is the guest's window onto the machine.
+    memory: Memory = .{},
     /// The PCI configuration space, as the guest's PCI model would serve it.
     config_space: [256]u8 = [_]u8{0} ** 256,
     /// The register block.
@@ -144,6 +156,17 @@ pub const Zvp = struct {
         }
     }
 
+    /// Tell the device where the guest's RAM is.
+    ///
+    /// The RAM is allocated after the device exists - the partitioner decides
+    /// how much each machine gets - so the registers that describe it have to
+    /// be updated when it is.
+    pub fn setMemory(self: *Zvp, mem: Memory) void {
+        self.memory = mem;
+        self.putReg(REG_RAM_BASE, @truncate(mem.ram_base));
+        self.putReg(REG_RAM_SIZE, @truncate(mem.ram_bytes));
+    }
+
     /// The protocol version the device speaks.
     pub fn version(self: *const Zvp) u32 {
         _ = self;
@@ -163,6 +186,8 @@ pub const Zvp = struct {
         self.putReg(REG_MACHINE_INDEX, self.machine_index);
         self.putReg(REG_PCI_VENDOR, self.identity.vendor_id);
         self.putReg(REG_PCI_DEVICE, self.identity.device_id);
+        self.putReg(REG_RAM_BASE, @truncate(self.memory.ram_base));
+        self.putReg(REG_RAM_SIZE, @truncate(self.memory.ram_bytes));
         self.putReg(REG_SERVICED, 0);
         self.serviced_sequence = 0;
     }
@@ -292,6 +317,7 @@ pub const Zvp = struct {
 
         const arg0 = self.getReg(REG_ARG0);
         const arg1 = self.getReg(REG_ARG1);
+        const arg2 = self.getReg(REG_ARG2);
 
         var result0: u32 = 0;
         var result1: u32 = 0;
@@ -349,6 +375,46 @@ pub const Zvp = struct {
             CMD_MACHINE => {
                 result0 = self.machine_index;
                 result1 = self.identity.device_id;
+            },
+            CMD_TRANSLATE => {
+                // Translate a guest virtual address through the guest's own
+                // page tables.  ARG0 is the address, ARG1 is the guest's CR3
+                // (a guest physical address).
+                var mem = self.memory;
+                mem.cr3_gpa = arg1;
+                if (mem.translate(arg0)) |host_pa| {
+                    result0 = @truncate(host_pa);
+                    result1 = 0;
+                } else |err| {
+                    result0 = 0xFFFF_FFFF;
+                    result1 = mmu_mod.translateErrorCode(err);
+                }
+            },
+            CMD_READ_MEM => {
+                // Read a word out of the guest's RAM.  ARG0 is the guest
+                // physical address.  The result registers are 32 bits wide,
+                // so the value comes back in two of them: RESULT0 is the
+                // low half and RESULT1 the high half.
+                if (self.memory.readWord(arg0)) |value| {
+                    result0 = @truncate(value);
+                    result1 = @truncate(value >> 32);
+                } else {
+                    result0 = 0xFFFF_FFFF;
+                    result1 = 0xFFFF_FFFF;
+                }
+            },
+            CMD_WRITE_MEM => {
+                // Write a word into the guest's RAM.  ARG0 is the guest
+                // physical address, and the value is 64 bits wide, so it
+                // comes in two argument registers.
+                const value = @as(u64, arg1) | (@as(u64, arg2) << 32);
+                if (self.memory.writeWord(arg0, value)) {
+                    result0 = 0;
+                    result1 = 0;
+                } else {
+                    result0 = 0xFFFF_FFFF;
+                    result1 = 1;
+                }
             },
             else => {
                 result0 = 0;
