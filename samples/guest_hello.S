@@ -21,7 +21,14 @@
 
 .set COM1,                0x3F8
 
-.set ZVP_GUEST_PA,        0x0000000100000000
+/* The PCI configuration ports. */
+.set PCI_ADDRESS,         0x0CF8
+.set PCI_DATA,            0x0CFC
+
+/* Where the guest asks for the device to be mapped.  It is above the RAM and
+ * below the window the hypervisor's own device starts in, the way a device
+ * in the PCI memory window of a real PC is. */
+.set ZVP_RELOCATE,        0xE0000000
 .set REG_MAGIC,           0x000
 .set REG_VERSION,         0x004
 .set REG_CMD,             0x010
@@ -64,15 +71,16 @@ guest_entry:
     call serial_write
 
 .Ldevice:
-    /* Is the device there? */
-    movq $ZVP_GUEST_PA, %rbx
-    movl REG_MAGIC(%rbx), %eax
-    cmpl $ZVP_MAGIC, %eax
-    jne .Lno_device
+    /* Find the hypervisor's device.  A real guest scans the PCI bus for it;
+     * a hard-coded address would be a guest that believes it is the only
+     * machine in the world. */
+    call pci_find
+    testq %rbx, %rbx
+    jz .Lno_device
     leaq msg_dev_ok(%rip), %rsi
     call serial_write
 
-    /* The version, as a single decimal digit. */
+    /* The version. */
     leaq msg_ver(%rip), %rsi
     call serial_write
     movl REG_VERSION(%rbx), %eax
@@ -129,6 +137,101 @@ guest_entry:
 .Lhalt:
     jmp .Lhalt
 .size guest_entry, . - guest_entry
+
+/* Find the hypervisor's device on the PCI bus.
+ *
+ * This is the ordinary way a guest finds its hardware: write the
+ * bus/slot/function/register triple to the configuration address port, then
+ * read the configuration space through the data port.  The address of the
+ * device comes out of its base address register, and the guest maps that
+ * address itself.
+ *
+ * On success RBX holds the device's base address; on failure it is zero.
+ */
+    .type pci_find, @function
+pci_find:
+    movl $0, %r13d                   /* the slot */
+.Lslot:
+    cmpl $32, %r13d
+    jae .Lnone
+    movl $0, %r14d                   /* the function */
+.Lfunc:
+    cmpl $8, %r14d
+    jae .Lnext_slot
+
+    /* The address register: enable | slot << 11 | function << 8. */
+    movl %r13d, %eax
+    shll $11, %eax
+    movl %r14d, %ecx
+    shll $8, %ecx
+    orl %ecx, %eax
+    orl $0x80000000, %eax
+    movw $PCI_ADDRESS, %dx
+    outl %eax, %dx
+
+    /* The vendor and device ID.  An absent function reads all ones, so the
+     * *vendor* - the low half - is what tells them apart. */
+    movw $PCI_DATA, %dx
+    inl %dx, %eax
+    andl $0xFFFF, %eax
+    cmpl $0xFFFF, %eax
+    je .Lnext_func
+    movl %eax, %r15d                 /* the vendor and device ID */
+
+    /* Base address register 0. */
+    movl %r13d, %eax
+    shll $11, %eax
+    movl %r14d, %ecx
+    shll $8, %ecx
+    orl %ecx, %eax
+    orl $0x80000000, %eax
+    orl $0x10, %eax                  /* the register number of BAR0 */
+    movw $PCI_ADDRESS, %dx
+    outl %eax, %dx
+    movw $PCI_DATA, %dx
+    inl %dx, %eax
+    movl %eax, %r15d                 /* the base address register */
+    andl $0xFFFFFFF0, %eax
+    testl %eax, %eax
+    jz .Lnext_func
+
+    /* Program the register where we want it.  A guest that reads a base
+     * address register and then uses the address it read has to program it
+     * first: the address is a place the *guest* chooses. */
+    movl %r15d, %ecx
+    andl $0x0F, %ecx                 /* the type bits, which are read-only */
+    orl $ZVP_RELOCATE, %ecx
+    movl %r13d, %eax
+    shll $11, %eax
+    movl %r14d, %edx
+    shll $8, %edx
+    orl %edx, %eax
+    orl $0x80000000, %eax
+    orl $0x10, %eax
+    movw $PCI_ADDRESS, %dx
+    outl %eax, %dx
+    movl %ecx, %eax
+    movw $PCI_DATA, %dx
+    outl %eax, %dx
+
+    /* And the device is there, at the address we asked for.  The low four
+     * bits of the register are the type, not part of the address. */
+    movl %ecx, %ebx
+    andl $0xFFFFFFF0, %ebx
+    movl REG_MAGIC(%rbx), %eax
+    cmpl $ZVP_MAGIC, %eax
+    jne .Lnext_func
+    ret
+.Lnext_func:
+    incl %r14d
+    jmp .Lfunc
+.Lnext_slot:
+    incl %r13d
+    jmp .Lslot
+.Lnone:
+    xorl %ebx, %ebx
+    ret
+.size pci_find, . - pci_find
 
 /* Wait for the hypervisor to answer the command in CMD. */
     .type zvp_wait, @function

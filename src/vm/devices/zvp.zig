@@ -29,7 +29,8 @@ const pmm = root.pmm;
 const serial = root.serial;
 const identity_mod = @import("../identity.zig");
 const proto = @import("../proto.zig");
-const mmu_mod = @import("../mmu.zig");
+const mmu = @import("../mmu.zig");
+const mmu_mod = mmu;
 
 pub const Identity = identity_mod.Identity;
 
@@ -99,6 +100,9 @@ pub const Zvp = struct {
     /// because the device is the guest's window onto the machine.
     memory: Memory = .{},
     /// The PCI configuration space, as the guest's PCI model would serve it.
+    /// The configuration space the guest reads.  The PCI bus serves a copy
+    /// of it, so that a base address register the guest programs can be
+    /// acted on.
     config_space: [256]u8 = [_]u8{0} ** 256,
     /// The register block.
     regs: []u8 = &[_]u8{},
@@ -222,12 +226,16 @@ pub const Zvp = struct {
         cs[0x0B] = @truncate(self.identity.class_code);
         // Header type 0 (normal device).
         cs[0x0E] = 0x00;
-        // BAR0: a 64-bit memory BAR in the low 64 GB.
-        putLe32(cs, 0x10, @as(u32, @truncate(self.regs_phys)) | 0x04);
-        putLe32(cs, 0x14, @as(u32, @truncate(self.regs_phys >> 32)));
-        // BAR2: the shared window, also 64-bit.
-        putLe32(cs, 0x18, @as(u32, @truncate(self.window_phys)) | 0x04);
-        putLe32(cs, 0x1C, @as(u32, @truncate(self.window_phys >> 32)));
+        // BAR0: a 32-bit memory BAR - the register block.  BAR1 is unused.
+        //
+        // The address in a BAR is the one the *guest* sees, not the one the
+        // host has: a guest programs the register and then maps it, and the
+        // hypervisor moves the device there.
+        putLe32(cs, 0x10, @as(u32, @truncate(mmu.DEVICE_GPA)));
+        putLe32(cs, 0x14, 0);
+        // BAR2: the shared window, also a 32-bit memory BAR.  BAR3 is unused.
+        putLe32(cs, 0x18, @as(u32, @truncate(mmu.WINDOW_GPA)));
+        putLe32(cs, 0x1C, 0);
         // Subsystem vendor and device.
         putLe16(cs, 0x2C, self.identity.subsystem_vendor);
         putLe16(cs, 0x2E, self.identity.subsystem_device);

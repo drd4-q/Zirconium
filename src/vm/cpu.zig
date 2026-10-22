@@ -22,8 +22,8 @@ const std = @import("std");
 const root = @import("root");
 const mmu_mod = @import("mmu.zig");
 const identity_mod = @import("identity.zig");
-const serial = @import("../system/serial.zig");
 const uart_mod = @import("uart.zig");
+const pci_mod = @import("pci.zig");
 
 pub const Memory = mmu_mod.Memory;
 pub const Identity = identity_mod.Identity;
@@ -87,7 +87,12 @@ pub const Cpu = struct {
     rip: u64 = 0,
     rflags: u64 = FLAG_IF | 0x2,
     /// The guest's memory: its RAM and its page tables.
-    memory: Memory = .{},
+    ///
+    /// A pointer, not a copy: the hypervisor moves a device when the guest
+    /// programs its base address register, and a copy would not see it.
+    memory: *Memory = undefined,
+    /// The PCI bus the guest's port I/O reaches.
+    pci: ?*pci_mod.Bus = null,
     /// The identity the guest is shown: what `cpuid` reports.
     identity: Identity = .{},
     /// The guest's own serial port.  It is not the host's: a guest that
@@ -546,8 +551,10 @@ pub const Cpu = struct {
                     },
                 };
                 const value = try self.readRm(m, width);
-                const result = try self.groupOp(m.reg & 7, value, imm, width);
-                try self.writeRm(m, width, result);
+                const op = m.reg & 7;
+                const result = try self.groupOp(op, value, imm, width);
+                // `cmp` (group 7) computes the flags and leaves the operand.
+                if (op != 7) try self.writeRm(m, width, result);
                 return;
             },
             0x84 => {
@@ -742,7 +749,7 @@ pub const Cpu = struct {
             0xE5 => {
                 // in eax, imm8
                 const port: u16 = @truncate(try self.fetchImm(1));
-                self.regs[RAX] = self.portIn(port);
+                self.regs[RAX] = self.portIn32(port);
                 return;
             },
             0xE6 => {
@@ -754,7 +761,7 @@ pub const Cpu = struct {
             0xE7 => {
                 // out imm8, eax
                 const port: u16 = @truncate(try self.fetchImm(1));
-                self.portOut(port, @truncate(self.regs[RAX]));
+                self.portOut32(port, @truncate(self.regs[RAX]));
                 return;
             },
             0xE8 => {
@@ -790,7 +797,7 @@ pub const Cpu = struct {
             0xED => {
                 // in eax, dx
                 const port: u16 = @truncate(self.regs[RDX]);
-                self.regs[RAX] = self.portIn(port);
+                self.regs[RAX] = self.portIn32(port);
                 return;
             },
             0xEE => {
@@ -802,7 +809,7 @@ pub const Cpu = struct {
             0xEF => {
                 // out dx, eax
                 const port: u16 = @truncate(self.regs[RDX]);
-                self.portOut(port, @truncate(self.regs[RAX]));
+                self.portOut32(port, @truncate(self.regs[RAX]));
                 return;
             },
             0xF4 => {
@@ -928,15 +935,27 @@ pub const Cpu = struct {
     /// The groups are add, or, adc, sbb, and, sub, xor and cmp.  `cmp` is
     /// `sub` that throws the result away - the flags are the point.
     ///
-    /// **The CMP group lays its forms out differently from the others.**
-    /// Every other group has /1 as "r/m8, imm8" and /2 as "r/m, r"; the CMP
-    /// group has /1 as "r/m, r" and /2 as "r/m8, imm8".  Decoding them the
-    /// same way eats a byte that is not an immediate, which desynchronises the
-    /// instruction stream - and that looks like the guest jumping off into
-    /// nowhere a few instructions later, with no hint of what went wrong.
+    /// **Every group lays its forms out the same way**, and the layout is
+    /// the one that catches people out:
+    ///
+    ///     /0  r/m8, r8        /1  r/m, r
+    ///     /2  r/m8, imm8     /3  r/m, imm
+    ///     /4  AL, imm8       /5  eAX, imm
+    ///
+    /// The obvious reading - "the odd forms take an immediate" - is wrong:
+    /// /1 is the register form and /2 is the *byte* immediate form.  Reading
+    /// them the other way eats a byte that is not an immediate, which
+    /// desynchronises the instruction stream - and that looks like the guest
+    /// jumping off into nowhere a few instructions later, with no hint of
+    /// what went wrong.
+    ///
+    /// **`cmp` is `sub` without the store.**  Group 7 computes the flags and
+    /// leaves the operand alone; writing the difference back looks harmless
+    /// but silently corrupts the guest's registers (`cmp $32, %r13d` turning
+    /// the loop counter into -32), which the guest then uses as an address.
     fn executeGroup(self: *Cpu, group: u8, form: u8, rex: u8, sz: u8) Trap!void {
-        const is_cmp = group == 7;
-
+        // `cmp` throws the result away; every other group stores it.
+        const stores = group != 7;
         switch (form) {
             0 => {
                 // r/m8, r8
@@ -944,43 +963,25 @@ pub const Cpu = struct {
                 const a = try self.readRm(m, 1);
                 const b = self.regs[m.reg];
                 const result = try self.groupOp(group, a, b, 1);
-                try self.writeRm(m, 1, result);
+                if (stores) try self.writeRm(m, 1, result);
                 return;
             },
             1 => {
-                if (is_cmp) {
-                    // r/m, r
-                    const m = try self.decodeModRm(rex);
-                    const a = try self.readRm(m, sz);
-                    const b = self.regs[m.reg];
-                    const result = try self.groupOp(group, a, b, sz);
-                    try self.writeRm(m, sz, result);
-                    return;
-                }
-                // r/m8, imm8
-                const m = try self.decodeModRm(rex);
-                const imm = try self.fetchImm(1);
-                const a = try self.readRm(m, 1);
-                const result = try self.groupOp(group, a, imm, 1);
-                try self.writeRm(m, 1, result);
-                return;
-            },
-            2 => {
-                if (is_cmp) {
-                    // r/m8, imm8
-                    const m = try self.decodeModRm(rex);
-                    const imm = try self.fetchImm(1);
-                    const a = try self.readRm(m, 1);
-                    const result = try self.groupOp(group, a, imm, 1);
-                    try self.writeRm(m, 1, result);
-                    return;
-                }
                 // r/m, r
                 const m = try self.decodeModRm(rex);
                 const a = try self.readRm(m, sz);
                 const b = self.regs[m.reg];
                 const result = try self.groupOp(group, a, b, sz);
-                try self.writeRm(m, sz, result);
+                if (stores) try self.writeRm(m, sz, result);
+                return;
+            },
+            2 => {
+                // r/m8, imm8
+                const m = try self.decodeModRm(rex);
+                const imm = try self.fetchImm(1);
+                const a = try self.readRm(m, 1);
+                const result = try self.groupOp(group, a, imm, 1);
+                if (stores) try self.writeRm(m, 1, result);
                 return;
             },
             3 => {
@@ -989,21 +990,21 @@ pub const Cpu = struct {
                 const imm = try self.fetchImm(sz);
                 const a = try self.readRm(m, sz);
                 const result = try self.groupOp(group, a, imm, sz);
-                try self.writeRm(m, sz, result);
+                if (stores) try self.writeRm(m, sz, result);
                 return;
             },
             4 => {
                 // AL, imm8
                 const imm = try self.fetchImm(1);
                 const result = try self.groupOp(group, self.regs[RAX] & 0xFF, imm, 1);
-                self.regs[RAX] = (self.regs[RAX] & ~@as(u64, 0xFF)) | (result & 0xFF);
+                if (stores) self.regs[RAX] = (self.regs[RAX] & ~@as(u64, 0xFF)) | (result & 0xFF);
                 return;
             },
             5 => {
                 // eAX, imm
                 const imm = try self.fetchImm(sz);
                 const result = try self.groupOp(group, self.regs[RAX], imm, sz);
-                self.regs[RAX] = result;
+                if (stores) self.regs[RAX] = result;
                 return;
             },
             else => return error.Unsupported,
@@ -1336,10 +1337,41 @@ pub const Cpu = struct {
         if (port >= uart_mod.COM1 and port < uart_mod.COM1 + 8) {
             return self.uart.read(port);
         }
+        // The PCI configuration space: the address register and the data
+        // port.  This is how a guest finds its devices.
+        if (self.pci) |bus| {
+            if (port >= pci_mod.CONFIG_ADDRESS and port < pci_mod.CONFIG_ADDRESS + 4) {
+                return bus.portIn(port);
+            }
+            if (port >= pci_mod.CONFIG_DATA and port < pci_mod.CONFIG_DATA + 4) {
+                return bus.portIn(port);
+            }
+        }
         // A port the guest has no business touching.  Reading the host's
         // hardware on the guest's behalf would let a guest read the host's
         // devices, so it gets zeroes.
         return 0;
+    }
+
+    /// A dword the guest wants to read.
+    ///
+    /// The PCI configuration data port is a dword, and a guest that reads it
+    /// with `in eax, dx` expects all four bytes at once.
+    fn portIn32(self: *Cpu, port: u16) u32 {
+        var value: u32 = 0;
+        var i: u5 = 0;
+        while (i < 4) : (i += 1) {
+            value |= @as(u32, self.portIn(port + i)) << @intCast(i * 8);
+        }
+        return value;
+    }
+
+    /// A dword the guest wants to write.
+    fn portOut32(self: *Cpu, port: u16, value: u32) void {
+        var i: u5 = 0;
+        while (i < 4) : (i += 1) {
+            self.portOut(port + i, @truncate(value >> @intCast(i * 8)));
+        }
     }
 
     /// A port the guest wants to write.
@@ -1348,11 +1380,20 @@ pub const Cpu = struct {
             self.uart.write(port, value);
             return;
         }
+        if (self.pci) |bus| {
+            if (port >= pci_mod.CONFIG_ADDRESS and port < pci_mod.CONFIG_ADDRESS + 4) {
+                bus.portOut(port, value);
+                return;
+            }
+            if (port >= pci_mod.CONFIG_DATA and port < pci_mod.CONFIG_DATA + 4) {
+                bus.portOut(port, value);
+                return;
+            }
+        }
         // Everything else is dropped: the guest's writes must not reach the
         // host's hardware.
     }
 };
-
 
 /// The parity flag: one when the low byte has an even number of set bits.
 fn parity(value: u64) bool {

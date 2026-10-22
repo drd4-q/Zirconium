@@ -103,6 +103,17 @@ pub const Memory = struct {
         self.region_count += 1;
     }
 
+    /// Move a device region to a new guest physical address.
+    ///
+    /// A guest that programs a base address register has said where it wants
+    /// the device, and the hypervisor puts it there: the region moves with
+    /// it.
+    pub fn moveRegion(self: *Memory, index: usize, guest_base: u64) bool {
+        if (index >= self.region_count) return false;
+        self.regions[index].guest_base = guest_base;
+        return true;
+    }
+
     /// The host address of a guest physical address.
     ///
     /// RAM is the machine's RAM; anything else has to be a device region, or
@@ -214,90 +225,176 @@ const PTE_FLAGS: u64 = PTE_PRESENT | PTE_WRITE | PTE_USER;
 
 /// The guest physical address the hypervisor's device is mapped at.
 ///
-/// It is outside the guest's RAM on purpose: a guest that believes it has a
-/// device at 4 GB looks like a PC with a device above the 1 GB line, and the
-/// guest's own allocator never hands that address out.
-pub const DEVICE_GPA: u64 = 0x0000_0001_0000_0000;
+/// It is the PCI memory window - the same place a real PC puts its devices:
+/// above the RAM (a guest never has 3.75 GB of it) and inside the low 4 GB,
+/// so a guest that only knows how to program a 32-bit base address register
+/// can still reach it.
+pub const DEVICE_GPA: u64 = 0x0000_0000_F000_0000;
 
 /// The guest physical address of the shared window.
-pub const WINDOW_GPA: u64 = 0x0000_0001_0010_0000;
+pub const WINDOW_GPA: u64 = 0x0000_0000_F001_0000;
 
-/// Build the guest's initial page tables.
+/// How many page directories the hypervisor keeps for a guest.
+pub const POOL_PDS: usize = 8;
+
+/// How many page tables the hypervisor keeps for a guest.
+pub const POOL_PTS: usize = 8;
+
+/// How much room the hypervisor's page tables take at the top of the guest's
+/// RAM: the PML4, the PDPT, the two pools and the slack between them.
+pub const TABLE_BYTES: u64 = 0x20000;
+
+/// The page tables the hypervisor builds for a guest.
 ///
-/// The guest inherits three things: its RAM mapped identically, the
-/// hypervisor's device at `device_gpa`, and nothing else.  A real guest
-/// builds its own tables as soon as it is in long mode; these are the ones it
-/// starts with.
+/// The guest inherits them and can replace them: a real guest builds its own
+/// as soon as it is in long mode.  They live at the top of the guest's own
+/// RAM, so the guest can see them - which is what a real machine does.
 ///
-/// The tables live at the top of the guest's RAM, in the last 64 KB:
-/// PML4, PDPT, two page directories and one page table for the device.
-pub fn setupInitialTables(memory: *Memory, device_phys: u64, window_phys: u64) bool {
-    if (!memory.present()) return false;
-    if (memory.ram_bytes < 0x10000) return false;
+/// The tables are grown as devices are mapped: a guest that programs a base
+/// address register chooses where its device goes, and the tables have to
+/// follow it there.
+pub const Tables = struct {
+    memory: *Memory,
+    pml4_gpa: u64 = 0,
+    pdpt_gpa: u64 = 0,
+    /// The pool of page directories, and the pool of page tables.
+    pd_pool_gpa: u64 = 0,
+    pt_pool_gpa: u64 = 0,
+    pd_used: [POOL_PDS]bool = [_]bool{false} ** POOL_PDS,
+    pt_used: [POOL_PTS]bool = [_]bool{false} ** POOL_PTS,
 
-    // The device the guest may talk to, and the window it shares with the
-    // hypervisor.  Both live outside the guest's RAM - a guest that believes
-    // it has a device at 4 GB looks like a PC with a device above the 1 GB
-    // line, and its own allocator never hands that address out.
-    memory.addRegion(DEVICE_GPA, device_phys, 0x1000);
-    memory.addRegion(WINDOW_GPA, window_phys, 0x1_0000);
+    /// Lay the tables out and empty them.
+    pub fn init(self: *Tables, memory: *Memory) bool {
+        self.memory = memory;
+        if (!memory.present()) return false;
+        if (memory.ram_bytes < 0x10000) return false;
 
-    const pml4_gpa = memory.ram_bytes - 0x10000;
-    const pdpt_gpa = pml4_gpa + 0x1000;
-    const pd0_gpa = pdpt_gpa + 0x1000;
-    const pd1_gpa = pd0_gpa + 0x1000;
-    const pt0_gpa = pd1_gpa + 0x1000;
+        // The tables live at the top of the guest's RAM: the PML4, the PDPT,
+        // the pool of page directories and the pool of page tables.  The
+        // whole lot has to fit inside the RAM, or the last page of the pool
+        // falls off the end of it.
+        self.pml4_gpa = memory.ram_bytes - TABLE_BYTES;
+        self.pdpt_gpa = self.pml4_gpa + 0x1000;
+        self.pd_pool_gpa = self.pdpt_gpa + 0x1000;
+        self.pt_pool_gpa = self.pd_pool_gpa + POOL_PDS * 0x1000;
 
-    // The RAM, identity mapped with 2 MB pages.
-    const pd0_entries: u64 = (memory.ram_bytes + 0x1FFFFF) / 0x200000;
-    var i: u64 = 0;
-    while (i < pd0_entries) : (i += 1) {
-        if (!memory.writeWord(pd0_gpa + i * 8, (i * 0x200000) | PTE_FLAGS | PTE_HUGE)) return false;
-    }
-    // The rest of the 1 GB the first directory covers is not there.
-    while (i < 512) : (i += 1) {
-        if (!memory.writeWord(pd0_gpa + i * 8, 0)) return false;
-    }
+        // Empty every table, so an entry that is not there is not present.
+        var i: u64 = 0;
+        while (i < ENTRIES) : (i += 1) {
+            if (!memory.writeWord(self.pml4_gpa + i * 8, 0)) return false;
+            if (!memory.writeWord(self.pdpt_gpa + i * 8, 0)) return false;
+        }
+        i = 0;
+        while (i < POOL_PDS) : (i += 1) {
+            if (!self.clearPage(self.pd_pool_gpa + i * 0x1000)) return false;
+        }
+        i = 0;
+        while (i < POOL_PTS) : (i += 1) {
+            if (!self.clearPage(self.pt_pool_gpa + i * 0x1000)) return false;
+        }
 
-    // The device's page table: the register block and the shared window.
-    //
-    // The entries hold **guest** physical addresses, like every other entry
-    // in the guest's page tables - it is the walk that turns them into host
-    // addresses.  Putting the host address here instead would make the walk
-    // look for a guest address that does not exist, and the guest's access to
-    // the device would fault.
-    if (!memory.writeWord(pt0_gpa + 0 * 8, DEVICE_GPA | PTE_FLAGS)) return false;
-    var w: u64 = 1;
-    while (w < 16) : (w += 1) {
-        if (!memory.writeWord(pt0_gpa + w * 8, WINDOW_GPA + (w - 1) * 4096 | PTE_FLAGS)) return false;
-    }
-    while (w < 512) : (w += 1) {
-        if (!memory.writeWord(pt0_gpa + w * 8, 0)) return false;
-    }
-
-    // The page directory for the device's gigabyte.
-    if (!memory.writeWord(pd1_gpa + 0 * 8, pt0_gpa | PTE_FLAGS)) return false;
-    var d: u64 = 1;
-    while (d < 512) : (d += 1) {
-        if (!memory.writeWord(pd1_gpa + d * 8, 0)) return false;
+        // The PML4 points at the PDPT and nothing else.
+        if (!memory.writeWord(self.pml4_gpa, self.pdpt_gpa | PTE_FLAGS)) return false;
+        memory.cr3_gpa = self.pml4_gpa;
+        return true;
     }
 
-    // The page directory pointer table: the RAM's gigabyte and the device's.
-    if (!memory.writeWord(pdpt_gpa + 0 * 8, pd0_gpa | PTE_FLAGS)) return false;
-    if (!memory.writeWord(pdpt_gpa + 4 * 8, pd1_gpa | PTE_FLAGS)) return false;
-    var p: u64 = 1;
-    while (p < 512) : (p += 1) {
-        if (p == 4) continue;
-        if (!memory.writeWord(pdpt_gpa + p * 8, 0)) return false;
+    fn clearPage(self: *Tables, gpa: u64) bool {
+        var i: u64 = 0;
+        while (i < ENTRIES) : (i += 1) {
+            if (!self.memory.writeWord(gpa + i * 8, 0)) return false;
+        }
+        return true;
     }
 
-    // And the PML4.
-    if (!memory.writeWord(pml4_gpa + 0 * 8, pdpt_gpa | PTE_FLAGS)) return false;
-    var q: u64 = 1;
-    while (q < 512) : (q += 1) {
-        if (!memory.writeWord(pml4_gpa + q * 8, 0)) return false;
+    /// Map the guest's RAM identically, with 2 MB pages.
+    ///
+    /// The RAM is one contiguous block, so the whole of it fits in the first
+    /// gigabyte - which is one page directory, and 2 MB pages are plenty.
+    pub fn mapRam(self: *Tables) bool {
+        const pd_gpa = self.allocPd() orelse return false;
+        if (!self.memory.writeWord(self.pdpt_gpa, pd_gpa | PTE_FLAGS)) return false;
+
+        const entries: u64 = (self.memory.ram_bytes + 0x1FFFFF) / 0x200000;
+        var i: u64 = 0;
+        while (i < entries) : (i += 1) {
+            if (!self.memory.writeWord(pd_gpa + i * 8, (i * 0x200000) | PTE_FLAGS | PTE_HUGE)) return false;
+        }
+        while (i < ENTRIES) : (i += 1) {
+            if (!self.memory.writeWord(pd_gpa + i * 8, 0)) return false;
+        }
+        return true;
     }
 
-    memory.cr3_gpa = pml4_gpa;
-    return true;
-}
+    /// Map one 4 KB page of a device at a guest physical address.
+    ///
+    /// The entry holds the **guest** physical address, like every other entry
+    /// in the guest's page tables: it is the walk that turns it into a host
+    /// address, and the device's region is what says where it really is.
+    pub fn mapPage(self: *Tables, gpa: u64, flags: u64) bool {
+        const pdpt_index = (gpa >> 30) & 0x1FF;
+        const pd_index = (gpa >> 21) & 0x1FF;
+        const pt_index = (gpa >> 12) & 0x1FF;
+
+        // The page directory for this gigabyte.
+        var pd_gpa = self.memory.readWord(self.pdpt_gpa + pdpt_index * 8) orelse return false;
+        if ((pd_gpa & PTE_PRESENT) == 0) {
+            pd_gpa = self.allocPd() orelse return false;
+            if (!self.memory.writeWord(self.pdpt_gpa + pdpt_index * 8, pd_gpa | PTE_FLAGS)) return false;
+        } else {
+            pd_gpa &= PTE_ADDR_MASK;
+        }
+
+        // The page table for this 2 MB.
+        const pd_entry = self.memory.readWord(pd_gpa + pd_index * 8) orelse return false;
+        var pt_gpa: u64 = 0;
+        if ((pd_entry & PTE_PRESENT) == 0) {
+            pt_gpa = self.allocPt() orelse return false;
+            if (!self.memory.writeWord(pd_gpa + pd_index * 8, pt_gpa | PTE_FLAGS)) return false;
+        } else if ((pd_entry & PTE_HUGE) != 0) {
+            // The RAM's 2 MB pages are already there.  A device cannot share
+            // a page with RAM, so the guest has to put it somewhere else.
+            return false;
+        } else {
+            pt_gpa = pd_entry & PTE_ADDR_MASK;
+        }
+
+        return self.memory.writeWord(pt_gpa + pt_index * 8, gpa | flags);
+    }
+
+    /// Map a device's registers at a guest physical address.
+    ///
+    /// The whole range is mapped, a page at a time, so a device with a
+    /// 64 KB window gets all of it.
+    pub fn mapDevice(self: *Tables, gpa: u64, bytes: u64) bool {
+        var offset: u64 = 0;
+        while (offset < bytes) : (offset += PAGE_SIZE) {
+            if (!self.mapPage(gpa + offset, PTE_FLAGS)) return false;
+        }
+        return true;
+    }
+
+    /// Take a page directory out of the pool.
+    fn allocPd(self: *Tables) ?u64 {
+        var i: usize = 0;
+        while (i < POOL_PDS) : (i += 1) {
+            if (!self.pd_used[i]) {
+                self.pd_used[i] = true;
+                return self.pd_pool_gpa + i * 0x1000;
+            }
+        }
+        return null;
+    }
+
+    /// Take a page table out of the pool.
+    fn allocPt(self: *Tables) ?u64 {
+        var i: usize = 0;
+        while (i < POOL_PTS) : (i += 1) {
+            if (!self.pt_used[i]) {
+                self.pt_used[i] = true;
+                return self.pt_pool_gpa + i * 0x1000;
+            }
+        }
+        return null;
+    }
+};

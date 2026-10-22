@@ -27,6 +27,7 @@ const identity_mod = @import("identity.zig");
 const zvp_mod = @import("devices/zvp.zig");
 const cpu_mod = @import("cpu.zig");
 const mmu_mod = @import("mmu.zig");
+const pci_mod = @import("pci.zig");
 const proto = @import("proto.zig");
 
 pub const Output = output_mod.Output;
@@ -36,6 +37,8 @@ pub const Budget = resources_mod.Budget;
 pub const Identity = identity_mod.Identity;
 pub const Zvp = zvp_mod.Zvp;
 pub const Cpu = cpu_mod.Cpu;
+pub const PciBus = pci_mod.Bus;
+pub const Tables = mmu_mod.Tables;
 
 pub const State = enum {
     /// Created, not yet probed.
@@ -66,6 +69,11 @@ pub const Machine = struct {
     identity: Identity = .{},
     /// The hypervisor's own device, as this machine sees it.
     device: Zvp = .{},
+    /// The PCI bus the guest sees.  The hypervisor's device is on it, and a
+    /// guest finds it the ordinary way: by scanning the bus.
+    pci: PciBus = .{},
+    /// The page tables the hypervisor built for the guest.
+    tables: Tables = undefined,
     /// The virtual CPU.  It keeps its state between slices, so a guest that
     /// is stopped and started again carries on where it was.
     cpu: Cpu = .{},
@@ -197,11 +205,19 @@ pub const Machine = struct {
     pub fn startGuest(self: *Machine) bool {
         if (!self.guest_loaded) return false;
 
-        const ok = mmu_mod.setupInitialTables(
-            &self.device.memory,
-            self.device.regs_phys,
-            self.device.window_phys,
-        );
+        // The device the guest may talk to, and the window it shares with
+        // the hypervisor.  Both live outside the guest's RAM: a guest that
+        // believes it has a device at 4 GB looks like a PC with a device
+        // above the 1 GB line, and its own allocator never hands that
+        // address out.
+        self.device.memory.addRegion(mmu_mod.DEVICE_GPA, self.device.regs_phys, 0x1000);
+        self.device.memory.addRegion(mmu_mod.WINDOW_GPA, self.device.window_phys, 0x1_0000);
+
+        self.tables = .{ .memory = &self.device.memory };
+        const ok = self.tables.init(&self.device.memory) and
+            self.tables.mapRam() and
+            self.tables.mapDevice(mmu_mod.DEVICE_GPA, 0x1000) and
+            self.tables.mapDevice(mmu_mod.WINDOW_GPA, 0x1_0000);
         if (!ok) {
             serial.serialWrite("[ZVM] Machine ");
             serial.serialWriteDec(self.id);
@@ -209,8 +225,27 @@ pub const Machine = struct {
             return false;
         }
 
-        self.cpu = .{};
-        self.cpu.memory = self.device.memory;
+        // The PCI bus.  The hypervisor's device is on it, at the slot a
+        // real chipset device would occupy.
+        self.pci = .{};
+        self.pci.tables = &self.tables;
+        self.pci.memory = &self.device.memory;
+        if (self.pci.add(0, 0x1E, 0)) |f| {
+            f.config = self.device.config_space;
+            f.bar_kind[0] = 1; // BAR0: the register block
+            f.bar_host[0] = self.device.regs_phys;
+            f.bar_bytes[0] = 0x1000;
+            f.bar_gpa[0] = mmu_mod.DEVICE_GPA;
+            f.bar_region[0] = 0;
+            f.bar_kind[2] = 1; // BAR2: the shared window
+            f.bar_host[2] = self.device.window_phys;
+            f.bar_bytes[2] = 0x1_0000;
+            f.bar_gpa[2] = mmu_mod.WINDOW_GPA;
+            f.bar_region[2] = 1;
+        }
+
+        self.cpu = .{ .memory = &self.device.memory };
+        self.cpu.pci = &self.pci;
         self.cpu.identity = self.identity;
         self.cpu.rip = self.guest_entry_gpa;
         self.cpu.regs[cpu_mod.RSP] = self.guest_stack_gpa;
