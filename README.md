@@ -39,7 +39,7 @@ A special thanks to the [Dillo](https://git.dillo-browser.org/dillo/tree/) proje
 
 ## Building & Running
 
-Requires Zig 0.16.0 (0.17 works too), `xorriso`, and QEMU.
+Requires Zig 0.16.x or 0.17.x (both work), `xorriso`, and QEMU.
 
 ```bash
 zig build            # build only → zig-out/bin/kernel (Debug, safety on)

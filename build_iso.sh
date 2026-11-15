@@ -37,7 +37,7 @@ Options:
   -h, --help          Show this help
 
 Environment:
-  ZIG=/path/to/zig     Use a specific Zig executable (must be Zig 0.16.x)
+  ZIG=/path/to/zig     Use a specific Zig executable (Zig 0.16.x or 0.17.x)
 EOF
 }
 
@@ -106,8 +106,11 @@ command -v "$ZIG_BIN" >/dev/null 2>&1 || {
 }
 
 ZIG_VERSION="$($ZIG_BIN version)"
-if [[ ! "$ZIG_VERSION" =~ ^0\.16\.(.+)$ ]]; then
-    echo "error: Zig 0.16.x is required; found $ZIG_VERSION" >&2
+# The tree builds with Zig 0.16 and with Zig 0.17: 0.17 removed the array
+# multiplication syntax (the code uses @splat, which both have) and changed
+# how the enum fields are read (the code uses std.enums, which both have).
+if [[ ! "$ZIG_VERSION" =~ ^0\.(16|17)\.(.+)$ ]]; then
+    echo "error: Zig 0.16.x or 0.17.x is required; found $ZIG_VERSION" >&2
     echo "       Set ZIG=/path/to/zig if the correct compiler is not in PATH." >&2
     exit 1
 fi

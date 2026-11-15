@@ -31,10 +31,13 @@ run.bat                            # Windows equivalent (patch_iso.py / qemu-img
 ./test_prog.sh                     # rebuild disk.img with test executables (see below)
 ```
 
-- **Zig 0.16.0 required.** `build_iso.sh` enforces `0.16.x` and fails loudly otherwise
-  (`ZIG=/path/to/zig` overrides the binary). `build.zig.zon` still says
-  `minimum_zig_version = "0.14.0"` — stale; `tools/bin2zig.zig` and `tools/gen_config.zig`
-  use 0.16-only std APIs (`std.process.Init`, `std.Io.Dir`, `std.Io.Writer.Allocating`).
+- **Zig 0.16 or 0.17 — both work.** `build_iso.sh` enforces `0.16.x` or `0.17.x` and fails loudly
+  otherwise (`ZIG=/path/to/zig` overrides the binary). Zig 0.17 removed the array
+  multiplication syntax (`a ** b`) and replaced the enum field list with parallel
+  name/value arrays; the tree uses `@splat` and `std.enums`, which both versions have, so
+  it builds with either. `build.zig.zon` still says `minimum_zig_version = "0.14.0"` —
+  stale; `tools/bin2zig.zig` and `tools/gen_config.zig` use std APIs that only exist in
+  0.16 and later (`std.process.Init`, `std.Io.Dir`, `std.Io.Writer.Allocating`).
 - `zig build` exposes only the default `install` step and `build`. **There is no
   `zig build test` and no unit tests anywhere** — verification is the QEMU harness only
   (below). A clean build is a few seconds; always rebuild before claiming anything works.
