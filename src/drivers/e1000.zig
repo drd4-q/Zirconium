@@ -73,7 +73,7 @@ var rx_cur: u32 = 0;
 var tx_cur: u32 = 0;
 pub var mac: [6]u8 = undefined;
 
-fn mmioRead(offset: u32) u32 {
+pub fn mmioRead(offset: u32) u32 {
     const ptr: *volatile u32 = @ptrFromInt(mmio_base + @as(u64, offset));
     return ptr.*;
 }
@@ -373,14 +373,25 @@ pub fn transmit(data: []const u8) void {
     }
 }
 
+/// RX descriptor fields are owned by the NIC between doorbell and DD.  They
+/// are DMA-updated plain memory, so every read has to go through a volatile
+/// pointer for the same reason the TX path does: a normal load may be hoisted
+/// out of the polling loop, which would make the NIC look permanently idle.
+fn rxDescStatus(idx: u32) u8 {
+    return @as(*const volatile u8, @ptrCast(&rx_ring[idx].status)).*;
+}
+
+fn rxDescLength(idx: u32) u16 {
+    return @as(*const volatile u16, @ptrCast(&rx_ring[idx].length)).*;
+}
+
 pub fn receive(buf: []u8) ?usize {
     if (!initialized or mmio_base == 0) return null;
-    const status = rx_ring[rx_cur].status;
-    if (status & 0x01 == 0) { // DD
+    if (rxDescStatus(rx_cur) & 0x01 == 0) { // DD
         return null;
     }
 
-    const len = @as(usize, rx_ring[rx_cur].length);
+    const len = @as(usize, rxDescLength(rx_cur));
     const copy_len = @min(len, buf.len);
     @memcpy(buf[0..copy_len], rx_bufs[@as(usize, @intCast(rx_cur))][0..copy_len]);
 

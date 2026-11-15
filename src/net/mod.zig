@@ -182,16 +182,30 @@ pub fn ensureArp(target_ip: [4]u8) bool {
 
     const timer = @import("../drivers/timer.zig");
 
-    // Retry the request: a single ARP request that is lost (or answered after
-    // the deadline) used to fail the whole connect.
-    var attempt: u32 = 0;
-    while (attempt < 3) : (attempt += 1) {
+    // Retry until the deadline: a single ARP request that is lost (or
+    // answered after the deadline) used to fail the whole connect.
+    //
+    // The interval grows.  A real link answers within a millisecond, so the
+    // first attempts are close together; a link that is slow to answer is
+    // given more and more time.
+    //
+    // The budget is generous on purpose.  QEMU's e1000 model holds back every
+    // packet that arrives in the second after the driver programs RCTL (see
+    // set_rx_control() in QEMU's hw/net/e1000.c: it arms a one second flush
+    // timer on every RCTL write, and the NIC reports "cannot receive" until
+    // that timer fires).  The first reply can therefore be a full second
+    // late, and a 500 ms budget lost the race - the ARP failed and the whole
+    // connect with it.
+    const deadline = timer.tickCount() +% 250; // 2.5 s
+    var wait_ms: u32 = 10;
+    while (timer.tickCount() < deadline) {
         arp.request(target_ip);
-        const deadline = timer.tickCount() +% 50; // 500ms per attempt
-        while (timer.tickCount() < deadline) {
+        const until_next = timer.tickCount() + @as(u64, wait_ms) / 10;
+        while (timer.tickCount() < until_next) {
             poll();
             if (arp_cache.lookup(target_ip)) |_| return true;
         }
+        if (wait_ms < 500) wait_ms *= 2;
     }
     return false;
 }

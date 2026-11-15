@@ -19,6 +19,17 @@ const REG_TIMER_DIV: u32 = 0x3E0;
 var apic_base: u64 = DEFAULT_APIC_BASE;
 var apic_enabled: bool = false;
 
+/// The LAPIC timer counts down from this value once per 10 ms period.  It is
+/// the kernel's time reference: `arch/tsc.zig` calibrates the TSC against it.
+pub var timer_period_counts: u32 = 0;
+
+/// The current value of the LAPIC timer counter.  It counts down within the
+/// period and is reloaded when it reaches zero.
+pub fn timerCount() u32 {
+    if (!apic_enabled) return 0;
+    return readReg(REG_TIMER_CURR);
+}
+
 fn rdmsr(msr: u32) u64 {
     var low: u32 = 0;
     var high: u32 = 0;
@@ -107,6 +118,7 @@ pub fn init() bool {
 
     // Calibrate LAPIC timer against 10ms PIT pulse
     const ticks_per_10ms = calibrateLapicTimer();
+    timer_period_counts = ticks_per_10ms;
 
     // Configure Periodic LAPIC Timer on Vector 32 (100 Hz)
     const timer_vector: u32 = 32;

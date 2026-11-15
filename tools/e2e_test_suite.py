@@ -99,19 +99,16 @@ def find_iso_kernel_offset(iso_data: bytes) -> Tuple[Optional[int], int]:
     return None, 0
 
 def build_fresh_iso() -> bool:
-    """Create a kernel.iso from scratch using grub-mkrescue."""
-    isodir = os.path.join(REPO_ROOT, "isodir")
-    boot_dir = os.path.join(isodir, "boot", "grub")
-    shutil.rmtree(isodir, ignore_errors=True)
-    os.makedirs(boot_dir, exist_ok=True)
+    """Create a kernel.iso from scratch with tools/mkiso.py (Limine + xorriso)."""
     kernel_bin = os.path.join(REPO_ROOT, "zig-out", "bin", "kernel")
     if not os.path.exists(kernel_bin):
         return False
-    shutil.copy2(kernel_bin, os.path.join(isodir, "boot", "kernel.bin"))
-    shutil.copy2(os.path.join(REPO_ROOT, "grub.cfg"), os.path.join(boot_dir, "grub.cfg"))
     iso_path = os.path.join(REPO_ROOT, "kernel.iso")
     try:
-        res = subprocess.run(["grub-mkrescue", "-o", iso_path, isodir], cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        res = subprocess.run(
+            [sys.executable, os.path.join(REPO_ROOT, "tools", "mkiso.py"),
+             "--output", iso_path, "--kernel", kernel_bin],
+            cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return res.returncode == 0
     except Exception:
         return False

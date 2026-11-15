@@ -88,45 +88,27 @@ def find_iso_kernel_offset(iso_data):
     return record[0], record[3]
 
 def build_fresh_iso(repo_root):
-    """Create a kernel.iso from scratch (grub-mkrescue) when in-place patching won't fit."""
-    import shutil
-    isodir = os.path.join(repo_root, "isodir")
-    boot_dir = os.path.join(isodir, "boot", "grub")
-    shutil.rmtree(isodir, ignore_errors=True)
-    os.makedirs(boot_dir, exist_ok=True)
-    shutil.copy2(os.path.join(repo_root, "zig-out", "bin", "kernel"), os.path.join(isodir, "boot", "kernel.bin"))
-    shutil.copy2(os.path.join(repo_root, "grub.cfg"), os.path.join(boot_dir, "grub.cfg"))
+    """Create a kernel.iso from scratch (Limine + xorriso) when in-place patching won't fit."""
+    import subprocess
+    import sys
+
+    kernel_bin = os.path.join(repo_root, "zig-out", "bin", "kernel")
+    if not os.path.exists(kernel_bin):
+        return False
     iso_path = os.path.join(repo_root, "kernel.iso")
+    mkiso = os.path.join(repo_root, "tools", "mkiso.py")
     try:
         res = subprocess.run(
-            ["grub-mkrescue", "-o", iso_path, isodir],
+            [sys.executable, mkiso, "--output", iso_path, "--kernel", kernel_bin],
             cwd=repo_root,
         )
         if res.returncode == 0:
-            print(f"[TEST RUNNER] Built fresh kernel.iso with grub-mkrescue")
+            print(f"[TEST RUNNER] Built fresh kernel.iso with tools/mkiso.py")
             return True
     except Exception:
         pass
 
-    # Try WSL grub-mkrescue via temp folder
-    try:
-        temp_dir = os.path.join(os.environ.get("TEMP", "C:\\Temp"), "isobuild")
-        tboot_dir = os.path.join(temp_dir, "boot", "grub")
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        os.makedirs(tboot_dir, exist_ok=True)
-        shutil.copy2(os.path.join(repo_root, "zig-out", "bin", "kernel"), os.path.join(temp_dir, "boot", "kernel.bin"))
-        shutil.copy2(os.path.join(repo_root, "grub.cfg"), os.path.join(tboot_dir, "grub.cfg"))
-        wsl_temp = "/mnt/c" + temp_dir[2:].replace("\\", "/")
-        wsl_out = wsl_temp + "/kernel.iso"
-        res = subprocess.run(["wsl", "sh", "-c", f"grub-mkrescue -o {wsl_out} {wsl_temp}"])
-        if res.returncode == 0 and os.path.exists(os.path.join(temp_dir, "kernel.iso")):
-            shutil.copy2(os.path.join(temp_dir, "kernel.iso"), iso_path)
-            print(f"[TEST RUNNER] Built fresh kernel.iso with WSL grub-mkrescue")
-            return True
-    except Exception:
-        pass
-
-    print("[TEST RUNNER WARNING] grub-mkrescue/xorriso not available; falling back to direct -kernel boot")
+    print("[TEST RUNNER WARNING] xorriso not available; falling back to direct -kernel boot")
     return False
 
 def patch_kernel_iso(repo_root):

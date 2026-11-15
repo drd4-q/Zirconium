@@ -33,6 +33,56 @@ pub fn init() void {
     isr_mod.registerIrq(0, irqHandler);
 
     _ = @import("apic.zig").init();
+
+    calibrateTsc();
+}
+
+/// Calibrate the TSC against the LAPIC timer, which has just been calibrated
+/// against the PIT.  No new time reference is introduced: the LAPIC counter
+/// ticks at a known rate, so the number of TSC cycles per LAPIC count gives
+/// the TSC frequency.
+///
+/// The window is deliberately shorter than half a period, so the counter
+/// cannot be reloaded while we measure it - a reload would make the
+/// difference meaningless.
+fn calibrateTsc() void {
+    const apic = @import("apic.zig");
+    const tsc = @import("../arch/tsc.zig");
+
+    const per_period = apic.timer_period_counts;
+    if (per_period < 1000) {
+        // No usable LAPIC timer: fall back to a nominal frequency.  The
+        // delays built on it are then approximate, but bounded.
+        tsc.setFrequency(1_000_000_000);
+        return;
+    }
+
+    // Wait for the counter to be in the upper half of the period, so the
+    // measurement window below cannot cross a reload.
+    var start_count = apic.timerCount();
+    var spins: u32 = 0;
+    while (start_count < per_period / 2 and spins < 10_000_000) : (spins += 1) {
+        asm volatile ("pause" ::: .{ .memory = true });
+        start_count = apic.timerCount();
+    }
+
+    const target = per_period / 4; // a quarter of a period = 2.5 ms
+    const t0 = tsc.read();
+    var count = start_count;
+    spins = 0;
+    while (start_count -% count < target and spins < 100_000_000) : (spins += 1) {
+        asm volatile ("pause" ::: .{ .memory = true });
+        count = apic.timerCount();
+    }
+    const t1 = tsc.read();
+
+    // 2.5 ms of TSC cycles: the frequency is the delta times 400.
+    const hz = (t1 -% t0) * 400;
+    if (hz == 0) {
+        tsc.setFrequency(1_000_000_000);
+    } else {
+        tsc.setFrequency(hz);
+    }
 }
 
 fn irqHandler(frame: *isr_mod.InterruptFrame) void {

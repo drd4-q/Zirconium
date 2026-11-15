@@ -8,7 +8,7 @@ const vmm = @import("../kernel/vmm.zig");
 const acpi = @import("acpi.zig");
 const gdt = @import("gdt.zig");
 const idt = @import("idt.zig");
-const timer = @import("../drivers/timer.zig");
+const tsc = @import("tsc.zig");
 
 const AP_BASE: u64 = 0x8000;
 const AP_STACK_SIZE: usize = 16 * 1024;
@@ -33,10 +33,21 @@ const ICR_INIT_ASSERT: u32 = 0x00004500;
 // would put the mode bits into 14:13, decoding as FIXED vector = never wakes).
 const ICR_SIPI: u32 = (6 << 8) | @as(u32, @intCast(AP_BASE >> 12));
 
+// The INIT-SIPI-SIPI timings, taken from Linux
+// (arch/x86/kernel/apic/intel.c, apic_send_init_sipi_sipi_shorter):
+// a 10 us INIT assertion and a 200 us gap between the two SIPIs.
+//
+// The kernel used to wait 100 ms and 2 ms respectively, which cost 0.3 s of
+// boot time on a 4-CPU machine and more than a second on a 16-CPU one.  The
+// 10 ms tick is far too coarse for these gaps anyway, so they are measured
+// with the TSC.
+const INIT_ASSERT_US: u32 = 10;
+const SIPI_GAP_US: u32 = 200;
+
 pub export var smp_cpus_online: u32 = 0;
 pub var smp_booted: bool = false;
-pub var ap_ticks: [acpi.MAX_CPU]u64 = [_]u64{0} ** acpi.MAX_CPU;
-pub var online_flags: [acpi.MAX_CPU]bool = [_]bool{false} ** acpi.MAX_CPU;
+pub var ap_ticks: [acpi.MAX_CPU]u64 = @splat(0);
+pub var online_flags: [acpi.MAX_CPU]bool = @splat(false);
 
 var lapic_base_read: u64 = 0;
 var boot_busy: u32 = 0;
@@ -143,20 +154,19 @@ fn sendIpiTo(apic_id: u32, icr_lo: u32) void {
 // INIT pulse to a single AP.
 fn sendInitAp(apic_id: u32) void {
     sendIpiTo(apic_id, ICR_INIT_ASSERT);
-    timer.sleep(100); // let the AP settle into its wait-for-SIPI park
+    tsc.delayUs(INIT_ASSERT_US);
 }
 
-// Two STARTUP IPIs to a single AP (spec wants >= 200 us between them).
+// Two STARTUP IPIs to a single AP (the spec wants >= 200 us between them).
 fn sendStartupAp(apic_id: u32) void {
     sendIpiTo(apic_id, ICR_SIPI);
-    timer.sleep(2); // >= 200 us; timer granularity is 10 ms
+    tsc.delayUs(SIPI_GAP_US);
     sendIpiTo(apic_id, ICR_SIPI);
-    timer.sleep(2);
 }
 
 fn waitCpuOnline(expected: u32) bool {
     var spins: u32 = 0;
-    while (@as(*const volatile u32, @ptrCast(&smp_cpus_online)).* < expected and spins < 2000000) : (spins += 1) {
+    while (@as(*const volatile u32, @ptrCast(&smp_cpus_online)).* < expected and spins < 20_000_000) : (spins += 1) {
         asm volatile ("pause" ::: .{ .memory = true });
     }
     return @as(*const volatile u32, @ptrCast(&smp_cpus_online)).* >= expected;
