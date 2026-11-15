@@ -25,6 +25,9 @@ const identity_mod = @import("identity.zig");
 const uart_mod = @import("uart.zig");
 const pci_mod = @import("pci.zig");
 
+/// The size of a guest page.
+const PAGE_SIZE: u64 = 4096;
+
 pub const Memory = mmu_mod.Memory;
 pub const Identity = identity_mod.Identity;
 
@@ -157,7 +160,26 @@ pub const Cpu = struct {
     }
 
     /// Read `size` bytes (1, 2, 4 or 8), little endian.
+    ///
+    /// The page walk is the most expensive thing the emulator does, so an
+    /// access that stays inside one page is translated **once** and the bytes
+    /// are then read from the host address.  Reading byte by byte - and so
+    /// walking the page tables once per byte - made an eight byte load cost
+    /// thirty two table reads.
     pub fn read(self: *Cpu, gva: u64, size: u8) Trap!u64 {
+        const host = try self.translate(gva);
+        const offset = gva & (PAGE_SIZE - 1);
+        if (offset + size <= PAGE_SIZE) {
+            const p: [*]const volatile u8 = @ptrFromInt(host);
+            var value: u64 = 0;
+            var i: u8 = 0;
+            while (i < size) : (i += 1) {
+                value |= @as(u64, p[i]) << @intCast(i * 8);
+            }
+            return value;
+        }
+
+        // The access crosses a page: every byte needs its own translation.
         var value: u64 = 0;
         var i: u8 = 0;
         while (i < size) : (i += 1) {
@@ -168,7 +190,21 @@ pub const Cpu = struct {
     }
 
     /// Write `size` bytes (1, 2, 4 or 8), little endian.
+    ///
+    /// One translation for an access that stays inside one page, the same
+    /// reason as in `read()`.
     pub fn write(self: *Cpu, gva: u64, size: u8, value: u64) Trap!void {
+        const host = try self.translate(gva);
+        const offset = gva & (PAGE_SIZE - 1);
+        if (offset + size <= PAGE_SIZE) {
+            const p: [*]volatile u8 = @ptrFromInt(host);
+            var i: u8 = 0;
+            while (i < size) : (i += 1) {
+                p[i] = @truncate(value >> @intCast(i * 8));
+            }
+            return;
+        }
+
         var i: u8 = 0;
         while (i < size) : (i += 1) {
             try self.writeByte(gva + i, @truncate(value >> @intCast(i * 8)));
@@ -446,6 +482,12 @@ pub const Cpu = struct {
     /// Execute instructions until the budget runs out, the guest halts or it
     /// traps.
     pub fn run(self: *Cpu, budget: u64) void {
+        // A guest that has halted stays halted.  Without this check the
+        // emulator would keep executing whatever follows the `hlt` - the
+        // guest's memory past the end of its code - and the shell's input
+        // loop pays for it on every poll.
+        if (self.halted) return;
+
         self.trapped = false;
         var n: u64 = 0;
         while (n < budget) : (n += 1) {

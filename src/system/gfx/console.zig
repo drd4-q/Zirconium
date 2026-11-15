@@ -246,14 +246,13 @@ pub fn scrollUp() void {
         mirror[rows - 1][c2] = packCell(' ', fg, bg);
     }
 
-    // Scroll the surface pixels, then repaint the row that moved into place.
+    // The surface scrolls its pixels and blanks the row it exposes - the
+    // framebuffer fills it with the background, the VGA text with the
+    // console's colours.  The row in the mirror is blank too, so the two
+    // agree and there is nothing to repaint: repainting it cell by cell
+    // meant drawing 160 glyphs (20 000 pixel stores) for a row that was
+    // already blank.
     surface.scrollUp(@intCast(rows), @intCast(cols));
-    const last = rows - 1;
-    var c3: usize = 0;
-    while (c3 < cols) : (c3 += 1) {
-        const cell = mirror[last][c3];
-        surface.putCell(@intCast(c3), @intCast(last), cellChar(cell), cellFg(cell), cellBg(cell));
-    }
     surface.flush();
 }
 

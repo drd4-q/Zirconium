@@ -30,6 +30,16 @@ pub inline fn cellAttr(fg: u8, bg: u8) u16 {
     return (b << 4) | f;
 }
 
+/// The colours the console is using.  The scroll path blanks the row it
+/// exposes, and it has to blank it in the console's colours.
+var console_fg: u8 = 7;
+var console_bg: u8 = 0;
+
+pub fn setConsoleColors(fg: u8, bg: u8) void {
+    console_fg = fg;
+    console_bg = bg;
+}
+
 pub fn putCellRaw(col: usize, row: usize, ch: u8, fg: u8, bg: u8) void {
     if (col >= COLS or row >= ROWS) return;
     buffer()[row * COLS + col] = @as(u16, ch) | (cellAttr(fg, bg) << 8);
@@ -103,11 +113,14 @@ pub fn scrollUp(rows: u32, cols: u32) void {
             buf[(r) * COLS + c] = buf[(r + rows) * COLS + c];
         }
     }
+    // The exposed rows are blanked in the console's colours, the way the
+    // framebuffer's scroll path blanks them in the background.
+    const blank: u16 = @as(u16, ' ') | (cellAttr(console_fg, console_bg) << 8);
     var r2: usize = ROWS - rows;
     while (r2 < ROWS) : (r2 += 1) {
         var c: usize = 0;
         while (c < w) : (c += 1) {
-            buf[r2 * COLS + c] = 0x0720; // space, white on black
+            buf[r2 * COLS + c] = blank;
         }
     }
 }

@@ -161,6 +161,10 @@ pub const Machine = struct {
 
     /// Execute a slice of the guest's instructions.
     fn runCpu(self: *Machine, quanta: u8) void {
+        // A guest that has halted is done: there is nothing to emulate and
+        // the shell's input loop polls the machines on every character.
+        if (self.cpu.halted) return;
+
         // A quantum is a few hundred instructions: enough for the guest to
         // make progress, small enough that a guest that spins cannot take the
         // host's CPU away from the other machines.

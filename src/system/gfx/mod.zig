@@ -108,9 +108,10 @@ pub fn getRows() usize {
 pub fn setColor(fg_c: Color, bg_c: Color) void {
     console.fg = @intFromEnum(fg_c);
     console.bg = @intFromEnum(bg_c);
-    // The framebuffer's scroll path clears the exposed row with the console
-    // background, so it has to know the current one.
+    // The scroll paths clear the exposed row with the console's colours, so
+    // both surfaces have to know them.
     syncFramebufferBackground();
+    vga_text.setConsoleColors(console.fg, console.bg);
 }
 
 pub fn writeDec(value: u64) void {
