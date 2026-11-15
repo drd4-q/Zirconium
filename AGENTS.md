@@ -113,8 +113,21 @@ multi-controller USB, and — when `disk.img` exists — one with
 | `tools/stress_m2.py` | USB stress: unattached root ports, rapid polling, allocation/overflow immunity. |
 | `tools/stress_m3.py` | HID stress: 6KRO rollover, truncated/corrupt reports, 10k rapid decodes. |
 | `tools/test_hid_stress.zig` | Host-side mirror of the HID/keyboard data structures (pure logic, no QEMU). |
+| `tools/test_edid.zig` | Host-side test of the EDID parser (`zig run --dep edid -Mroot=tools/test_edid.zig -Medid=src/drivers/drm/edid.zig`). It imports the real parser. |
+| `tools/test_ftdi.zig` | Host-side test of the FTDI chip protocol: the baud divisors, the chip IDs, the status bits. |
+| `tools/test_hidpp.zig` | Host-side test of the HID++ protocol: the report formats, the requests, the feature table. |
 | `tools/test_fat32_log.py` | Boots a FAT32 image and checks mount, `KERNEL.LOG`, nested dirs, multi-cluster append/copy. |
 | `tools/create_guest_disk.py` | Builds the sample guest kernels and copies them into `disk.img` under `/vms/`. |
+
+**The host-side tests import the real code**, not a copy of it: the modules they need
+(`edid.zig`, `ftdi_proto.zig`, `hidpp_proto.zig`) are free of kernel dependencies for
+exactly that reason. Run them with:
+
+```bash
+zig run --dep edid  -Mroot=tools/test_edid.zig  -Medid=src/drivers/drm/edid.zig
+zig run --dep ftdi  -Mroot=tools/test_ftdi.zig  -Mftdi=src/drivers/usb/serial/ftdi_proto.zig
+zig run --dep hidpp -Mroot=tools/test_hidpp.zig -Mhidpp=src/drivers/hid/hidpp_proto.zig
+```
 
 ## Test programs & samples
 
@@ -180,7 +193,9 @@ the framebuffer still arrives in mbi bit 12. Only the thing that loads the kerne
     contain `text`" trap simply does not exist any more.
   - `serial: yes` — the bootloader mirrors its own output to COM1, so the serial log shows
     the menu and the handoff, not just the kernel's messages.
-  - `timeout: 3` — the menu countdown.
+  - `timeout: 0` — the menu does not wait. Three seconds of countdown on every boot was
+    a third of the boot time; `--menu-debug` still builds the image whose menu never
+    times out.
 - **The kernel file must be named `kernel.bin`** inside the image. The test harnesses
   patch a freshly built kernel into an existing ISO *in place* (much faster than rebuilding)
   and they look the file up by that name; renaming it to `kernel.elf` silently breaks the
@@ -201,6 +216,34 @@ the framebuffer still arrives in mbi bit 12. Only the thing that loads the kerne
 - **The ISO is BIOS+UEFI hybrid**, so one image boots real hardware either way. The BIOS
   path is the one exercised by QEMU in the harnesses.
 
+## Boot time
+
+**Boot to the shell: 1.2 s** (it was 6.6 s before this was worked on). Three things
+dominated it, and all three are gone:
+
+- **The Limine menu.** `timeout: 3` was three seconds of countdown on every boot. It is `0`
+  now; `--menu-debug` is the diagnostic path.
+- **The AP bring-up.** `sendInitAp()` waited 100 ms after the INIT pulse and `sendStartupAp()`
+  waited 2 ms between the two SIPIs — 0.3 s on a 4-CPU machine, more than a second on a
+  16-CPU one. The timings are now the ones Linux uses (**10 µs** INIT assertion, **200 µs**
+  between the SIPIs; `arch/x86/kernel/apic/intel.c`, `apic_send_init_sipi_sipi_shorter()`).
+  The 10 ms tick is far too coarse for those gaps, so they are measured with the **TSC**:
+  `src/arch/tsc.zig` calibrates it against the LAPIC timer, which `drivers/apic` has already
+  calibrated against the PIT, so no new time reference is introduced.
+- **The ARP resolution of the gateway.** It could fail outright, see the QEMU note below.
+
+**The rest of the time is the bootloader and the kernel image**: 0.65 s of BIOS and Limine,
+0.44 s to load a 3.9 MB kernel over an emulated CD-ROM, 0.1 s of kernel init, 0.05 s of
+ZVM setup. A smaller kernel loads faster; the features are configurable in
+`config/kernel.json`.
+
+**QEMU's e1000 holds every packet back for a second.** `set_rx_control()` in QEMU's
+`hw/net/e1000.c` arms a one second flush timer on *every* write to RCTL, and the NIC
+reports "cannot receive" until that timer fires — so the first packet after the driver
+programs RCTL is a full second late. The guest cannot shorten the window (every RCTL write
+re-arms it), so `net.ensureArp()` retries with a growing interval and a budget long enough
+to win the race. **A 500 ms budget lost it**, and the connect failed with it.
+
 ## Architecture
 
 **Boot:** `src/entry.S` (32-bit multiboot entry → zeroes `.bss` → identity-maps the first
@@ -208,14 +251,14 @@ the framebuffer still arrives in mbi bit 12. Only the thing that loads the kerne
 (`src/main.zig`) → `kernel/boot.zig`, which **runs the configured boot sequence**
 (`config.boot_stages`, from `config/kernel.json`):
 
-gdt → framebuffer → system (PIC, IDT, then `probeLfbSafe()`) → syscall64 (MSRs enabling the
-`syscall` instruction) → memory (PMM, VMM, kalloc) → filesystem (VFS + ramfs mount +
-`seedfs.init()`) → kernel (`kernel_init.init()`: timer, scheduler; registers the embedded
-ring-3 user tests only with `-Dselftest=true`) → pci (`pci.scan()`) → storage
+gdt → framebuffer → system (PIC, IDT, then `probeLfbSafe()` and the DRM model) → syscall64
+(MSRs enabling the `syscall` instruction) → memory (PMM, VMM, kalloc) → filesystem (VFS +
+ramfs mount + `seedfs.init()`) → kernel (`kernel_init.init()`: timer, scheduler; registers the
+embedded ring-3 user tests only with `-Dselftest=true`) → pci (`pci.scan()`) → storage
 (`virtio_blk.init()`, `ahci.init()`, `usb.zig.init()`, `partition.scanAll()`, FAT16/FAT32
 probe, `kernel_log.init()`) → network (e1000-**or**-rtl8169 probe + `net/mod.zig.init()`) →
-input (`mouse.init()`) → smp → **machines** (the ZVM creates the machines its configuration
-names) → **guests** (their kernels are loaded into their memory) → scheduler
+input (`mouse.init()`) → bluetooth → smp → **machines** (the ZVM creates the machines its
+configuration names) → **guests** (their kernels are loaded into their memory) → scheduler
 (`scheduler_ready = true` — the tick must be live *before* the first task, or nothing is
 preemptible during `runAll` — then `scheduler.runAll()`) → shell.
 
@@ -287,8 +330,9 @@ that is not an error.
   `uart.zig` (the guest's 8250), `pci.zig` (the guest's PCI bus), `devices/zvp.zig`.
 - `src/drivers/` — keyboard (IRQ1), mouse (PS/2), input (unified input facade, see USB),
   timer, apic, pci, e1000, rtl8169, virtio_blk, ahci, `usb.zig` (re-export shim) + `usb/`
-  (16-file stack, see below). The xHCI driver lives in `usb/xhci.zig` — there is no
-  `src/drivers/xhci.zig`.
+  (16-file stack, see below), plus `hid/` (the HID++ protocol for the 2.4GHz receivers),
+  `bluetooth/` (the HCI stack) and `drm/` (the display model). The xHCI driver lives in
+  `usb/xhci.zig` — there is no `src/drivers/xhci.zig`.
 - `src/net/` — arp, arp_cache, ip, icmp, tcp, udp, dns, dhcp, http; `mod.zig` is the public
   surface **and** the NIC dispatcher.
 - `src/fs/` — vfs (including append flags and cursor-aware directory reads), ramfs (mounted
@@ -456,6 +500,71 @@ accessors, and adds `pollHid()`.
   boots extra profiles (UHCI+HID, multi-controller) via its `get_uhci_hid_log`/
   `get_multi_usb_log` helpers. Coverage: `TC-USB-01..07`, `TC-HID-01..05`, `TC-WIFI-01..05`,
   `TC-DIAG-01..03`, `TC-STRESS-01/04`.
+- **A class driver can claim the interrupt endpoint:** `dev.intr_complete` takes the report
+  instead of the HID layer — Linux's "the driver owns the interface" rule. The Bluetooth HCI
+  transport uses it for the events.
+- **The class drivers are probed from `usb.poll()`**, not from `init()`: the xHCI controller
+  finds its devices *while it is polled*, so a device on an xHCI port is invisible to
+  `init()`.
+- **Class 0xff means "vendor specific" and says nothing.** The identity comes from the
+  vendor and the product ID (`device.classifyVendorDevice`): the FTDI chips are serial
+  adapters, the Realtek ones are Wi-Fi. Before that, every vendor specific device was
+  called a Wi-Fi adapter.
+
+## The USB serial adapters (FTDI)
+
+`src/drivers/usb/serial/` — a port of Linux's `drivers/usb/serial/ftdi_sio.c`.
+
+- **`ftdi_proto.zig`** is the chip protocol (the vendor requests, the baud rate divisors,
+  the status bits). It has no kernel dependencies, so `tools/test_ftdi.zig` imports the real
+  thing and checks the divisors against the values FTDI's application note gives.
+- **`ftdi.zig`** is the driver: reset, latency timer, line, modem control, data path. The
+  baud rate is a *divisor* of the chip's clock, and each chip family has its own formula
+  (the 232R: 48 MHz over a 16-bit divisor; the 2232H: 120 MHz with a fractional one).
+- Every packet the chip sends carries **two status bytes** in front of the data: the modem
+  status (CTS, DSR, RI, carrier) and the line status (the error bits). They are taken off
+  before the data is handed on.
+- `usb serial` shows the adapters. QEMU's `usb-serial` emulates an FTDI: it needs
+  `always-plugged=true` (or an open chardev), because QEMU only attaches the device when the
+  chardev's backend is open.
+
+## The 2.4GHz receivers (HID++)
+
+`src/drivers/hid/hidpp.zig` + `hidpp_proto.zig` — a port of Linux's
+`drivers/hid/hid-logitech-hidpp.c`.
+
+A Logitech receiver is a USB device, but the keyboard behind it is not: the receiver forwards
+the **HID++** reports and the driver asks the receiver about the device it is interested in.
+The protocol has a short report (0x10, 7 bytes, HID++ 1.0) and a long one (0x11, 20 bytes,
+HID++ 2.0); both carry the feature index, the function and the parameters.
+
+- The **root feature** (0x0000) is how the host asks for the index of every other feature;
+  the answers go into the device's feature table.
+- The **device name** (0x0005) comes in parts of four bytes; the parameter index says which
+  part.
+- The **battery level** (0x1000) and the **LED state** (0x0008) are the other two the
+  driver reads.
+- The USB stack tells a HID++ report from a boot protocol report by the report ID: the boot
+  protocol decoder would make nonsense of them.
+- `usb hidpp` shows the receivers and the devices behind them.
+
+## Bluetooth
+
+`src/drivers/bluetooth/` — a port of the Linux Bluetooth stack, in three pieces:
+
+- **`hci.zig`** is the Host Controller Interface protocol core, from
+  `net/bluetooth/hci_core.c` and `include/net/bluetooth/hci.h`: the packet formats, the
+  command builder, the reset sequence and the inquiry procedure.
+- **`btusb.zig`** is the USB transport, from `drivers/bluetooth/btusb.c`: the Bluetooth class
+  interface (0xe0/0x01/0x01), the three endpoints the way `usb_find_common_endpoints()`
+  picks them, and the command transfer, which Linux sends as a class specific control
+  request.
+- **`vhci.zig`** is the virtual controller, from `drivers/bluetooth/hci_vhci.c`. Linux leaves
+  the answering to userspace; here the controller is emulated in the kernel, so the protocol
+  core has something to talk to and the hypervisor can hand a controller to a guest.
+
+`bt` lists the controllers and runs an inquiry; the driver writes the peers it finds to the
+serial log, the way the other drivers in the tree do.
 
 ## Net / storage / display gotchas
 
@@ -465,8 +574,9 @@ accessors, and adds `pollHid()`.
 - **Network is client-only:** static IP 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3
   (`dhcp` overwrites all three from a lease). `net.nextHopMac()` picks the destination MAC
   (on-link host vs gateway) and **drops the packet when ARP fails**, so `get`/`wget` reach
-  the internet through QEMU's slirp. `ensureArp` retries 3× with a 500 ms deadline per
-  attempt, polling inside the wait. Nothing listens on guest:80 — `run.sh`'s "open
+  the internet through QEMU's slirp. `ensureArp` retries with a growing interval and a 2.5 s
+  budget, polling inside the wait — the budget has to outlast QEMU's one second flush
+  window (see "Boot time"). Nothing listens on guest:80 — `run.sh`'s "open
   http://localhost:8080" hostfwd message is misleading.
 - **The stack polls, it does not use IRQs.** e1000 interrupts are masked on purpose;
   `net.poll()` drains the RX ring from the blocking paths (`ensureArp`, `waitEstablished`,
@@ -585,6 +695,45 @@ friends are unchanged for the ~750 call sites.
   otherwise.
 - The PgUp/PgDn scrollback is **one** implementation now; the shell used to branch on
   `vga_fb.active` because the VGA-text and framebuffer consoles kept separate histories.
+
+## The display stack (DRM)
+
+`src/drivers/drm/` — a port of the Linux DRM model around the framebuffer the bootloader
+hands over.
+
+The kernel's display is exactly Linux's **"simple framebuffer"** (`drivers/video/fbdev/
+simplefb.c`): the bootloader sets a mode and the kernel draws into the memory it was given.
+What was missing was the model around it.
+
+- **`edid.zig`** is the EDID parser, from `drivers/gpu/drm/drm_edid.c` and
+  `include/drm/drm_edid.h`: the manufacturer ID (three letters in five bits each), the
+  product code, the monitor's name, the detailed timings and the established timings.
+  **The display descriptor's type is in byte 3 and its text in bytes 5..17** — Linux's
+  `struct detailed_non_pixel`, and the only layout that matches a real EDID.
+- **`connector.zig`** is the connector (`drm_connector.c`): the status (connected,
+  disconnected, unknown), the detection and the mode list the EDID provides. The
+  **preferred mode is the largest one**, not the EDID's own "preferred" bit — that is what
+  Linux's `edid_fixup_preferred()` does.
+- **`fbdev.zig`** is the CRTC and the fbdev emulation (`drm_crtc.c`,
+  `drm_fbdev_client.c`): the mode the CRTC runs at, the power state and the
+  `fb_var_screeninfo`/`fb_fix_screeninfo` a program sees.
+- **`ddc.zig`** reads the EDID over the VGA's display data channel, the way
+  `drivers/video/mfb.c` does. The lines only exist on an adapter that is wired for them, so
+  a failure means "no EDID", not "the kernel is broken".
+- The parser has no kernel dependencies, so `tools/test_edid.zig` imports the real thing and
+  checks it against the EDIDs Linux's own DRM tests use — 46 checks against blobs that
+  `edid-decode` also decodes.
+- `drm` shows the connector, the modes and the EDID.
+
+## Two traps that cost real time
+
+- **A global declared `undefined` does not get the field defaults of its type.** The virtual
+  Bluetooth controller lives in such a global, so its address and its flags were silently
+  zero. Declare it `.{}` — and give the type defaultable fields (a function pointer needs a
+  default stub).
+- **A `u3` loop counter can never reach 8**, so `while (i < 8)` never ends. The DDC reader
+  had exactly that, and the machine hung in a loop the compiler was allowed to assume could
+  not happen.
 
 ## DynamicalKVM (ZVM)
 

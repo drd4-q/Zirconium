@@ -1,7 +1,7 @@
 # TODO — Zirconium
 
 ## Current state
-- Kernel boots via Multiboot/GRUB, identity-mapped 2MB pages
+- Kernel boots via Multiboot/Limine, identity-mapped 2MB pages; **1.2 s from power to shell**
 - VGA + serial output, keyboard driver (IRQ1), timer (PIT 100Hz), PCI, e1000 NIC, RTL8169 NIC, USB Wi-Fi (RTL8188EU), virtio-blk disk
 - PMM (bitmap page allocator) + VMM (page tables) + kernel heap (kmalloc/kfree/krealloc)
 - TCP/IP stack (ARP, IP, ICMP, TCP, HTTP), DNS resolver, UDP, DHCP, ARP cache
@@ -13,7 +13,7 @@
 - Lua interpreter (lexer, parser, AST, VM, API) — compiled and working
 - Keyboard flush support for clean input between programs
 - PS/2 mouse driver with IRQ12
-- Framebuffer support (Multiboot FBFLAG, CP437 bitmap font); **24bpp and 32bpp LFB accepted**, `[FB] ...` serial diagnostics on every boot, gfxpayload text fallback in grub.cfg
+- Framebuffer support (Multiboot FBFLAG, CP437 bitmap font); **24bpp and 32bpp LFB accepted**, `[FB] ...` serial diagnostics on every boot; the DRM model (EDID, connector, CRTC, fbdev) around it, `drm` command
 - Scrollback buffer (512 lines, VGA text mode + framebuffer)
 - Environment variables (`src/system/env.zig`): `set/unset/env`, `$KEY` expansion on the shell command line, exposed to PE programs via GetEnvironmentVariableA/GetEnvironmentStringsW
 - Copy-on-write fork (ref-counted pages, page-fault write handler in VMM)
@@ -30,6 +30,7 @@
 - Kernel heap kalloc fixed: free list is address-sorted and mergeBlocks verifies physical adjacency (previously LIFO inserts + blind merges produced fake huge blocks that corrupted large file buffers)
 - ramfs handle ownership fixed: ramfsClose used to kfree() vfs.open_files[] slots (BSS) — every ramfs close corrupted the heap
 - xHCI driver skeleton (`src/drivers/xhci.zig`): PCI detect, MMIO cap/operational parse, stop/reset/run, DCBAA+contexts, command/event rings via RTSOFF, doorbells, port power; QEMU devices attach but root-port CCS stays clear — HID bring-up blocked on qemu-xhci port topology (see TODO below)
+- Drivers ported from the Linux kernel: **Bluetooth** (the HCI protocol core, the USB transport, a virtual controller), **2.4GHz receivers** (the HID++ protocol), **USB serial** (the FTDI chips), **display** (the DRM model: the EDID parser, the connector, the CRTC, the fbdev emulation)
 
 ## What needs to be done
 
