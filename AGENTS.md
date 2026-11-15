@@ -773,6 +773,22 @@ FAT16 or FAT32 volume, so a stick whose filesystem the kernel does not know
 (Ventoy's own partition, for instance) gets no kernel log at all - the
 messages stay in the serial log and in RAM.
 
+**The virtio-blk driver had never worked.** The device status register of
+the legacy virtio interface is **eight bits** wide, and the driver wrote it
+with `outl` - four bytes - so the status never stuck, the queue was never
+enabled, and every request timed out.  The disk was neither read nor
+written: the kernel log was always empty, and `TC-VFS-02` had been
+PROGRESSIVE rather than PASSED for exactly that reason.  The status is
+written byte by byte now, the queue address has its enable bit set, and
+the ring memory and the request buffers are sized for the queue QEMU
+offers (1024 descriptors).
+
+The order of the writes matters too: the descriptors have to reach the
+device before the available ring is updated, so there is an `sfence`
+between them.  Without it the compiler may move the stores after the ring
+update, the device works from the previous descriptor, and a read returns
+the sector before the one that was asked for.
+
 ## When the machine comes up with a black screen
 
 **The serial log is the primary diagnostic.** A black screen means the kernel

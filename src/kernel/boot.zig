@@ -55,6 +55,11 @@ pub fn run(magic: u32, mbi_ptr: u32) noreturn {
         serial.serialWrite(@tagName(stage));
         serial.serialWrite("\n");
         runStage(stage);
+
+        // Write the log out after every stage.  The flush normally happens
+        // from the shell's input loop, and a machine that hangs later never
+        // gets there - but the log has to say how far it got.
+        @import("../system/kernel_log.zig").flush();
     }
 
     // The configuration did not include a shell stage; there is nothing left

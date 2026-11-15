@@ -52,7 +52,11 @@ var io_base: u16 = 0;
 // QEMU reports queue_size 256 => desc=4096, avail=516, used at page 8192, used=2052.
 // Total 10244 bytes, so the buffer must be 16384. (8192 was too small and the old
 // layout placed avail and used on the same offset, corrupting descriptors.)
-var virtqueue_mem: [16384]u8 align(4096) = undefined;
+/// The memory of the virtqueue: the descriptor table, the available ring
+/// and the used ring.  QEMU offers a queue of up to 1024 descriptors, and
+/// that needs 16 KiB for the descriptors alone, plus 2 KiB for the
+/// available ring and 8 KiB for the used one.
+var virtqueue_mem: [32768]u8 align(4096) = undefined;
 
 var free_head: u16 = 0;
 var num_sectors: u64 = 0;
@@ -83,6 +87,14 @@ fn portIn32(addr: u16) u32 {
     return asm volatile ("inl %%dx, %%eax"
         : [result] "={eax}" (-> u32),
         : [port] "{dx}" (addr),
+    );
+}
+
+fn portOut8(addr: u16, val: u8) void {
+    asm volatile ("outb %%al, %%dx"
+        :
+        : [val] "{al}" (val),
+          [port] "{dx}" (addr),
     );
 }
 
@@ -138,15 +150,16 @@ fn doIo(sector: u64, buf_ptr: [*]u8, buf_len: usize, is_write: bool) bool {
         return false;
     };
 
-    if (data_idx >= REQ_BUF_SIZE) {
+    const buf_index = allocReqBuf() orelse {
         freeDescChain(hdr_idx);
         freeDescChain(data_idx);
         freeDescChain(st_idx);
         return false;
-    }
+    };
 
-    // Use data_idx slot for all buffers (header + data + status packed together)
-    const buf_base: [*]u8 = @ptrFromInt(@intFromPtr(&req_data[data_idx]));
+    // The header, the data and the status are packed together in one
+    // request buffer.
+    const buf_base: [*]u8 = @ptrFromInt(@intFromPtr(&req_data[buf_index]));
 
     // Header at buf_base[0..16]: {type:u32, ioprio:u32, sector:u64}
     @memset(buf_base[0..16], 0);
@@ -186,6 +199,14 @@ fn doIo(sector: u64, buf_ptr: [*]u8, buf_len: usize, is_write: bool) bool {
     desc_table[st_idx].flags = VIRTQ_DESC_F_WRITE;
     desc_table[st_idx].next = 0;
 
+    // The descriptor writes have to be visible to the device before the
+    // ring is updated: the device reads the descriptors over DMA.  Without
+    // the barrier the compiler is free to move the stores after the ring
+    // update (and in a release build it does), the device then works from
+    // the *previous* descriptor, and the data lands in the previous buffer:
+    // a read returns the sector before the one that was asked for.
+    asm volatile ("sfence" ::: .{ .memory = true });
+
     // avail_ring layout: [flags:u16, idx:u16, ring:N*u16]
     const avail_idx_val = avail_ring_base[1]; // idx field
     avail_ring_base[2 + (avail_idx_val % queue_size)] = hdr_idx;
@@ -208,17 +229,26 @@ fn doIo(sector: u64, buf_ptr: [*]u8, buf_len: usize, is_write: bool) bool {
         asm volatile ("pause" ::: .{ .memory = true });
     }
     if (timeout >= 2000000) {
+        serial.serialWrite("[VIRTIO-BLK] request timed out\n");
         freeDescChain(hdr_idx);
+        freeReqBuf(buf_index);
         return false;
     }
 
     freeDescChain(hdr_idx);
 
-    if (buf_base[16 + SECTOR_SIZE] != 0) return false;
+    if (buf_base[16 + SECTOR_SIZE] != 0) {
+        freeReqBuf(buf_index);
+        serial.serialWrite("[VIRTIO-BLK] device status ");
+        serial.serialWriteDec(buf_base[16 + SECTOR_SIZE]);
+        serial.serialWrite("\n");
+        return false;
+    }
 
     if (!is_write) {
         @memcpy(buf_ptr[0..@min(buf_len, SECTOR_SIZE)], buf_base[16..][0..@min(buf_len, SECTOR_SIZE)]);
     }
+    freeReqBuf(buf_index);
 
     return true;
 }
@@ -289,14 +319,14 @@ pub fn init() void {
     pci.enableBusMaster(dev.bus, dev.dev, dev.func);
 
     // Reset
-    portOut32(io_base + VIRTIO_PCI_STATUS, 0);
+    portOut8(io_base + VIRTIO_PCI_STATUS, 0);
     delayMs(1);
 
     // Acknowledge
-    portOut32(io_base + VIRTIO_PCI_STATUS, STATUS_ACK);
+    portOut8(io_base + VIRTIO_PCI_STATUS, @intCast(STATUS_ACK));
 
     // Driver
-    portOut32(io_base + VIRTIO_PCI_STATUS, STATUS_ACK | STATUS_DRIVER);
+    portOut8(io_base + VIRTIO_PCI_STATUS, @intCast(STATUS_ACK | STATUS_DRIVER));
 
     // Read host features
     const host_features = portIn32(io_base + VIRTIO_PCI_HOST_FEATURES);
@@ -318,7 +348,7 @@ pub fn init() void {
 
     if (queue_size < 3) {
         serial.serialWrite("[VIRTIO-BLK] Queue too small\n");
-        portOut32(io_base + VIRTIO_PCI_STATUS, STATUS_FAILED);
+        portOut8(io_base + VIRTIO_PCI_STATUS, @intCast(STATUS_FAILED));
         return;
     }
 
@@ -344,16 +374,21 @@ pub fn init() void {
     desc_table[queue_size - 1].next = 0xFFFF;
     free_head = 0;
 
-    // Tell device the queue address (physical address / 4096)
+    // Tell device the queue address (physical address / 4096).
+    //
+    // **Bit 0 of that register is the queue enable bit** in the legacy
+    // interface: the queue is only processed when it is set.  Without it the
+    // device never looks at the ring, every request times out, and the disk
+    // is neither read nor written.
     const queue_addr = @intFromPtr(&virtqueue_mem) / 4096;
-    portOut32(io_base + VIRTIO_PCI_QUEUE_ADDR, @intCast(queue_addr));
+    portOut32(io_base + VIRTIO_PCI_QUEUE_ADDR, @as(u32, @intCast(queue_addr)) | 1);
 
     serial.serialWrite("[VIRTIO-BLK] Queue configured at page 0x");
     serial.serialWriteHex(queue_addr);
     serial.serialWrite("\n");
 
     // Set driver OK
-    portOut32(io_base + VIRTIO_PCI_STATUS, STATUS_ACK | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK);
+    portOut8(io_base + VIRTIO_PCI_STATUS, @intCast(STATUS_ACK | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK));
 
     // Read capacity from config space (capacity is 8 bytes LE at config offset 0)
     const cfg_base = io_base + VIRTIO_PCI_CONFIG_OFFSET;
@@ -387,6 +422,28 @@ pub fn init() void {
     vga.setColor(.white, .black);
 }
 
-const REQ_BUF_SIZE: usize = 256;
-const REQ_ENTRY_SIZE: usize = 16 + SECTOR_SIZE + 1; // header + data + status
+/// The size of one request buffer: the header, the data and the status.
+const REQ_ENTRY_SIZE: usize = 16 + SECTOR_SIZE + 1;
+
+/// How many request buffers there are.  The driver has one request in
+/// flight at a time, so a handful is plenty; the buffers are *not* indexed
+/// by the descriptor number, because the descriptor table is four times
+/// larger than the pool.
+const REQ_BUF_SIZE: usize = 8;
+
 var req_data: [REQ_BUF_SIZE][REQ_ENTRY_SIZE]u8 align(16) = undefined;
+var req_buf_used: [REQ_BUF_SIZE]bool = @splat(false);
+
+/// Take a request buffer.
+fn allocReqBuf() ?usize {
+    for (req_buf_used, 0..) |used, i| {
+        if (used) continue;
+        req_buf_used[i] = true;
+        return i;
+    }
+    return null;
+}
+
+fn freeReqBuf(index: usize) void {
+    if (index < REQ_BUF_SIZE) req_buf_used[index] = false;
+}
