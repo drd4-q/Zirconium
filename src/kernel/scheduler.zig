@@ -590,6 +590,9 @@ pub fn scheduleTick(frame: ?*isr.InterruptFrame) void {
 pub fn pollDeferred() void {
     @import("../drivers/usb.zig").poll();
     @import("../drivers/usb.zig").pollHid();
+    // The Bluetooth controllers: the events arrive on the interrupt
+    // endpoint and are dispatched here, not from the tick handler.
+    @import("../drivers/bluetooth/mod.zig").poll();
     // The guests run here rather than in the tick handler: emulating a guest
     // is not a bounded operation, and the tick handler must never block.
     if (@import("config").features.kvm) {

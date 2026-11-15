@@ -76,6 +76,7 @@
       { "name": "storage", "requires": "storage" },
       { "name": "network", "requires": "network" },
       { "name": "input", "requires": "usb" },
+      { "name": "bluetooth", "requires": "usb" },
       { "name": "smp", "requires": "smp" },
       { "name": "machines", "requires": "kvm" },
       { "name": "guests", "requires": "kvm" },

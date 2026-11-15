@@ -61,6 +61,7 @@ fn runStage(stage: config.Stage) void {
         .guests => stageGuests(),
         .network => stageNetwork(),
         .input => stageInput(),
+        .bluetooth => stageBluetooth(),
         .smp => stageSmp(),
         .scheduler => stageScheduler(),
         .shell => stageShell(),
@@ -222,6 +223,14 @@ fn stageInput() void {
     serial.serialWrite("\n");
     @import("../drivers/mouse.zig").init();
     vga.write("[BOOT] Input initialized\n");
+}
+
+fn stageBluetooth() void {
+    // The Bluetooth stack: the protocol core, the USB transport for a real
+    // controller and the virtual controller the hypervisor can hand to a
+    // guest.
+    @import("../drivers/bluetooth/mod.zig").init();
+    vga.write("[BOOT] Bluetooth initialized\n");
 }
 
 fn stageSmp() void {

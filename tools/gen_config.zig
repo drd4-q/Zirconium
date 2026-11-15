@@ -60,6 +60,7 @@ const stage_names = [_][]const u8{
     "guests",
     "network",
     "input",
+    "bluetooth",
     "smp",
     "scheduler",
     "shell",

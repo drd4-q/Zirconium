@@ -77,6 +77,12 @@ pub const UsbDevice = struct {
     ep_bulk_out: u8 = 0,
     ep_bulk_out_max_pkt: u16 = 64,
     ep_bulk_out_toggle: u1 = 0,
+
+    // A class driver that owns the interrupt IN endpoint may take the
+    // packets instead of the HID layer.  This is the equivalent of Linux's
+    // `usb_driver->probe` claiming the interface: the transport keeps the
+    // endpoint armed and hands every completed report to the owner.
+    intr_complete: ?*const fn (dev: *UsbDevice, len: usize) void = null,
 };
 
 fn spinDelayMs(ms: u32) void {

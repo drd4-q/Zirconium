@@ -889,6 +889,15 @@ fn configureXhciDeviceEndpoints(x: *xhci.XhciController, dev: *device.UsbDevice)
 fn processHidReport(dev: *device.UsbDevice, len: usize) void {
     if (len == 0 or len > dev.report_buf.len) return;
 
+    // A class driver that claimed the interrupt endpoint (the Bluetooth HCI
+    // transport does) gets the report instead of the HID layer.  This is
+    // Linux's "the driver owns the interface" rule: the transport keeps the
+    // endpoint armed and hands every completed report to its owner.
+    if (dev.intr_complete) |handler| {
+        handler(dev, len);
+        return;
+    }
+
     if (dev.dev_type == .mouse and !usb_mouse_report_logged) {
         serial.serialWrite("[USB-HID] First mouse report id=");
         serial.serialWriteDec(dev.id);

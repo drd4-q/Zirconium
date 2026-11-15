@@ -73,6 +73,7 @@ const vfs = @import("fs/vfs.zig");
 const smp = @import("arch/smp.zig");
 const acpi = @import("arch/acpi.zig");
 const usb_prog = @import("programs/usb.zig");
+const bt_prog = @import("programs/bt.zig");
 const usb_drv = @import("drivers/usb.zig");
 const klog = @import("system/kernel_log.zig");
 
@@ -149,6 +150,7 @@ const command_table = [_]CmdEntry{
     .{ .name = "cpuinfo",    .run = showSmp,    .feature = .smp },
     .{ .name = "usb",        .run = runUsb,     .feature = .usb },
     .{ .name = "lsusb",      .run = runUsb,     .feature = .usb },
+    .{ .name = "bt",         .run = bt_prog.run, .feature = .usb },
     .{ .name = "klog",       .run = runKlog },
     .{ .name = "acpi",       .run = showAcpi },
     .{ .name = "ls",         .run = files.cmdLs },
@@ -1044,6 +1046,7 @@ fn printHelp(_: []const u8) void {
     if (config.features.usb) {
         vga.write("    usb           USB controllers & devices status\n");
         vga.write("    usb debug on  trace HID reports/keys on serial\n");
+        vga.write("    bt            Bluetooth controllers & devices\n");
     }
     vga.write("    klog          kernel log status/flush/dump/clear\n");
     vga.write("    usb storage   USB mass storage & disk status\n");
