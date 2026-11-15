@@ -735,6 +735,26 @@ What was missing was the model around it.
   had exactly that, and the machine hung in a loop the compiler was allowed to assume could
   not happen.
 
+## The emulator's speed
+
+Two things made the guests slow, and the shell paid for both of them because the shell's
+input loop polls the machines on every character.
+
+- **The page walk is the most expensive thing the emulator does**, so an access that stays
+  inside one page is translated **once** and the bytes are read from the host address. The
+  emulator used to read and write byte by byte, and every byte walked the guest's page
+  tables: an eight byte load cost thirty two table reads.
+- **A guest that has halted stays halted.** The emulator used to step past the `hlt` and run
+  whatever followed it in the guest's memory, forever; `cpu.run()` returns at the halt now and
+  `machine.runCpu()` does not even start a slice for a guest that is already halted.
+- **The console scrolls without repainting the row it exposes.** The framebuffer fills it
+  with the background and the VGA text with the console's colours, so the row the mirror
+  shows as blank is blank on the screen too. Repainting it meant drawing 160 glyphs — 20 000
+  pixel stores — for a row that was already blank.
+- **`drawGlyph()` is already fast**: the compiler turns the eight conditional pixel stores
+  into a vectorised blend. Unrolling the loop by hand (`inline for`) *broke* that and made
+  the console half again slower.
+
 ## DynamicalKVM (ZVM)
 
 `src/vm/` — the hypervisor. The kernel itself has **no programs of its own**: it is a
