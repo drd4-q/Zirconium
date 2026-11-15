@@ -166,7 +166,7 @@ pub const Identity = struct {
     /// companion" - an ordinary class a guest already has a driver for.
     class_code: u32 = 0x0C0340,
     /// The machine UUID, as SMBIOS type 1 reports it.
-    uuid: [16]u8 = [_]u8{0} ** 16,
+    uuid: [16]u8 = @splat(0),
     /// The CPU family, model and stepping.
     family: u32 = 6,
     model: u32 = 0x9E,

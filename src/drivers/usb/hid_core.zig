@@ -27,12 +27,12 @@ pub const HidDevice = struct {
     caps_lock: bool = false,
     scroll_lock: bool = false,
     in_urb: usbhid.Urb = .{},
-    report_buf: [64]u8 align(16) = [_]u8{0} ** 64,
-    prev_report: [64]u8 = [_]u8{0} ** 64,
+    report_buf: [64]u8 align(16) = @splat(0),
+    prev_report: [64]u8 = @splat(0),
     packet_count: u32 = 0,
 };
 
-pub var hid_instances: [MAX_HID_INSTANCES]HidDevice = [_]HidDevice{.{}} ** MAX_HID_INSTANCES;
+pub var hid_instances: [MAX_HID_INSTANCES]HidDevice = @splat(.{ .active = false, .id = 0, .dev_idx = 0, .ctrl_idx = 0, .addr = 0, .interface_num = 0, .dev_type = .unknown, .is_wireless = false, .ep0_max_packet = 8, .num_lock = true, .caps_lock = false, .scroll_lock = false, .in_urb = .{}, .report_buf = @splat(0), .prev_report = @splat(0), .packet_count = 0 });
 pub var hid_instance_count: usize = 0;
 
 pub fn init() void {

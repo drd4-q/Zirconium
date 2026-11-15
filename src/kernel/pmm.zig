@@ -6,8 +6,8 @@ pub const MAX_MEMORY: usize = 64 * 1024 * 1024 * 1024; // 64 GB supported physic
 pub const TOTAL_PAGES: usize = MAX_MEMORY / PAGE_SIZE; // 16,777,216 pages
 const BITMAP_SIZE: usize = TOTAL_PAGES / 8; // 2,097,152 bytes (2 MB)
 
-var bitmap: [BITMAP_SIZE]u8 = [_]u8{0xFF} ** BITMAP_SIZE;
-var ref_counts: [TOTAL_PAGES]u8 = [_]u8{0} ** TOTAL_PAGES;
+var bitmap: [BITMAP_SIZE]u8 = @splat(0xFF);
+var ref_counts: [TOTAL_PAGES]u8 = @splat(0);
 pub var total_pages: usize = 0;
 pub var free_pages: usize = 0;
 

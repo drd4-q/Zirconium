@@ -19,9 +19,9 @@ pub const UsbStorageDrive = struct {
     lun: u8 = 0,
     total_sectors: u64 = 0,
     sector_size: usize = 512,
-    vendor: [9]u8 = [_]u8{0} ** 9,
-    product: [17]u8 = [_]u8{0} ** 17,
-    revision: [5]u8 = [_]u8{0} ** 5,
+    vendor: [9]u8 = @splat(0),
+    product: [17]u8 = @splat(0),
+    revision: [5]u8 = @splat(0),
     tag_counter: u32 = 1,
     initialized: bool = false,
     block_dev: blockdev.BlockDevice = undefined,
@@ -192,7 +192,7 @@ fn botExecute(
 
 /// SCSI INQUIRY (0x12) - Get device identification strings
 pub fn scsiInquiry(sdev: *UsbStorageDrive) bool {
-    var inq_buf: [36]u8 = [_]u8{0} ** 36;
+    var inq_buf: [36]u8 = @splat(0);
     const cdb = [_]u8{ types.SCSI_INQUIRY, 0, 0, 0, 36, 0 };
 
     if (!botExecute(sdev, &cdb, true, &inq_buf)) {
@@ -225,7 +225,7 @@ pub fn scsiInquiry(sdev: *UsbStorageDrive) bool {
 
 /// SCSI REQUEST SENSE (0x03) - Read sense data after command failure
 pub fn scsiRequestSense(sdev: *UsbStorageDrive, sense_out: ?*([18]u8)) bool {
-    var sense_buf: [18]u8 = [_]u8{0} ** 18;
+    var sense_buf: [18]u8 = @splat(0);
     const cdb = [_]u8{ types.SCSI_REQUEST_SENSE, 0, 0, 0, 18, 0 };
 
     if (botExecute(sdev, &cdb, true, &sense_buf)) {
@@ -254,7 +254,7 @@ pub fn scsiTestUnitReady(sdev: *UsbStorageDrive) bool {
 
 /// SCSI READ CAPACITY (10) (0x25) - Obtain total LBA count and block size
 pub fn scsiReadCapacity(sdev: *UsbStorageDrive) bool {
-    var cap_buf: [8]u8 = [_]u8{0} ** 8;
+    var cap_buf: [8]u8 = @splat(0);
     const cdb = [_]u8{ types.SCSI_READ_CAPACITY_10, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
     if (!botExecute(sdev, &cdb, true, &cap_buf)) {
@@ -401,7 +401,7 @@ pub fn initDrive(dev: *device.UsbDevice) bool {
     }
 
     // 5. Populate and register BlockDevice
-    var name_buf: [32]u8 = [_]u8{0} ** 32;
+    var name_buf: [32]u8 = @splat(0);
     const base_name = "usb-disk";
     @memcpy(name_buf[0..base_name.len], base_name);
     name_buf[base_name.len] = @as(u8, @intCast(storage_drive_count)) + '0';

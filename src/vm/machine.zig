@@ -62,7 +62,7 @@ pub const State = enum {
 
 pub const Machine = struct {
     id: u32 = 0,
-    name: [16]u8 = [_]u8{0} ** 16,
+    name: [16]u8 = @splat(0),
     profile: Profile = undefined,
     /// The identity this machine is presented with.  Every machine gets a
     /// different one, so two guests never see the same computer.
@@ -99,7 +99,7 @@ pub const Machine = struct {
     /// How many bytes of the guest image were loaded.
     guest_bytes: usize = 0,
     /// Where the guest's image was read from.
-    guest_image: [64]u8 = [_]u8{0} ** 64,
+    guest_image: [64]u8 = @splat(0),
     /// The colour used for this machine's decorations, so several machines
     /// are told apart at a glance in the tiled view.
     accent: u32 = 0x40C0FF,

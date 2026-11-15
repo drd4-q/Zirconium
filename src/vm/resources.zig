@@ -63,12 +63,12 @@ pub const Resources = struct {
     total_cores: u8 = 1,
     /// RAM the host can give out, in bytes.
     total_ram_bytes: usize = 0,
-    budgets: [MAX_MACHINES]Budget = [_]Budget{.{}} ** MAX_MACHINES,
+    budgets: [MAX_MACHINES]Budget = @splat(.{ .cores = 1, .ram_bytes = 64 * 1024 * 1024, .core_mask = 0, .time_share = 1 }),
     /// How much each machine asked for, used as the weight when partitioning
     /// automatically.  In RAM megabytes.
-    weights: [MAX_MACHINES]u16 = [_]u16{0} ** MAX_MACHINES,
+    weights: [MAX_MACHINES]u16 = @splat(0),
     /// Per-machine ceilings on the core count, taken from their profile.
-    core_ceilings: [MAX_MACHINES]u8 = [_]u8{0} ** MAX_MACHINES,
+    core_ceilings: [MAX_MACHINES]u8 = @splat(0),
     machine_count: usize = 0,
     /// The one contiguous block the guests' RAM is carved out of.
     ///

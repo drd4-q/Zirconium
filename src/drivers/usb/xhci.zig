@@ -179,7 +179,7 @@ pub const XhciController = struct {
     max_slots: u8 = 0,
     csz_64: bool = false,
     ports: [32]UsbPortStatus = undefined,
-    slots: [16]XhciSlot = [_]XhciSlot{.{}} ** 16,
+    slots: [16]XhciSlot = @splat(.{ .active = false, .slot_id = 0, .port_idx = 0, .speed_code = 0, .root_port = 0, .route_string = 0, .parent_slot_id = 0, .parent_port = 0, .dev_ctx_phys = 0, .input_ctx_phys = 0, .ep0_ring_phys = 0, .ep0_ring = undefined, .ep0_enqueue = 0, .ep0_cycle = 1, .intr_ring_phys = 0, .intr_ring = undefined, .intr_enqueue = 0, .intr_cycle = 1, .intr_dci = 0, .intr2_ring_phys = 0, .intr2_ring = undefined, .intr2_enqueue = 0, .intr2_cycle = 1, .intr2_dci = 0, .bulk_in_ring_phys = 0, .bulk_in_ring = undefined, .bulk_in_enqueue = 0, .bulk_in_cycle = 1, .bulk_in_dci = 0, .bulk_in_max_packet = 512, .bulk_out_ring_phys = 0, .bulk_out_ring = undefined, .bulk_out_enqueue = 0, .bulk_out_cycle = 1, .bulk_out_dci = 0, .bulk_out_max_packet = 512, .bulk_buf_phys = 0, .bulk_buf = undefined, .ctrl_buf_phys = 0, .ctrl_buf = undefined }),
 
     // PMM DMA Memory
     dcbaa_phys: usize = 0,
@@ -205,7 +205,7 @@ pub const XhciController = struct {
 
     scratchpad_array_phys: usize = 0,
     scratchpad_array_pages: usize = 0,
-    scratchpad_pages: [MAX_SCRATCHPADS]usize = [_]usize{0} ** MAX_SCRATCHPADS,
+    scratchpad_pages: [MAX_SCRATCHPADS]usize = @splat(0),
     scratchpad_count: usize = 0,
 
     dma_pool: dma.UsbDmaPool = dma.UsbDmaPool.init(),

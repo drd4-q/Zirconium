@@ -43,7 +43,7 @@ pub inline fn physToVirtSlice(comptime T: type, phys: usize, count: usize) []T {
 /// A slab/bump allocator backed by PMM 4KB pages for DMA structures
 /// (UHCI 16-byte QHs/TDs, EHCI 32-byte QHs/qTDs, xHCI 64-byte TRBs/Contexts).
 pub const UsbDmaPool = struct {
-    pages: [16]usize = [_]usize{0} ** 16,
+    pages: [16]usize = @splat(0),
     page_count: usize = 0,
     current_offset: usize = PAGE_SIZE, // Forces allocation on first request
 

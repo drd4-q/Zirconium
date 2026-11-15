@@ -172,11 +172,12 @@
 - [ ] Runtime video-mode setter (`screen set 1920x1080`) — needs a real VBE path: use the
       VBE 3.0 protected-mode interface from the Multiboot info (offsets 82/84/86, `0xFFFF`
       when absent, see Linux `arch/x86/boot/video/vbe.c`), else a V86 `int 0x10` trampoline.
-      Until then the mode only changes via a `grub.cfg` menu entry. This is also the only
-      way out of the "GRUB handed us no LFB" trap: under UEFI the VGA text buffer is not
-      displayed, so a firmware/GRUB fallback to `text` looks like a black screen.
-- [x] 16bpp RGB565 LFB support (GRUB lands on 16bpp when no 32bpp mode exists; without it
-      the machine gets no framebuffer at all)
+      Until then the mode only changes via the `resolution:` setting in `limine.conf`
+      (which means rebuilding the ISO). This is also the only way out of the "the
+      bootloader handed us no LFB" trap: under UEFI the VGA text buffer is not
+      displayed, so a firmware fallback to `text` looks like a black screen.
+- [x] 16bpp RGB565 LFB support (the bootloader lands on 16bpp when no 32bpp mode exists;
+      without it the machine gets no framebuffer at all)
 - [x] NX for kernel/RAM pages, and no `PAGE_USER` on the inherited identity map
 - [ ] W^X for user segments: with NXE on, ELF/PE data segments are still executable because the
       loaders map every segment with the same flags. Honour `PF_X` (omit `PAGE_NX` only for

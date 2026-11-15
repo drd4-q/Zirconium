@@ -46,7 +46,7 @@ pub const Output = struct {
     /// The region that changed since the last composite.
     dirty: Rect = .{},
     /// Short name shown in the status strip.
-    name: [16]u8 = [_]u8{0} ** 16,
+    name: [16]u8 = @splat(0),
     /// The guest profile this display was created for.
     profile: []const u8 = "generic",
     /// Set when the guest has something to show.

@@ -15,8 +15,8 @@ pub const Link = struct {
 
 pub const Document = struct {
     lines: [MAX_LINES][LINE_LEN]u8 = undefined,
-    line_lens: [MAX_LINES]usize = [_]usize{0} ** MAX_LINES,
-    line_colors: [MAX_LINES]u32 = [_]u32{0xE0E0E0} ** MAX_LINES,
+    line_lens: [MAX_LINES]usize = @splat(0),
+    line_colors: [MAX_LINES]u32 = @splat(0xE0E0E0),
     line_count: usize = 0,
 
     links: [MAX_LINKS]Link = undefined,

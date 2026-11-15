@@ -72,8 +72,8 @@ const MAX_OPEN_FILES: usize = 32;
 var mounts: [MAX_MOUNTS]FileSystem = undefined;
 var mount_count: usize = 0;
 var open_files: [MAX_OPEN_FILES]FileHandle = undefined;
-var underlying_handles: [MAX_OPEN_FILES]?*FileHandle = [_]?*FileHandle{null} ** MAX_OPEN_FILES;
-var file_used: [MAX_OPEN_FILES]bool = [_]bool{false} ** MAX_OPEN_FILES;
+var underlying_handles: [MAX_OPEN_FILES]?*FileHandle = @splat(null);
+var file_used: [MAX_OPEN_FILES]bool = @splat(false);
 
 pub fn isStaticHandle(handle: *const FileHandle) bool {
     const addr = @intFromPtr(handle);

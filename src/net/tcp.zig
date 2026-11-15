@@ -49,7 +49,7 @@ pub const Connection = struct {
     syn_retries: u32 = 0,
 };
 
-var connections: [MAX_CONNECTIONS]Connection = [_]Connection{.{}} ** MAX_CONNECTIONS;
+var connections: [MAX_CONNECTIONS]Connection = @splat(.{ .id = -1, .state = .closed, .local_port = 0, .remote_port = 0, .remote_ip = .{ 0, 0, 0, 0 }, .seq_num = 0, .ack_num = 0, .rx_buf = @splat(0), .rx_len = 0, .rx_ready = false, .retx_buf = @splat(0), .retx_len = 0, .retx_flags = 0, .retx_dst_ip = .{ 0, 0, 0, 0 }, .retx_dst_port = 0, .retx_last = 0, .retx_count = 0, .retx_active = false, .syn_sent_at = 0, .syn_retries = 0 });
 var next_port: u16 = 12345;
 var next_id: i32 = 0;
 

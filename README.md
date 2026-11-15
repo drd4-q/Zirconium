@@ -21,7 +21,7 @@ A special thanks to the [Dillo](https://git.dillo-browser.org/dillo/tree/) proje
 
 ## Features
 
-- Multiboot x86_64 boot via GRUB, identity-mapped 2MB pages
+- Multiboot x86_64 boot via Limine, identity-mapped 2MB pages
 - Ring 3 user-space with INT 0x80 syscalls, per-task address spaces (COW)
 - Foreign binaries: static Linux ELF (via `syscall`) and Win32 PE32+ .exe (emulated thunks)//half worked 
 - Custom TCP/IP stack over an e1000 NIC (ARP, IP, ICMP, TCP, UDP, DNS, DHCP, HTTP)
@@ -33,7 +33,7 @@ A special thanks to the [Dillo](https://git.dillo-browser.org/dillo/tree/) proje
 
 ## Building & Running
 
-Requires Zig 0.16.0, `grub-mkrescue`, and QEMU.
+Requires Zig 0.16.0, `xorriso`, and QEMU.
 
 ```bash
 zig build            # build only → zig-out/bin/kernel (Debug, safety on)

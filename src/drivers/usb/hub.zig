@@ -106,7 +106,7 @@ pub fn configureHubPorts(
     serial.serialWriteDec(addr);
     serial.serialWrite("...\n");
 
-    var hub_desc: [16]u8 = [_]u8{0} ** 16;
+    var hub_desc: [16]u8 = @splat(0);
     const get_desc_pkt = makeGetHubDescriptorPacket(8);
     if (!ctrl_transfer_fn(addr, maxp0, &get_desc_pkt, null, hub_desc[0..8])) {
         serial.serialWrite("[HUB] Failed to read Hub Descriptor\n");
@@ -144,7 +144,7 @@ pub fn configureHubPorts(
     var connected_count: usize = 0;
     p = 1;
     while (p <= num_ports and p <= out_ports.len) : (p += 1) {
-        var status_buf: [4]u8 = [_]u8{0} ** 4;
+        var status_buf: [4]u8 = @splat(0);
         const st_pkt = makeGetPortStatusPacket(p);
         if (ctrl_transfer_fn(addr, maxp0, &st_pkt, null, &status_buf)) {
             const port_status = @as(u16, status_buf[0]) | (@as(u16, status_buf[1]) << 8);

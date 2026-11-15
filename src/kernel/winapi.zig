@@ -240,7 +240,10 @@ pub const Func = enum(u32) {
     rand_s,
 };
 
-const FUNC_COUNT: u32 = @typeInfo(Func).@"enum".fields.len;
+// The number of import thunks.  `std.enums` is used rather than
+// `@typeInfo(..).fields`: Zig 0.17 replaced the field list with parallel
+// name/value arrays, and `std.enums` works with both toolchains.
+const FUNC_COUNT: u32 = std.enums.values(Func).len;
 
 /// Each thunk is: mov eax, imm32 (5) + int 0x81 (2) + ret (1) = 8 bytes.
 const THUNK_SIZE: u64 = 8;
@@ -306,17 +309,18 @@ pub fn resolve(dll: []const u8, name: []const u8, ordinal: u16) ?u64 {
 }
 
 fn lookupName(name: []const u8) ?Func {
-    inline for (@typeInfo(Func).@"enum".fields) |field| {
-        if (field.value != 0 and std.mem.eql(u8, name, field.name)) {
-            return @enumFromInt(field.value);
+    inline for (std.enums.values(Func)) |v| {
+        const value = @intFromEnum(v);
+        if (value != 0 and std.mem.eql(u8, name, std.enums.tagName(Func, v).?)) {
+            return @enumFromInt(value);
         }
     }
     return null;
 }
 
 fn funcName(f: Func) []const u8 {
-    inline for (@typeInfo(Func).@"enum".fields) |field| {
-        if (field.value == @intFromEnum(f)) return field.name;
+    inline for (std.enums.values(Func)) |v| {
+        if (@intFromEnum(v) == @intFromEnum(f)) return std.enums.tagName(Func, v).?;
     }
     return "?";
 }

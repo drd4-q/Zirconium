@@ -200,7 +200,7 @@ pub fn load(memory: Memory, image: []const u8, path: []const u8) LoadError!Loade
 /// the front and the magic, flags and checksum at the very end.
 fn buildMbinfo(memory: Memory, cmdline: []const u8) void {
     // The command line, NUL terminated, in the guest's memory.
-    var line_buf: [256]u8 = [_]u8{0} ** 256;
+    var line_buf: [256]u8 = @splat(0);
     const n = @min(cmdline.len, line_buf.len - 1);
     @memcpy(line_buf[0..n], cmdline[0..n]);
     copyIntoGuest(memory, CMDLINE_GPA, &line_buf);

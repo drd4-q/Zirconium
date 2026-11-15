@@ -19,7 +19,7 @@ fn initLua() void {
     vm = vm_mod.VM.init(arena.allocator());
 }
 
-var _heap_buf: [131072]u8 = [_]u8{0} ** 131072; // 128KB for Lua heap
+var _heap_buf: [131072]u8 = @splat(0); // 128KB for Lua heap
 
 
 fn printBanner() void {

@@ -454,7 +454,7 @@ fn findFreeDirSlot(dir_cluster: u16) ?DirSlot {
             // directory full: allocate a fresh cluster, link and zero it
             const c = allocateCluster() orelse return null;
             if (!writeFATEntry(current, c)) return null;
-            var zbuf: [SECTOR_SIZE]u8 = .{0} ** SECTOR_SIZE;
+            var zbuf: [SECTOR_SIZE]u8 = @splat(0);
             var zs: u8 = 0;
             while (zs < boot_sector.sectors_per_cluster) : (zs += 1) {
                 if (!writeSector(clusterToSector(c) + @as(u64, zs), &zbuf)) return null;
@@ -528,7 +528,7 @@ fn writeDirEntry(slot: DirSlot, name: []const u8, attributes: u8, first_cluster:
 // Initialize a brand-new directory cluster with "." and ".." entries (parent_cluster
 // 0 for the parent means the new dir's parent is the root).
 fn initDirCluster(cluster: u16, parent_cluster: u16) bool {
-    var zbuf: [SECTOR_SIZE]u8 = .{0} ** SECTOR_SIZE;
+    var zbuf: [SECTOR_SIZE]u8 = @splat(0);
     var s: u8 = 0;
     while (s < boot_sector.sectors_per_cluster) : (s += 1) {
         if (!writeSector(clusterToSector(cluster) + @as(u64, s), &zbuf)) return false;
@@ -591,7 +591,7 @@ fn updateFileEntry(fi: *const FileInfo) bool {
 
 var root_handle: vfs.FileHandle = undefined;
 var open_handles: [32]vfs.FileHandle = undefined;
-var open_handle_used: [32]bool = [_]bool{false} ** 32;
+var open_handle_used: [32]bool = @splat(false);
 
 fn fat16Open(fs: *vfs.FileSystem, path: []const u8, flags: vfs.OpenFlags) ?*vfs.FileHandle {
     if (path.len <= 1) {
@@ -1097,7 +1097,7 @@ pub fn format() bool {
     }
 
     // Boot sector / BPB.
-    var bs = [_]u8{0} ** SECTOR_SIZE;
+    var bs: [SECTOR_SIZE]u8 = @splat(0);
     bs[0] = 0xEB;
     bs[1] = 0x3C;
     bs[2] = 0x90;
@@ -1151,7 +1151,7 @@ pub fn format() bool {
     if (!blockdev.writeSectors(dev, 0, 1, &bs)) return false;
 
     // Zero the FAT copies and the root directory in bulk.
-    var zeros = [_]u8{0} ** SECTOR_SIZE;
+    var zeros: [SECTOR_SIZE]u8 = @splat(0);
     const fat_sectors = reserved + @as(u64, fat_size) * nfats;
     var s: u64 = reserved;
     while (s < fat_sectors + root_dir_sectors) : (s += 1) {

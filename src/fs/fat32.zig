@@ -64,13 +64,22 @@ var data_start_sector: u64 = 0;
 var root_cluster: u32 = 0;
 var cluster_count: u32 = 0;
 var next_alloc_hint: u32 = 2;
-var volume_label: [VOLUME_LABEL_LEN]u8 = [_]u8{' '} ** VOLUME_LABEL_LEN;
+var volume_label: [VOLUME_LABEL_LEN]u8 = @splat(' ');
 
-var file_cache: [MAX_FAT32_FILES]FileInfo = [_]FileInfo{.{}} ** MAX_FAT32_FILES;
+var file_cache: [MAX_FAT32_FILES]FileInfo = @splat(.{
+    .name = @splat(0),
+    .name_len = 0,
+    .is_dir = false,
+    .first_cluster = 0,
+    .file_size = 0,
+    .parent_cluster = 0,
+    .used = false,
+    .ref_count = 0,
+});
 var file_count: usize = 0;
 var root_handle: vfs.FileHandle = undefined;
 var open_handles: [MAX_OPEN_HANDLES]vfs.FileHandle = undefined;
-var open_handle_used: [MAX_OPEN_HANDLES]bool = [_]bool{false} ** MAX_OPEN_HANDLES;
+var open_handle_used: [MAX_OPEN_HANDLES]bool = @splat(false);
 
 fn readU16(buf: []const u8, off: usize) u16 {
     return @as(u16, buf[off]) | (@as(u16, buf[off + 1]) << 8);
@@ -169,7 +178,7 @@ fn writeFatEntry(cluster: u32, value: u32) bool {
 }
 
 fn zeroCluster(cluster: u32) bool {
-    var zero: [SECTOR_SIZE]u8 = .{0} ** SECTOR_SIZE;
+    var zero: [SECTOR_SIZE]u8 = @splat(0);
     var sector: u32 = 0;
     while (sector < sectors_per_cluster) : (sector += 1) {
         if (!writeSector(clusterToSector(cluster) + sector, &zero)) return false;
@@ -391,7 +400,7 @@ fn findFreeDirSlot(dir_cluster: u32) ?DirSlot {
                 _ = writeFatEntry(fresh, 0);
                 return null;
             }
-            var zero: [SECTOR_SIZE]u8 = .{0} ** SECTOR_SIZE;
+            var zero: [SECTOR_SIZE]u8 = @splat(0);
             var s: u32 = 0;
             while (s < sectors_per_cluster) : (s += 1) {
                 if (!writeSector(clusterToSector(fresh) + s, &zero)) {
@@ -406,7 +415,7 @@ fn findFreeDirSlot(dir_cluster: u32) ?DirSlot {
 }
 
 fn makeDirEntry(cluster: u32, parent: u32, dotdot: bool) RawEntry {
-    var entry: RawEntry = .{0} ** DIR_ENTRY_SIZE;
+    var entry: RawEntry = @splat(0);
     if (dotdot) {
         entry[0] = '.';
         entry[1] = '.';
@@ -423,12 +432,12 @@ fn makeDirEntry(cluster: u32, parent: u32, dotdot: bool) RawEntry {
 }
 
 fn initDirCluster(cluster: u32, parent: u32) bool {
-    var zero: [SECTOR_SIZE]u8 = .{0} ** SECTOR_SIZE;
+    var zero: [SECTOR_SIZE]u8 = @splat(0);
     var s: u32 = 1;
     while (s < sectors_per_cluster) : (s += 1) {
         if (!writeSector(clusterToSector(cluster) + s, &zero)) return false;
     }
-    var first: [SECTOR_SIZE]u8 = .{0} ** SECTOR_SIZE;
+    var first: [SECTOR_SIZE]u8 = @splat(0);
     const dot = makeDirEntry(cluster, parent, false);
     const dotdot = makeDirEntry(cluster, parent, true);
     @memcpy(first[0..32], &dot);

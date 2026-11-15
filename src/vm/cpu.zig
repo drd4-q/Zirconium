@@ -83,7 +83,7 @@ pub const Trap = error{
 
 pub const Cpu = struct {
     /// The general purpose registers, in the encoding order.
-    regs: [16]u64 = [_]u64{0} ** 16,
+    regs: [16]u64 = @splat(0),
     rip: u64 = 0,
     rflags: u64 = FLAG_IF | 0x2,
     /// The guest's memory: its RAM and its page tables.

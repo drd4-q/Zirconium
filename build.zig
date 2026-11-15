@@ -160,7 +160,13 @@ pub fn build(b: *std.Build) void {
     tramp_exe.setLinkerScript(b.path("src/arch/trampoline.ld"));
     tramp_exe.entry = .{ .symbol_name = "_start" };
 
-    const tramp_bin = tramp_exe.addObjCopy(.{ .format = .bin });
+    // Zig 0.16 spelled the raw-binary format `bin`; 0.17 renamed it to
+    // `binary`.  The enum type itself moved, so the whole choice is made
+    // through a comptime branch that only one of the two compilers sees.
+    const tramp_bin = if (@hasDecl(std.Build.Step.ObjCopy, "Format"))
+        tramp_exe.addObjCopy(.{ .format = .binary })
+    else
+        tramp_exe.addObjCopy(.{ .format = .bin });
     const tramp_bin_file = tramp_bin.getOutput();
 
     const run_bin2zig_kvm = b.addRunArtifact(bin2zig);

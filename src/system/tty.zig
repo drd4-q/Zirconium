@@ -27,10 +27,10 @@ pub const TTY = struct {
     bg: vga.Color = .black,
 
     // Character buffer: char | (fg << 8) | (bg << 12)
-    buffer: [MAX_ROWS][MAX_COLS]u16 = [_][MAX_COLS]u16{[_]u16{0} ** MAX_COLS} ** MAX_ROWS,
+    buffer: [MAX_ROWS][MAX_COLS]u16 = @splat(@splat(0)),
 
     // Scrollback buffer
-    scrollback: [SCROLLBACK_LINES][MAX_COLS]u16 = [_][MAX_COLS]u16{[_]u16{0} ** MAX_COLS} ** SCROLLBACK_LINES,
+    scrollback: [SCROLLBACK_LINES][MAX_COLS]u16 = @splat(@splat(0)),
     sb_head: usize = 0,
     sb_count: usize = 0,
     scroll_view_offset: usize = 0,
@@ -42,7 +42,7 @@ pub const TTY = struct {
 
     // Command history
     history: [HIST_MAX][CMD_MAX]u8 = undefined,
-    hist_lens: [HIST_MAX]usize = [_]usize{0} ** HIST_MAX,
+    hist_lens: [HIST_MAX]usize = @splat(0),
     hist_count: usize = 0,
     hist_idx: i32 = -1,
 

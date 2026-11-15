@@ -37,7 +37,7 @@ pub const UsbDevice = struct {
     is_wireless: bool = false,
 
     // Multi-interface composite device support
-    interfaces: [MAX_DEVICE_INTERFACES]UsbInterface = [_]UsbInterface{.{}} ** MAX_DEVICE_INTERFACES,
+    interfaces: [MAX_DEVICE_INTERFACES]UsbInterface = @splat(.{ .interface_num = 0, .class_code = 0, .subclass_code = 0, .protocol_code = 0, .driver_type = .unknown, .endpoints = @splat(.{ .ep_addr = 0, .transfer_type = .interrupt, .max_packet_size = 8, .interval_ms = 10, .toggle = 0, .active = false, .hw_endpoint_id = 0, .hw_queue_ptr = 0 }), .endpoint_count = 0, .report_buf = @splat(0), .prev_report = @splat(0), .report_len = 0, .caps_lock = false }),
     interface_count: usize = 0,
 
     // Legacy fields maintained for backward compatibility with existing keyboard/mouse/shell code
@@ -52,8 +52,8 @@ pub const UsbDevice = struct {
     ehci_qtd: EhciQtd align(32) = .{},
     // xHCI DMA buffers must not cross a 64 KiB boundary.  Page alignment
     // keeps every 64-byte HID report wholly inside one 64 KiB window.
-    report_buf: [64]u8 align(4096) = [_]u8{0} ** 64,
-    prev_report: [64]u8 = [_]u8{0} ** 64,
+    report_buf: [64]u8 align(4096) = @splat(0),
+    prev_report: [64]u8 = @splat(0),
     packet_count: u32 = 0,
     caps_lock: bool = false,
     xhci_slot_id: u8 = 0,
@@ -105,7 +105,7 @@ pub fn enumerateDevice(
     already_addressed: bool,
 ) bool {
     // Step 1: Read first 8 bytes of Device Descriptor at address 0 (or assigned address if hardware addressed)
-    var dev_desc_8: [8]u8 = [_]u8{0} ** 8;
+    var dev_desc_8: [8]u8 = @splat(0);
     const get_desc_pkt = UsbSetupPacket{
         .bmRequestType = 0x80,
         .bRequest = types.REQ_GET_DESCRIPTOR,
@@ -147,7 +147,7 @@ pub fn enumerateDevice(
     }
 
     // Step 3: Read full 18-byte Device Descriptor at assigned address
-    var dev_desc: [18]u8 = [_]u8{0} ** 18;
+    var dev_desc: [18]u8 = @splat(0);
     const get_full_desc_pkt = UsbSetupPacket{
         .bmRequestType = 0x80,
         .bRequest = types.REQ_GET_DESCRIPTOR,
@@ -168,7 +168,7 @@ pub fn enumerateDevice(
     dev_out.xhci_hub_multi_tt = dev_class == 0x09 and dev_protocol == 2;
 
     // Step 4: Read 9-byte Configuration Descriptor Header to get total length
-    var cfg_hdr: [9]u8 = [_]u8{0} ** 9;
+    var cfg_hdr: [9]u8 = @splat(0);
     const get_cfg_hdr_pkt = UsbSetupPacket{
         .bmRequestType = 0x80,
         .bRequest = types.REQ_GET_DESCRIPTOR,
@@ -194,7 +194,7 @@ pub fn enumerateDevice(
     total_cfg_len = @min(total_cfg_len, 512);
 
     // Step 5: Read full Configuration Descriptor tree
-    var cfg_buf: [512]u8 = [_]u8{0} ** 512;
+    var cfg_buf: [512]u8 = @splat(0);
     const get_full_cfg_pkt = UsbSetupPacket{
         .bmRequestType = 0x80,
         .bRequest = types.REQ_GET_DESCRIPTOR,

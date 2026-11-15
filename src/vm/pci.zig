@@ -42,17 +42,17 @@ pub const Function = struct {
     device: u8 = 0,
     function: u8 = 0,
     /// The 256 bytes the guest reads.
-    config: [256]u8 = [_]u8{0} ** 256,
+    config: [256]u8 = @splat(0),
     /// Where each memory BAR's registers are in the host.
-    bar_host: [6]u64 = [_]u64{0} ** 6,
+    bar_host: [6]u64 = @splat(0),
     /// How many bytes each memory BAR covers.
-    bar_bytes: [6]u64 = [_]u64{0} ** 6,
+    bar_bytes: [6]u64 = @splat(0),
     /// The guest physical address the guest programmed into each BAR.
-    bar_gpa: [6]u64 = [_]u64{0} ** 6,
+    bar_gpa: [6]u64 = @splat(0),
     /// What each BAR is: 0 = none, 1 = memory, 2 = I/O.
-    bar_kind: [6]u8 = [_]u8{0} ** 6,
+    bar_kind: [6]u8 = @splat(0),
     /// Which of the guest's device regions each BAR belongs to.
-    bar_region: [6]usize = [_]usize{0} ** 6,
+    bar_region: [6]usize = @splat(0),
 };
 
 /// The bus.
@@ -60,7 +60,7 @@ pub const Function = struct {
 /// It owns the functions and the address register, and it is the only thing
 /// that knows how a guest's port I/O reaches the configuration space.
 pub const Bus = struct {
-    functions: [MAX_FUNCTIONS]Function = [_]Function{.{}} ** MAX_FUNCTIONS,
+    functions: [MAX_FUNCTIONS]Function = @splat(.{ .bus = 0, .device = 0, .function = 0, .config = @splat(0), .bar_host = @splat(0), .bar_bytes = @splat(0), .bar_gpa = @splat(0), .bar_kind = @splat(0), .bar_region = @splat(0) }),
     count: usize = 0,
     /// The address the guest last wrote to the configuration address port.
     address: u32 = 0,

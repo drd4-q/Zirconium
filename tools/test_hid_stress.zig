@@ -248,7 +248,7 @@ fn testChallenge1_KeyRolloverAndRingBuffer() !void {
     // 1.1: 6-Key Rollover (6KRO) - Multiple Simultaneous Keypresses
     {
         resetKeyRing();
-        var prev: [8]u8 = [_]u8{0} ** 8;
+        var prev: [8]u8 = @splat(0);
         var caps: bool = false;
 
         // Press 'a', 'b', 'c', 'd', 'e', 'f' all simultaneously in a single 8-byte report
@@ -270,7 +270,7 @@ fn testChallenge1_KeyRolloverAndRingBuffer() !void {
     // 1.2: Key rollover error codes (0x01 = ErrorRollOver, 0x02 = POSTFail, 0x03 = ErrorUndefined)
     {
         resetKeyRing();
-        var prev: [8]u8 = [_]u8{0} ** 8;
+        var prev: [8]u8 = @splat(0);
         var caps: bool = false;
 
         const error_report = [_]u8{ 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01 };
@@ -287,7 +287,7 @@ fn testChallenge1_KeyRolloverAndRingBuffer() !void {
     // 1.3: Partial release and new keys in subsequent reports
     {
         resetKeyRing();
-        var prev: [8]u8 = [_]u8{0} ** 8;
+        var prev: [8]u8 = @splat(0);
         var caps: bool = false;
 
         // Step 1: Press 'a', 'b'
@@ -356,7 +356,7 @@ fn testChallenge1_KeyRolloverAndRingBuffer() !void {
     // 1.5: Rapid Sequence Endurance (10,000 rapid reports with interleaved draining)
     {
         resetKeyRing();
-        var prev: [8]u8 = [_]u8{0} ** 8;
+        var prev: [8]u8 = @splat(0);
         var caps: bool = false;
 
         var count: usize = 0;
@@ -383,7 +383,7 @@ fn testChallenge2_CorruptedAndTruncatedReports() !void {
 
     // 2.1: Truncated keyboard reports (lengths 0 through 7 bytes)
     {
-        var prev: [8]u8 = [_]u8{0} ** 8;
+        var prev: [8]u8 = @splat(0);
         var caps: bool = false;
         const dummy = [_]u8{ 0x00, 0x00, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09 };
 
@@ -399,7 +399,7 @@ fn testChallenge2_CorruptedAndTruncatedReports() !void {
 
     // 2.2: Standard 8-byte report with modifier 0x01 (Ctrl) - must NOT be treated as prefixed
     {
-        var prev: [8]u8 = [_]u8{0} ** 8;
+        var prev: [8]u8 = @splat(0);
         var caps: bool = false;
         // Byte 0 is Left Ctrl (0x01), byte 1 is reserved (0x00), byte 2 is 'a' (0x04)
         const ctrl_a_report = [_]u8{ 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00 };
@@ -413,7 +413,7 @@ fn testChallenge2_CorruptedAndTruncatedReports() !void {
 
     // 2.3: Valid 9-byte report-ID prefixed report
     {
-        var prev: [8]u8 = [_]u8{0} ** 8;
+        var prev: [8]u8 = @splat(0);
         var caps: bool = false;
         resetKeyRing();
         const pref_valid = [_]u8{ 0x01, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00 };
@@ -424,7 +424,7 @@ fn testChallenge2_CorruptedAndTruncatedReports() !void {
 
     // 2.4: Truncated mouse reports (lengths 0 through 2 bytes)
     {
-        var prev: [4]u8 = [_]u8{0} ** 4;
+        var prev: [4]u8 = @splat(0);
         const dummy = [_]u8{ 0x01, 0x0A, 0x0A, 0x00 };
 
         var len: usize = 0;
@@ -436,7 +436,7 @@ fn testChallenge2_CorruptedAndTruncatedReports() !void {
 
     // 2.5: Truncated report-ID prefixed mouse reports (length 3 with prefix != 0, requires 4 bytes)
     {
-        var prev: [4]u8 = [_]u8{0} ** 4;
+        var prev: [4]u8 = @splat(0);
         const pref_mouse_trunc = [_]u8{ 0x02, 0x01, 0x0A };
         decodeMouseReport(&pref_mouse_trunc, &prev);
         std.debug.print("  [PASS] 2.5: Truncated report-ID prefixed mouse report (3 bytes with prefix) safely rejected\n", .{});
@@ -469,8 +469,8 @@ fn testChallenge2_CorruptedAndTruncatedReports() !void {
         var prng = std.Random.DefaultPrng.init(0x1337BEEF);
         const random = prng.random();
 
-        var prev_k: [8]u8 = [_]u8{0} ** 8;
-        var prev_m: [4]u8 = [_]u8{0} ** 4;
+        var prev_k: [8]u8 = @splat(0);
+        var prev_m: [4]u8 = @splat(0);
         var caps: bool = false;
 
         var buf: [64]u8 = undefined;

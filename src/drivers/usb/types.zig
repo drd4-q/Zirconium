@@ -228,7 +228,7 @@ pub const UsbCbw = extern struct {
     bmCBWFlags: u8 = 0, // Bit 7: 1 = Data-In, 0 = Data-Out
     bCBWLUN: u8 = 0, // Target Logical Unit Number
     bCBWCBLength: u8 = 0, // Length of SCSI CDB (1..16)
-    CBWCB: [16]u8 = [_]u8{0} ** 16, // SCSI Command Descriptor Block
+    CBWCB: [16]u8 = @splat(0), // SCSI Command Descriptor Block
 };
 
 // USB Command Status Wrapper (CSW) - 13 bytes
@@ -281,11 +281,11 @@ pub const UsbInterface = struct {
     subclass_code: u8 = 0,
     protocol_code: u8 = 0,
     driver_type: UsbDeviceType = .unknown,
-    endpoints: [MAX_DEVICE_ENDPOINTS]UsbEndpoint = [_]UsbEndpoint{.{}} ** MAX_DEVICE_ENDPOINTS,
+    endpoints: [MAX_DEVICE_ENDPOINTS]UsbEndpoint = @splat(.{ .ep_addr = 0, .transfer_type = .interrupt, .max_packet_size = 8, .interval_ms = 10, .toggle = 0, .active = false, .hw_endpoint_id = 0, .hw_queue_ptr = 0 }),
     endpoint_count: usize = 0,
 
-    report_buf: [64]u8 = [_]u8{0} ** 64,
-    prev_report: [64]u8 = [_]u8{0} ** 64,
+    report_buf: [64]u8 = @splat(0),
+    prev_report: [64]u8 = @splat(0),
     report_len: usize = 0,
     caps_lock: bool = false,
 };

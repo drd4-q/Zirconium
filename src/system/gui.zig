@@ -92,7 +92,7 @@ var calc_new_num: bool = true;
 const NOTE_MAX_LINES: usize = 12;
 const NOTE_LINE_LEN: usize = 40;
 var note_lines: [NOTE_MAX_LINES][NOTE_LINE_LEN]u8 = undefined;
-var note_lens: [NOTE_MAX_LINES]usize = [_]usize{0} ** NOTE_MAX_LINES;
+var note_lens: [NOTE_MAX_LINES]usize = @splat(0);
 var note_cur_line: usize = 0;
 
 // ----- Window management -----
@@ -739,7 +739,7 @@ pub fn run() void {
     calc_new_num = true;
 
     note_cur_line = 0;
-    note_lens = [_]usize{0} ** NOTE_MAX_LINES;
+    note_lens = @splat(0);
     const note_init = "Zirconium Notes";
     @memcpy(note_lines[0][0..note_init.len], note_init);
     note_lens[0] = note_init.len;

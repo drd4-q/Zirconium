@@ -34,8 +34,11 @@ pub const SyscallNumber = enum(u64) {
 };
 
 fn isKnownNative(nr: u64) bool {
-    inline for (@typeInfo(SyscallNumber).@"enum".fields) |field| {
-        if (nr == field.value) return true;
+    // `std.enums` rather than `@typeInfo(..).fields`: Zig 0.17 replaced the
+    // field list with parallel name/value arrays, and `std.enums` is the one
+    // spelling that works with both toolchains.
+    inline for (std.enums.values(SyscallNumber)) |v| {
+        if (nr == @intFromEnum(v)) return true;
     }
     return false;
 }

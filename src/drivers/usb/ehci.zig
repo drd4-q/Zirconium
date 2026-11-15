@@ -14,7 +14,7 @@ pub const EhciQtd = extern struct {
     next_qtd: u32 = 1, // Terminate = 1
     alt_next_qtd: u32 = 1,
     token: u32 = 0, // Bit 7: Active, 9:8: PID, 11:10: CERR, 15: IOC, 30:16: bytes, 31: toggle
-    buf: [5]u32 = [_]u32{0} ** 5,
+    buf: [5]u32 = @splat(0),
 };
 
 pub const EhciQh = extern struct {
@@ -25,7 +25,7 @@ pub const EhciQh = extern struct {
     overlay_next_qtd: u32 = 1,
     overlay_alt_next_qtd: u32 = 1,
     overlay_token: u32 = 0,
-    overlay_buf: [5]u32 = [_]u32{0} ** 5,
+    overlay_buf: [5]u32 = @splat(0),
 };
 
 // qTD token bits

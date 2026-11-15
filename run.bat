@@ -28,24 +28,17 @@ if errorlevel 1 (
     exit /b %ERRORLEVEL%
 )
 
-echo === Creating ISO / Boot Image ===
-rmdir /s /q isodir 2>nul
-mkdir isodir\boot\grub 2>nul
-copy /y zig-out\bin\kernel isodir\boot\kernel.bin >nul
-copy /y grub.cfg isodir\boot\grub\grub.cfg >nul
-
-where grub-mkrescue >nul 2>nul
+echo === Creating ISO / Boot Image (Limine) ===
+where python >nul 2>nul
 if !ERRORLEVEL!==0 (
-    grub-mkrescue -o kernel.iso isodir 2>nul
+    python tools\mkiso.py --output kernel.iso
 ) else (
-    where python >nul 2>nul
-    if !ERRORLEVEL!==0 (
-        python tools\patch_iso.py .
-    )
+    echo [ERROR] python is required to build the Limine ISO.
+    exit /b 1
 )
 
 if not exist kernel.iso (
-    echo [ERROR] kernel.iso missing and grub-mkrescue unavailable.
+    echo [ERROR] kernel.iso was not produced.
     exit /b 1
 )
 

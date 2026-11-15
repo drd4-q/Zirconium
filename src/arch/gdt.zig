@@ -48,8 +48,8 @@ pub const TSS_SEL: u16 = 0x40;
 
 pub const MAX_CPUS: usize = 64;
 
-var gdt_per_cpu: [MAX_CPUS][128]u8 align(16) = [_][128]u8{[_]u8{0} ** 128} ** MAX_CPUS;
-pub var tss_per_cpu: [MAX_CPUS]Tss align(16) = [_]Tss{.{}} ** MAX_CPUS;
+var gdt_per_cpu: [MAX_CPUS][128]u8 align(16) = @splat(@splat(0));
+pub var tss_per_cpu: [MAX_CPUS]Tss align(16) = @splat(.{ .reserved0 = 0, .rsp0 = 0, .rsp1 = 0, .rsp2 = 0, .reserved1 = 0, .ist1 = 0, .ist2 = 0, .ist3 = 0, .ist4 = 0, .ist5 = 0, .ist6 = 0, .ist7 = 0, .reserved2 = 0, .reserved3 = 0, .iopb_offset = 0 });
 pub var tss: Tss align(16) = undefined;
 
 fn setEntryForCpu(cpu: usize, idx: usize, base: u32, limit: u32, access: u8, granularity: u8) void {

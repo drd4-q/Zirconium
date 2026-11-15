@@ -16,7 +16,7 @@ pub const JsVar = struct {
 };
 
 pub const JsEngine = struct {
-    vars: [JS_MAX_VARS]JsVar = [_]JsVar{.{}} ** JS_MAX_VARS,
+    vars: [JS_MAX_VARS]JsVar = @splat(.{ .name = @splat(0), .name_len = 0, .val = @splat(0), .val_len = 0, .num_val = 0, .is_num = false, .used = false }),
     doc_write_buf: [1024]u8 = undefined,
     doc_write_len: usize = 0,
     title_override: [48]u8 = undefined,

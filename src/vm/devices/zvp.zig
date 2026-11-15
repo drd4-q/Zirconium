@@ -103,7 +103,7 @@ pub const Zvp = struct {
     /// The configuration space the guest reads.  The PCI bus serves a copy
     /// of it, so that a base address register the guest programs can be
     /// acted on.
-    config_space: [256]u8 = [_]u8{0} ** 256,
+    config_space: [256]u8 = @splat(0),
     /// The register block.
     regs: []u8 = &[_]u8{},
     /// The shared window.
@@ -117,7 +117,7 @@ pub const Zvp = struct {
     /// The observation bits the guest reported.
     observations: u64 = 0,
     /// The last message the guest posted.
-    last_message: [128]u8 = [_]u8{0} ** 128,
+    last_message: [128]u8 = @splat(0),
     last_message_len: usize = 0,
     /// How many commands have been executed.
     commands_served: u64 = 0,

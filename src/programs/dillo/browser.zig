@@ -25,7 +25,7 @@ pub const DilloBrowser = struct {
     doc: layout.Document = .{},
 
     history: [HISTORY_MAX][128]u8 = undefined,
-    history_lens: [HISTORY_MAX]usize = [_]usize{0} ** HISTORY_MAX,
+    history_lens: [HISTORY_MAX]usize = @splat(0),
     history_count: usize = 0,
     history_pos: usize = 0,
 

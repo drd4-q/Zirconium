@@ -78,12 +78,12 @@ const MAX_SHADOW_PIXELS: usize = 3840 * 2160;
 /// Guarantees instant zero-lag drawing during early kernel initialization
 /// before the PMM is online.
 const EARLY_SHADOW_MAX: usize = 1024 * 768;
-var early_shadow: [EARLY_SHADOW_MAX]u32 align(4096) = [_]u32{0} ** EARLY_SHADOW_MAX;
+var early_shadow: [EARLY_SHADOW_MAX]u32 align(4096) = @splat(0);
 var using_early_shadow: bool = false;
 
 /// Static page tables for mapping framebuffer when fb_addr is above the
 /// identity-mapped range.
-var early_page_tables: [16][512]u64 align(4096) = [_][512]u64{[_]u64{0} ** 512} ** 16;
+var early_page_tables: [16][512]u64 align(4096) = @splat(@splat(0));
 var early_pt_used: usize = 0;
 
 // ─── Page table mapping ─────────────────────────────────────────────

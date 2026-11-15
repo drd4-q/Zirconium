@@ -591,7 +591,7 @@ pub fn transmit(eth_frame: []const u8) void {
     if (dot11_len + RTL_TX_DESC_SIZE > tx_buf.len) return;
 
     // Build TX descriptor
-    var desc: [RTL_TX_DESC_SIZE]u8 = [_]u8{0} ** RTL_TX_DESC_SIZE;
+    var desc: [RTL_TX_DESC_SIZE]u8 = @splat(0);
 
     // RTL8188EU TX descriptor format (simplified):
     // Offset 0: Packet size (16 bits, little-endian)

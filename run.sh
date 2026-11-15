@@ -25,12 +25,8 @@ done
 echo "=== Building Zirconium (ReleaseFast) ==="
 zig build -Drelease
 
-echo "=== Creating ISO ==="
-rm -rf isodir
-mkdir -p isodir/boot/grub
-cp zig-out/bin/kernel isodir/boot/kernel.bin
-cp grub.cfg isodir/boot/grub/grub.cfg
-grub-mkrescue -o kernel.iso isodir
+echo "=== Creating ISO (Limine) ==="
+python3 tools/mkiso.py --output kernel.iso
 
 # Create disk image if missing
 if [ ! -f disk.img ]; then

@@ -84,7 +84,7 @@ pub const Memory = struct {
     /// The guest physical address of the PML4 the guest booted with.
     cr3_gpa: u64 = 0,
     /// The devices the guest's page tables can point at.
-    regions: [MAX_REGIONS]DeviceRegion = [_]DeviceRegion{.{ .guest_base = 0, .host_base = 0, .bytes = 0 }} ** MAX_REGIONS,
+    regions: [MAX_REGIONS]DeviceRegion = @splat(.{ .guest_base = 0, .host_base = 0, .bytes = 0 }),
     region_count: usize = 0,
 
     /// True when the machine has RAM at all.
@@ -260,8 +260,8 @@ pub const Tables = struct {
     /// The pool of page directories, and the pool of page tables.
     pd_pool_gpa: u64 = 0,
     pt_pool_gpa: u64 = 0,
-    pd_used: [POOL_PDS]bool = [_]bool{false} ** POOL_PDS,
-    pt_used: [POOL_PTS]bool = [_]bool{false} ** POOL_PTS,
+    pd_used: [POOL_PDS]bool = @splat(false),
+    pt_used: [POOL_PTS]bool = @splat(false),
 
     /// Lay the tables out and empty them.
     pub fn init(self: *Tables, memory: *Memory) bool {

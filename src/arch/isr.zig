@@ -32,7 +32,7 @@ pub const InterruptFrame = extern struct {
 
 pub const IrqHandler = *const fn (frame: *InterruptFrame) void;
 
-var irq_handlers: [16]?IrqHandler = [_]?IrqHandler{null} ** 16;
+var irq_handlers: [16]?IrqHandler = @splat(null);
 
 /// Vectors delivered by the local APIC instead of the 8259. The LAPIC timer runs
 /// on vector 32, which is the PIC's IRQ0 slot - and IRQ0 is masked. Sending a
@@ -40,7 +40,7 @@ var irq_handlers: [16]?IrqHandler = [_]?IrqHandler{null} ** 16;
 /// highest-priority in-service bit, which is whatever real PIC IRQ happens to
 /// be running (the keyboard, typically) and desynchronises the 8259's priority
 /// tracking. Only vectors marked here get a LAPIC EOI and no PIC EOI.
-var lapic_owned: [16]bool = [_]bool{false} ** 16;
+var lapic_owned: [16]bool = @splat(false);
 
 pub fn registerIrq(irq: u8, handler: IrqHandler) void {
     irq_handlers[irq] = handler;

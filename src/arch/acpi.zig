@@ -7,7 +7,7 @@ const serial = @import("../system/serial.zig");
 pub const MAX_CPU: usize = 64;
 
 pub var cpu_count: usize = 0;
-pub var lapic_ids: [MAX_CPU]u32 = [_]u32{0} ** MAX_CPU;
+pub var lapic_ids: [MAX_CPU]u32 = @splat(0);
 pub var lapic_base: u64 = 0;
 pub var rsdp_address: usize = 0;
 

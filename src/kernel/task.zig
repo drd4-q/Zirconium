@@ -89,7 +89,7 @@ pub const Task = struct {
     state: TaskState = .ready,
     task_type: TaskType = .kernel,
     personality: Personality = .native,
-    kernel_stack: [KERNEL_STACK_SIZE]u8 align(16) = [_]u8{0} ** KERNEL_STACK_SIZE,
+    kernel_stack: [KERNEL_STACK_SIZE]u8 align(16) = @splat(0),
     user_stack_phys: u64 = 0,
     user_stack_pages: usize = 0,
     entry_point: u64 = 0,
@@ -112,14 +112,14 @@ gs_base: u64 = 0,
 /// tasks; individual offsets are documented in winapi.zig dispatch.
 crt_block: u64 = 0,
     /// Thread-local storage slots for Win32 TlsAlloc/TlsSetValue.
-    tls_slots: [32]u64 = [_]u64{0} ** 32,
+    tls_slots: [32]u64 = @splat(0),
     tls_used: u32 = 0,
     /// Win32 GetLastError value.
     last_error: u32 = 0,
     /// User addresses of the ANSI/wide command line (Win32 GetCommandLine).
     cmdline_a: u64 = 0,
     cmdline_w: u64 = 0,
-    fds: [MAX_FDS]?FileDesc = [_]?FileDesc{null} ** MAX_FDS,
+    fds: [MAX_FDS]?FileDesc = @splat(null),
     /// Legacy socket table kept for the native ABI's socket/connect/send/recv.
-    sockets: [8]?*@import("../net/tcp.zig").Connection = [_]?*@import("../net/tcp.zig").Connection{null} ** 8,
+    sockets: [8]?*@import("../net/tcp.zig").Connection = @splat(null),
 };
