@@ -407,6 +407,8 @@ fn runUsb(args: []const u8) void {
         usb_prog.runStorage();
     } else if (eql(args, "serial")) {
         usb_prog.runSerial();
+    } else if (eql(args, "hidpp") or eql(args, "2.4ghz")) {
+        usb_prog.runHidpp();
     } else {
         usb_prog.run();
     }

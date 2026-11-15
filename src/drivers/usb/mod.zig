@@ -20,6 +20,7 @@ pub const hid_input = @import("hid_input.zig");
 pub const hub = @import("hub.zig");
 pub const storage = @import("storage.zig");
 pub const serial_mod = @import("serial/mod.zig");
+pub const hidpp = @import("../hid/hidpp.zig");
 
 pub const UsbControllerType = types.UsbControllerType;
 pub const UsbSpeed = types.UsbSpeed;
@@ -904,6 +905,16 @@ fn processHidReport(dev: *device.UsbDevice, len: usize) void {
         return;
     }
 
+    // The HID++ reports of a Logitech receiver are not boot protocol
+    // reports: they are the questions the host asks the receiver about the
+    // devices behind it.  Linux splits them the same way, in
+    // hid-logitech-hidpp.c.
+    if (dev.vendor_id == hidpp.VENDOR_ID and len >= 2 and
+        (dev.report_buf[0] == 0x10 or dev.report_buf[0] == 0x11))
+    {
+        if (hidpp.handleReport(dev, dev.report_buf[0..len])) return;
+    }
+
     if (dev.dev_type == .mouse and !usb_mouse_report_logged) {
         serial.serialWrite("[USB-HID] First mouse report id=");
         serial.serialWriteDec(dev.id);
@@ -1114,6 +1125,7 @@ pub fn poll() void {
     // A device that is on an xHCI port only appears while the controller
     // is polled, so the class drivers get their chance here as well.
     serial_mod.ftdi.poll();
+    hidpp.poll();
 }
 
 pub fn printUsbStatus(writeFn: *const fn (s: []const u8) void, writeDecFn: *const fn (v: u64) void, writeHexFn: *const fn (v: u64) void) void {

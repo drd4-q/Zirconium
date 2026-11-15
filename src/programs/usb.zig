@@ -28,6 +28,13 @@ pub fn runStorage() void {
     vga.setColor(.white, .black);
 }
 
+/// The 2.4 GHz receivers (the HID++ protocol).
+pub fn runHidpp() void {
+    vga.setColor(.light_cyan, .black);
+    usb.hidpp.printStatus(vgaWrite, vgaWriteDec);
+    vga.setColor(.white, .black);
+}
+
 /// The USB serial adapters.
 pub fn runSerial() void {
     vga.setColor(.light_cyan, .black);
