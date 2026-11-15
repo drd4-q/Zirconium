@@ -1,20 +1,47 @@
 const root = @import("root");
 const vga = root.vga;
 const fb = @import("../system/framebuffer.zig");
+const gfx = @import("../system/gfx/mod.zig");
 const serial = root.serial;
 
 /// Shell entry point: `screen [info|redraw|refresh|clear]`.
 pub fn run(args: []const u8) void {
-    if (!vga.isFbActive()) {
-        vga.setColor(.light_red, .black);
-        vga.write("\n  No framebuffer: VGA text mode only.\n");
-        vga.write("  Pick a graphics entry in the boot menu for a real mode.\n\n");
+    var cmd = trim(args);
+    if (cmd.len == 0) cmd = "info";
+
+    // Switching between the surfaces is always possible: the VGA text mode
+    // needs no adapter at all, and it is what the console falls back to when
+    // the framebuffer cannot be used.
+    if (eq(cmd, "text") or eq(cmd, "vga")) {
+        gfx.useText();
+        vga.setColor(.light_green, .black);
+        vga.write("\n  Console on the VGA text mode (software rendering).\n\n");
+        vga.setColor(.white, .black);
+        return;
+    }
+    if (eq(cmd, "fb") or eq(cmd, "framebuffer")) {
+        if (!vga.isFbActive()) {
+            vga.setColor(.light_red, .black);
+            vga.write("\n  No framebuffer: VGA text mode only.\n");
+            vga.write("  Pick a graphics entry in the boot menu for a real mode.\n\n");
+            vga.setColor(.white, .black);
+            return;
+        }
+        gfx.useFramebuffer();
+        vga.setColor(.light_green, .black);
+        vga.write("\n  Console on the linear framebuffer.\n\n");
         vga.setColor(.white, .black);
         return;
     }
 
-    var cmd = trim(args);
-    if (cmd.len == 0) cmd = "info";
+    if (!vga.isFbActive()) {
+        vga.setColor(.light_red, .black);
+        vga.write("\n  No framebuffer: VGA text mode only.\n");
+        vga.write("  Pick a graphics entry in the boot menu for a real mode.\n");
+        vga.write("  `screen text` shows the console in the VGA text mode.\n\n");
+        vga.setColor(.white, .black);
+        return;
+    }
 
     if (eq(cmd, "info") or eq(cmd, "status")) {
         printInfo();

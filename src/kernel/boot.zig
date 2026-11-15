@@ -109,7 +109,16 @@ fn stageSystem() void {
     // Only now is the IDT live: a framebuffer the firmware reported but did
     // not back would fault here as a *reportable* exception instead of a
     // triple fault reboot with an empty log.
-    @import("../system/framebuffer.zig").probeLfbSafe();
+    //
+    // A display that cannot be driven is **not** a reason to stop the boot.
+    // The console falls back to the legacy VGA text mode, where the kernel
+    // paints the characters itself - software rendering, no adapter needed -
+    // and the boot goes on, so that the reason ends up in the kernel log
+    // instead of nowhere.
+    if (!@import("../system/framebuffer.zig").probeLfbSafe()) {
+        serial.serialWrite("[BOOT] The framebuffer is not usable; the console falls back to the VGA text mode\n");
+        @import("../system/gfx/mod.zig").useText();
+    }
 
     // The DRM model around the bootloader's framebuffer: the connector,
     // the CRTC, the fbdev and the EDID of the display.  It runs here and

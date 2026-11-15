@@ -572,6 +572,18 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
     const total_fb_bytes = @as(u64, fb_pitch) * fb_height;
     mapFbRange(fb_addr, total_fb_bytes);
 
+    // The address has to be inside the identity map before anything is
+    // written to it: a loader that hands out a framebuffer the kernel
+    // cannot reach would otherwise be written to blind.  The console falls
+    // back to the VGA text mode and the boot goes on.
+    if (fb_addr + total_fb_bytes > MAX_IDENTITY_MAP_BYTES) {
+        serial.serialWrite("[FB] LFB at 0x");
+        serial.serialWriteHex(@truncate(fb_addr));
+        serial.serialWrite(" is outside the 64 GB identity map; staying in text mode\n");
+        active = false;
+        return;
+    }
+
     active = true;
 
     // The LFB probe is deliberately NOT run here: initFromMultiboot runs
@@ -600,10 +612,17 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
 /// log, which is exactly the "forced mode reboots, keep hangs" signature seen
 /// on real hardware. So this refuses anything it cannot vouch for and is called
 /// from main.zig only after system_init has installed the IDT.
-pub fn probeLfbSafe() void {
+/// Probe the framebuffer the loader handed us.
+///
+/// Returns true when the framebuffer can be used.  A false return is **not**
+/// fatal: the console falls back to the legacy VGA text mode, where the
+/// kernel paints the characters itself, and the boot goes on.  A machine
+/// whose display adapter cannot be driven still runs, and the reason ends
+/// up in the kernel log.
+pub fn probeLfbSafe() bool {
     if (!active) {
         serial.serialWrite("[FB] probe SKIP: no framebuffer\n");
-        return;
+        return false;
     }
     const total = @as(u64, fb_pitch) * fb_height;
     // A pitch LARGER than width*bpp is normal and must be accepted: 24bpp VBE
@@ -617,7 +636,8 @@ pub fn probeLfbSafe() void {
         serial.serialWrite(" is below width*bytes_pp=");
         serial.serialWriteDec(min_pitch);
         serial.serialWrite(" (rows would shear and the last row runs off the LFB)\n");
-        return;
+        active = false;
+        return false;
     }
     if (fb_pitch - min_pitch >= fb_width) {
         serial.serialWrite("[FB] note: pitch has ");
@@ -631,13 +651,17 @@ pub fn probeLfbSafe() void {
         serial.serialWriteHex(@truncate(fb_addr));
         serial.serialWrite(" is outside the 64 GB identity map - disabling the driver\n");
         active = false;
-        return;
+        return false;
     }
-    probeLfb();
+    if (!probeLfb()) {
+        active = false;
+        return false;
+    }
     testPattern();
+    return true;
 }
 
-fn probeLfb() void {
+fn probeLfb() bool {
     serial.serialWrite("[FB] probing LFB at 0x");
     serial.serialWriteHex(@truncate(fb_addr));
     serial.serialWrite("...\n");
@@ -647,11 +671,12 @@ fn probeLfb() void {
     lfbPut(0, 0, saved);
     if (readback == 0x00FF00FF) {
         serial.serialWrite("[FB] probe OK: LFB is readable and writable\n");
-    } else {
-        serial.serialWrite("[FB] probe MISMATCH: wrote 0x00FF00FF, read 0x");
-        serial.serialWriteHex(readback);
-        serial.serialWrite("\n[FB] probe SKIP: LFB is not backed by the reported address\n");
+        return true;
     }
+    serial.serialWrite("[FB] probe MISMATCH: wrote 0x00FF00FF, read 0x");
+    serial.serialWriteHex(readback);
+    serial.serialWrite("\n[FB] probe SKIP: LFB is not backed by the reported address\n");
+    return false;
 }
 
 /// Draw a recognisable full-screen pattern straight into the LFB, bypassing the

@@ -728,6 +728,37 @@ What was missing was the model around it.
   `edid-decode` also decodes.
 - `drm` shows the connector, the modes and the EDID.
 
+## The display falls back to software rendering
+
+**A display that cannot be driven is not a reason to stop the boot.** The
+chain is:
+
+1. the linear framebuffer the loader handed over (multiboot bit 12, or the
+   VBE table in bit 11);
+2. the linear framebuffer of a PCI display adapter
+   (`drivers/video/pcidisplay.zig`, the X.Org `FB_SIMPLE` interface);
+3. **the legacy VGA text mode**, where the kernel paints the characters
+   itself - software rendering, no adapter involved.
+
+The fallback is what `probeLfbSafe()` decides, and it is **not** fatal: the
+console moves to the text mode and the boot goes on, so the machine still
+runs and the reason still reaches the kernel log. `screen text` and
+`screen fb` switch between the surfaces by hand.
+
+Two rules the framebuffer driver follows so that a bad address cannot hurt
+the machine:
+
+- **Nothing is written to an address the kernel cannot reach.** The identity
+  map covers the low 64 GB; a framebuffer above it is refused before the
+  first pixel is written.
+- **The probe never kills the boot.** A framebuffer that does not read back
+  what was written to it is disabled, not fatal.
+
+**The kernel log needs a volume the kernel can mount.** It is a file on a
+FAT16 or FAT32 volume, so a stick whose filesystem the kernel does not know
+(Ventoy's own partition, for instance) gets no kernel log at all - the
+messages stay in the serial log and in RAM.
+
 ## When the machine comes up with a black screen
 
 **The serial log is the primary diagnostic.** A black screen means the kernel
