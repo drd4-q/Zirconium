@@ -751,14 +751,22 @@ console moves to the text mode and the boot goes on, so the machine still
 runs and the reason still reaches the kernel log. `screen text` and
 `screen fb` switch between the surfaces by hand.
 
-Two rules the framebuffer driver follows so that a bad address cannot hurt
-the machine:
+Three rules the framebuffer driver follows so that a bad address cannot
+hurt the machine:
 
 - **Nothing is written to an address the kernel cannot reach.** The identity
   map covers the low 64 GB; a framebuffer above it is refused before the
   first pixel is written.
+- **Nothing is written to an address the kernel has not checked.** The
+  console renders into the shadow buffer (ordinary RAM) and nothing is
+  pushed out until the probe has read back the pixel it wrote.  A loader
+  can hand out an address that belongs to a *device* - a display adapter's
+  register file - and writing a whole screen of pixels there is how a
+  machine hangs: the write never comes back.
 - **The probe never kills the boot.** A framebuffer that does not read back
-  what was written to it is disabled, not fatal.
+  what was written to it is disabled, not fatal.  The probe writes **one**
+  pixel; the full colour bar pattern is the `screen test` command, never
+  something the boot does on its own.
 
 **The kernel log needs a volume the kernel can mount.** It is a file on a
 FAT16 or FAT32 volume, so a stick whose filesystem the kernel does not know

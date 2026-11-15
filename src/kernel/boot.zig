@@ -117,6 +117,8 @@ fn stageSystem() void {
     // instead of nowhere.
     if (!@import("../system/framebuffer.zig").probeLfbSafe()) {
         serial.serialWrite("[BOOT] The framebuffer is not usable; the console falls back to the VGA text mode\n");
+        serial.serialWrite("[BOOT] On a machine whose display is driven by an adapter the text mode\n");
+        serial.serialWrite("[BOOT] may not be scanned out either; the serial log is the console then.\n");
         @import("../system/gfx/mod.zig").useText();
     }
 

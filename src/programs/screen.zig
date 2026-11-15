@@ -106,6 +106,18 @@ fn printInfo() void {
     vga.writeDec(fb.fb_type);
     vga.write("\n");
 
+    vga.write("  State:     ");
+    if (!fb.active) {
+        vga.setColor(.yellow, .black);
+        vga.write("no framebuffer (the console is in the VGA text mode)");
+    } else if (!fb.verified) {
+        vga.setColor(.yellow, .black);
+        vga.write("not verified - nothing is drawn to it");
+    } else {
+        vga.write("verified, the console is drawn to it");
+    }
+    vga.write("\n");
+
     vga.write("  Viewport:  ");
     vga.writeDec(fb.fb_width);
     vga.write("x");

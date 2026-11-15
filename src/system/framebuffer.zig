@@ -22,6 +22,17 @@ pub const Surface = surface_mod.Surface;
 
 pub var active: bool = false;
 
+/// True once the framebuffer has been checked and may be written to.
+///
+/// **Nothing is drawn to the framebuffer before this is true.**  A loader
+/// can hand out an address that the kernel cannot use - a display adapter's
+/// register file, for instance - and writing a whole screen of pixels there
+/// is how a machine hangs: the write never comes back.
+///
+/// Until the probe has passed, the console renders into the shadow buffer
+/// (which is ordinary RAM) and nothing is pushed out.
+pub var verified: bool = false;
+
 /// Physical address of the linear frame buffer.
 pub var fb_addr: u64 = 0;
 /// Bytes per scanline, as reported by the firmware.  May exceed
@@ -228,6 +239,18 @@ inline fn packPixel32(rgb: u32) u32 {
 
 /// Write one RGB pixel straight to the LFB.
 fn lfbPut(x: u32, y: u32, rgb: u32) void {
+    // Nothing goes to the framebuffer before the probe has checked it: the
+    // address the loader handed out may belong to a device, and a write
+    // there can block the machine for good.
+    if (!verified) return;
+    lfbPutRaw(x, y, rgb);
+}
+
+/// Write a pixel without the verification check.
+///
+/// Only the probe uses this: it has to write one pixel to find out whether
+/// the framebuffer is there at all.
+fn lfbPutRaw(x: u32, y: u32, rgb: u32) void {
     if (fb_bytes_pp == 2) {
         // RGB565: 5 bits red, 6 green, 5 blue.
         const v: u16 = (@as(u16, @truncate(rgb >> 19)) << 11) |
@@ -657,7 +680,9 @@ pub fn probeLfbSafe() bool {
         active = false;
         return false;
     }
-    testPattern();
+
+    // The framebuffer is good: from now on the console is pushed out.
+    verified = true;
     return true;
 }
 
@@ -666,9 +691,9 @@ fn probeLfb() bool {
     serial.serialWriteHex(@truncate(fb_addr));
     serial.serialWrite("...\n");
     const saved = lfbGet(0, 0);
-    lfbPut(0, 0, 0x00FF00FF);
+    lfbPutRaw(0, 0, 0x00FF00FF);
     const readback = lfbGet(0, 0);
-    lfbPut(0, 0, saved);
+    lfbPutRaw(0, 0, saved);
     if (readback == 0x00FF00FF) {
         serial.serialWrite("[FB] probe OK: LFB is readable and writable\n");
         return true;
@@ -826,6 +851,9 @@ fn markDirty(x: u32, y: u32) void {
 /// Copy the dirty shadow region to the real framebuffer in bulk.
 pub fn flush() void {
     if (!has_dirty or shadow_pixels == 0) return;
+    // The framebuffer has not been checked yet: the console keeps
+    // rendering into the shadow buffer and nothing is pushed out.
+    if (!verified) return;
     const x0 = dirty_x0;
     const y0 = dirty_y0;
     // Clamp to the real LFB, not just the viewport: a stale dirty rect must
