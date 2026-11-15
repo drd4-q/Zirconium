@@ -196,7 +196,13 @@ the framebuffer still arrives in mbi bit 12. Only the thing that loads the kerne
     contain `text`" trap simply does not exist any more.
   - `serial: yes` — the bootloader mirrors its own output to COM1, so the serial log shows
     the menu and the handoff, not just the kernel's messages.
-  - `timeout: 0` — the menu does not wait. Three seconds of countdown on every boot was
+  - `timeout: 0` — the menu does not wait.  The **video modes are separate
+    entries**: Limine takes one `resolution:` per entry, while GRUB had a
+    *chain* (`set gfxmode=1024x768x32,800x600x32,640x480x32` and
+    `set gfxpayload=...,text`).  The alternatives are entries now
+    (1024x768, 1920x1080, 800x600 and a text mode entry), and
+    `./build_iso.sh --menu-debug` builds the image whose menu offers them
+    all, so the mode can be picked by hand. Three seconds of countdown on every boot was
     a third of the boot time; `--menu-debug` still builds the image whose menu never
     times out.
 - **The kernel file must be named `kernel.bin`** inside the image. The test harnesses
