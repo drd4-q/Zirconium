@@ -105,6 +105,35 @@ export fn isr_handler(frame: *InterruptFrame) callconv(.c) void {
     const int_num = frame.int_num;
 
     if (int_num < 32) {
+        // The double fault is the last report the machine can make: it means
+        // a fault happened and the handler could not run on the stack it was
+        // given - a stack overflow, most of the time.  It runs on the
+        // interrupt stack table's own stack (see gdt.zig), and it must not
+        // return: going back to the state that faulted would fault again,
+        // and the third fault resets the machine with nothing written
+        // anywhere.
+        if (int_num == 8) {
+            serial.serialWrite("\n=== DOUBLE FAULT ===\n");
+            serial.serialWrite("  A fault happened and the handler could not run.\n");
+            serial.serialWrite("  RIP=0x");
+            serial.serialWriteHex(frame.rip);
+            serial.serialWrite(" RSP=0x");
+            serial.serialWriteHex(frame.rsp);
+            serial.serialWrite("\n  CS=0x");
+            serial.serialWriteHex(frame.cs);
+            serial.serialWrite(" error=0x");
+            serial.serialWriteHex(frame.error_code);
+            serial.serialWrite("\n");
+            serial.serialWrite("  The machine is stopped here on purpose.\n");
+            vga.setColor(.light_red, .black);
+            vga.write("\n=== DOUBLE FAULT ===\n  RIP: ");
+            vga.writeHex(frame.rip);
+            vga.write("\n");
+            while (true) {
+                asm volatile ("cli; hlt");
+            }
+        }
+
         serial.serialWrite("\n=== EXCEPTION: ");
         if (int_num < exception_names.len) {
             serial.serialWrite(exception_names[int_num]);

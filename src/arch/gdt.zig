@@ -50,6 +50,21 @@ pub const MAX_CPUS: usize = 64;
 
 var gdt_per_cpu: [MAX_CPUS][128]u8 align(16) = @splat(@splat(0));
 pub var tss_per_cpu: [MAX_CPUS]Tss align(16) = @splat(.{ .reserved0 = 0, .rsp0 = 0, .rsp1 = 0, .rsp2 = 0, .reserved1 = 0, .ist1 = 0, .ist2 = 0, .ist3 = 0, .ist4 = 0, .ist5 = 0, .ist6 = 0, .ist7 = 0, .reserved2 = 0, .reserved3 = 0, .iopb_offset = 0 });
+
+/// The stack the double fault runs on.
+///
+/// A double fault is what a fault becomes when the handler cannot run on
+/// the stack it was given - a stack overflow, most of the time.  Without a
+/// stack of its own the second fault has nowhere to go either, the CPU
+/// gives up and resets the machine: a black screen, a reboot and nothing in
+/// the log.
+///
+/// The interrupt stack table gives the double fault a stack that is known to
+/// be good, so the failure is reported instead of swallowed.
+pub var ist1_stack: [IST_STACK_SIZE]u8 align(16) = @splat(0);
+
+/// The size of the double fault's stack.
+pub const IST_STACK_SIZE: usize = 16 * 1024;
 pub var tss: Tss align(16) = undefined;
 
 fn setEntryForCpu(cpu: usize, idx: usize, base: u32, limit: u32, access: u8, granularity: u8) void {
@@ -100,6 +115,9 @@ pub fn initCpu(cpu_index: usize, stack_top: u64) void {
     tss_per_cpu[cpu_index] = .{};
     tss_per_cpu[cpu_index].rsp0 = stack_top;
     tss_per_cpu[cpu_index].iopb_offset = @sizeOf(Tss);
+    // The double fault gets the stack of its own: the stack it was given
+    // may be the reason there is a double fault at all.
+    tss_per_cpu[cpu_index].ist1 = @intFromPtr(&ist1_stack) + IST_STACK_SIZE;
 
     const tss_addr = @intFromPtr(&tss_per_cpu[cpu_index]);
     setTssEntryForCpu(cpu_index, 8, tss_addr, @sizeOf(Tss) - 1);

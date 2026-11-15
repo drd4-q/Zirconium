@@ -31,10 +31,26 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, _: ?usize) noreturn {
     serial.serialWrite("\n=== PANIC ===\n");
     serial.serialWrite(msg);
     serial.serialWrite("\n");
+    // Where the boot was: on a machine with a black screen this is the only
+    // thing that says how far it got.
+    serial.serialWrite("  boot stage: ");
+    serial.serialWriteDec(boot.stage_number);
+    serial.serialWrite("/");
+    serial.serialWriteDec(boot.stage_total);
+    serial.serialWrite(" ");
+    serial.serialWrite(@tagName(boot.current_stage));
+    serial.serialWrite("\n");
     klog.flush();
     vga.setColor(.light_red, .black);
     vga.write("\n=== PANIC ===\n");
     vga.write(msg);
+    vga.write("\n");
+    vga.write("  boot stage: ");
+    vga.writeDec(boot.stage_number);
+    vga.write("/");
+    vga.writeDec(boot.stage_total);
+    vga.write(" ");
+    vga.write(@tagName(boot.current_stage));
     vga.write("\n");
     var current_rbp: u64 = 0;
     asm volatile ("movq %%rbp, %[rbp]"

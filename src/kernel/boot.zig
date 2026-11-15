@@ -26,6 +26,15 @@ const kalloc = root.kalloc;
 var mb_magic: u32 = 0;
 var mb_info: u32 = 0;
 
+/// The stage the boot is in.
+///
+/// The panic message says it, so that a machine that comes up with a black
+/// screen still says how far it got - and the serial log says it too, but the
+/// serial log needs a serial cable.
+pub var current_stage: config.Stage = .gdt;
+pub var stage_number: usize = 0;
+pub var stage_total: usize = 0;
+
 /// Run the configured boot sequence.
 ///
 /// Never returns: the last stage hands control to the shell, and the shell
@@ -34,7 +43,17 @@ pub fn run(magic: u32, mbi_ptr: u32) noreturn {
     mb_magic = magic;
     mb_info = mbi_ptr;
 
+    stage_total = config.boot_stages.len;
     for (config.boot_stages) |stage| {
+        current_stage = stage;
+        stage_number += 1;
+        serial.serialWrite("[BOOT] stage ");
+        serial.serialWriteDec(stage_number);
+        serial.serialWrite("/");
+        serial.serialWriteDec(stage_total);
+        serial.serialWrite(" ");
+        serial.serialWrite(@tagName(stage));
+        serial.serialWrite("\n");
         runStage(stage);
     }
 

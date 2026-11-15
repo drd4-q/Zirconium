@@ -119,6 +119,12 @@ fn findSimpleFramebuffer(adapter: *Adapter) void {
         const addr = dev.barAddress(index) orelse continue;
         if (addr + 0x28 >= MAX_IDENTITY_MAP) continue;
 
+        // Only a prefetchable memory BAR can be a framebuffer.  A device's
+        // register file is not prefetchable, and reading a register of a
+        // discrete GPU can have side effects (it can clear a status bit, or
+        // wake the card up), so the other BARs are left alone.
+        if (!dev.barPrefetchable(index)) continue;
+
         // The registers live at the start of the BAR's memory.
         const regs: [*]const volatile u32 = @ptrFromInt(addr);
         if (regs[4] != SIMPLE_FB_MAGIC) continue;

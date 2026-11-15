@@ -89,6 +89,24 @@ fn setEntry(n: usize, handler_addr: u64) void {
     };
 }
 
+/// An entry that runs on the stack of the interrupt stack table.
+///
+/// The double fault uses it: the stack it was given is exactly what may be
+/// broken, so it gets one of its own.
+fn setEntryIst(n: usize, handler_addr: u64, ist: u8) void {
+    idt_entries[n] = .{
+        .offset_low = @intCast(handler_addr & 0xFFFF),
+        .selector = 0x08,
+        .ist = ist,
+        // A trap gate, so the handler can still be interrupted - and so that
+        // a fault in the handler does not turn into a triple fault.
+        .type_attr = 0x8E,
+        .offset_mid = @intCast((handler_addr >> 16) & 0xFFFF),
+        .offset_high = @intCast((handler_addr >> 32) & 0xFFFFFFFF),
+        .reserved = 0,
+    };
+}
+
 fn setEntryDpl3(n: usize, handler_addr: u64) void {
     idt_entries[n] = .{
         .offset_low = @intCast(handler_addr & 0xFFFF),
@@ -130,7 +148,8 @@ pub fn init() void {
     setEntry(5, @intFromPtr(&isr5));
     setEntry(6, @intFromPtr(&isr6));
     setEntry(7, @intFromPtr(&isr7));
-    setEntry(8, @intFromPtr(&isr8));
+    // The double fault runs on the interrupt stack table's own stack.
+    setEntryIst(8, @intFromPtr(&isr8), 1);
     setEntry(9, @intFromPtr(&isr9));
     setEntry(10, @intFromPtr(&isr10));
     setEntry(11, @intFromPtr(&isr11));

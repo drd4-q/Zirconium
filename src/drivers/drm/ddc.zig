@@ -129,9 +129,20 @@ fn readByte() u8 {
 /// Returns null when the display does not answer - either because there is
 /// none, or because the adapter has no DDC lines.
 pub fn readEdid() ?[EDID_LENGTH]u8 {
-    // Switch the DDC lines on.
+    // The graphics controller's miscellaneous register decides how the legacy
+    // VGA window is decoded, and its bits 3:4 are the memory map: change
+    // them and the text buffer at 0xB8000 stops being decoded, which is a
+    // black screen on a machine with no other console.
+    //
+    // The register reads as all ones when there is no legacy VGA at all -
+    // which is the case on a machine whose only display is a discrete GPU.
+    // Writing 0xff there would set the memory map to "B0000-B7FFF" and take
+    // the text console with it, so the read is refused instead.
     const misc = gcrRead(GCR_MISC);
-    gcrWrite(GCR_MISC, misc | GCR_MISC_I2C_ENABLE);
+    if (misc == 0xFF) return null;
+
+    // Switch the DDC lines on, keeping every other bit as it was.
+    gcrWrite(GCR_MISC, (misc | GCR_MISC_I2C_ENABLE) & 0xF7);
 
     start();
     // The EDID answers at 0x50; the byte on the wire is the address with

@@ -728,6 +728,37 @@ What was missing was the model around it.
   `edid-decode` also decodes.
 - `drm` shows the connector, the modes and the EDID.
 
+## When the machine comes up with a black screen
+
+**The serial log is the primary diagnostic.** A black screen means the kernel
+cannot say anything on the display it was supposed to use, and the kernel log
+(`/KERNEL.LOG`) only exists once the storage stage has run — a failure before
+that leaves no file at all. So: **capture COM1** (115200, 8N1).
+
+The boot log now names the stage it is in (`[BOOT] stage 7/17 storage`), and
+the panic message repeats it, so a machine with a black screen still says how
+far it got.
+
+**A silent reboot is a triple fault**, and a triple fault means the failure
+was never reported: the CPU tried to handle a fault, could not do it on the
+stack it was given, and reset. The double fault now has a stack of its own
+(the interrupt stack table, `ist1` in the TSS) and prints what happened
+instead of letting the machine die silently — and it never returns, because
+going back to the state that faulted would fault again.
+
+Two things in the display code can disturb a machine and are guarded
+against:
+
+- **The graphics controller's miscellaneous register decides how the legacy
+  VGA window is decoded**, and its bits 3:4 are the memory map. Writing
+  0xff there takes the text buffer at 0xB8000 out of the window — a black
+  screen. The register reads as all ones when there is no legacy VGA at all
+  (a machine whose only display is a discrete GPU), so the DDC reader refuses
+  to write it.
+- **Reading a device's register file can have side effects** (it can clear a
+  status bit, or wake the card up), so only *prefetchable* BARs are probed
+  for a framebuffer: a register file is not prefetchable, a framebuffer is.
+
 ## Two traps that cost real time
 
 - **A global declared `undefined` does not get the field defaults of its type.** The virtual
