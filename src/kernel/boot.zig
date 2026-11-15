@@ -92,6 +92,21 @@ fn stageSystem() void {
     // triple fault reboot with an empty log.
     @import("../system/framebuffer.zig").probeLfbSafe();
 
+    // The DRM model around the bootloader's framebuffer: the connector,
+    // the CRTC, the fbdev and the EDID of the display.  It runs here and
+    // not in the framebuffer stage because the IDT has to be live: the DDC
+    // read talks to the display adapter.
+    const fb = @import("../system/framebuffer.zig");
+    if (fb.active) {
+        @import("../drivers/drm/mod.zig").init(
+            @intCast(fb.fb_addr),
+            fb.fb_width,
+            fb.fb_height,
+            fb.fb_pitch,
+            @intCast(fb.fb_bpp),
+        );
+    }
+
     // NXE (EFER bit 11) makes PTE bit 63 meaningful. entry.S sets it and
     // marks the identity map non-executable above the kernel image, so a
     // ring-3 task cannot execute kernel or RAM pages.
