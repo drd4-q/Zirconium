@@ -89,6 +89,8 @@ pub const UsbDeviceType = enum(u8) {
     hub,
     storage,
     wifi,
+    /// A USB to serial adapter (the FTDI chips and their relatives).
+    serial,
 
     pub fn name(self: UsbDeviceType) []const u8 {
         return switch (self) {
@@ -98,6 +100,7 @@ pub const UsbDeviceType = enum(u8) {
             .hub => "USB Hub",
             .storage => "USB Mass Storage",
             .wifi => "USB 2.4GHz Wi-Fi Adapter",
+            .serial => "USB Serial Adapter",
         };
     }
 };

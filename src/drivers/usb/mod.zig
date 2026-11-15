@@ -19,6 +19,7 @@ pub const hid_generic = @import("hid_generic.zig");
 pub const hid_input = @import("hid_input.zig");
 pub const hub = @import("hub.zig");
 pub const storage = @import("storage.zig");
+pub const serial_mod = @import("serial/mod.zig");
 
 pub const UsbControllerType = types.UsbControllerType;
 pub const UsbSpeed = types.UsbSpeed;
@@ -709,6 +710,11 @@ pub fn init() void {
         serial.serialWriteDec(storage_count);
         serial.serialWrite(" drive(s) online\n");
     }
+
+    // The USB serial adapters: the FTDI chips are the common ones.
+    if (serial_mod.ftdi.probe()) {
+        serial.serialWrite("[USB] USB serial adapter initialized\n");
+    }
 }
 
 fn enumerateXhciHubChild(
@@ -1104,6 +1110,10 @@ pub fn poll() void {
         current_poll_ctrl_idx = x.id;
         x.pollEvents(onXhciTransfer);
     }
+
+    // A device that is on an xHCI port only appears while the controller
+    // is polled, so the class drivers get their chance here as well.
+    serial_mod.ftdi.poll();
 }
 
 pub fn printUsbStatus(writeFn: *const fn (s: []const u8) void, writeDecFn: *const fn (v: u64) void, writeHexFn: *const fn (v: u64) void) void {

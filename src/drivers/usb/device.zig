@@ -85,6 +85,26 @@ pub const UsbDevice = struct {
     intr_complete: ?*const fn (dev: *UsbDevice, len: usize) void = null,
 };
 
+/// What a vendor specific device is, judged by its vendor and product ID.
+///
+/// The USB class 0xff ("vendor specific") is used by many unrelated
+/// devices, so the identity has to come from the IDs.  The FTDI chips are
+/// the USB serial adapters; the Realtek chips are the Wi-Fi adapters.
+fn classifyVendorDevice(vendor_id: u16, product_id: u16) UsbDeviceType {
+    // Future Technology Devices: the USB serial adapters.
+    if (vendor_id == 0x0403) return .serial;
+
+    // Realtek: the 2.4GHz Wi-Fi adapters.
+    if (vendor_id == 0x0BDA) {
+        switch (product_id) {
+            0x8179, 0x8178, 0x8189, 0x8192 => return .wifi,
+            else => {},
+        }
+    }
+
+    return .unknown;
+}
+
 fn spinDelayMs(ms: u32) void {
     if (timer.ticks > 0) {
         const needed: u64 = if (ms == 0) 0 else ((@as(u64, ms) + 9) / 10);
@@ -361,8 +381,14 @@ pub fn enumerateDevice(
         } else if (iface.class_code == 0x08 and primary_dtype == .unknown) {
             primary_dtype = .storage;
         } else if (iface.class_code == 0xFF and primary_dtype == .unknown) {
-            primary_dtype = .wifi;
+            // Class 0xff is "vendor specific" and says nothing on its own:
+            // the vendor and the product decide what the device is.
+            primary_dtype = classifyVendorDevice(vendor_id, product_id);
         }
+    }
+
+    if (primary_dtype == .unknown) {
+        primary_dtype = classifyVendorDevice(vendor_id, product_id);
     }
 
     if (primary_dtype == .unknown) {

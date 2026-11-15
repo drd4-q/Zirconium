@@ -16,6 +16,7 @@ pub const hub = @import("usb/hub.zig");
 pub const mod = @import("usb/mod.zig");
 pub const rtl8188eu = @import("usb/rtl8188eu.zig");
 pub const storage = @import("usb/storage.zig");
+pub const serial_mod = @import("usb/serial/mod.zig");
 
 // Re-export standard USB types and enumerations
 pub const UsbControllerType = types.UsbControllerType;

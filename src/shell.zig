@@ -405,6 +405,8 @@ fn runUsb(args: []const u8) void {
         usb_prog.runWifi();
     } else if (eql(args, "storage") or eql(args, "disk")) {
         usb_prog.runStorage();
+    } else if (eql(args, "serial")) {
+        usb_prog.runSerial();
     } else {
         usb_prog.run();
     }

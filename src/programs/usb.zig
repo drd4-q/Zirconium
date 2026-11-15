@@ -28,6 +28,13 @@ pub fn runStorage() void {
     vga.setColor(.white, .black);
 }
 
+/// The USB serial adapters.
+pub fn runSerial() void {
+    vga.setColor(.light_cyan, .black);
+    usb.serial_mod.ftdi.printStatus(vgaWrite, vgaWriteDec);
+    vga.setColor(.white, .black);
+}
+
 pub fn runWifi() void {
     vga.setColor(.light_cyan, .black);
 
