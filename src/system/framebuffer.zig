@@ -418,6 +418,51 @@ fn dumpMbiVideo(mbi: [*]const u8, flags: u32) void {
     serial.serialWrite("\n");
 }
 
+/// Take the framebuffer of a display adapter over PCI.
+///
+/// A display adapter that has been programmed by a firmware can leave a
+/// linear framebuffer in one of its memory BARs; the geometry comes from
+/// the adapter itself (see `drivers/video/pcidisplay.zig`).
+///
+/// The shadow buffer is released: it was sized for the old mode, and
+/// `ensureShadow()` grows it for the new one.
+pub fn initLinear(addr: u64, width: u32, height: u32, pitch: u32, bpp: u32) bool {
+    if (addr == 0 or width == 0 or height == 0 or pitch == 0) return false;
+    if (bpp != 16 and bpp != 24 and bpp != 32) return false;
+    if (addr + @as(u64, pitch) * height > MAX_IDENTITY_MAP_BYTES) return false;
+
+    fb_addr = addr;
+    fb_width = width;
+    fb_height = height;
+    fb_pitch = pitch;
+    fb_bpp = bpp;
+    fb_bytes_pp = bpp / 8;
+    fb_type = 1; // direct colour
+    active = true;
+
+    // The shadow was sized for the old mode: release it, so that
+    // `ensureShadow()` allocates one for the new geometry.
+    if (shadow_pixels != 0 and !using_early_shadow) {
+        const old_pages = (shadow_pixels * 4 + 4095) / 4096;
+        root.pmm.freePages(@intFromPtr(shadow), old_pages);
+    }
+    shadow_pixels = 0;
+    shadow_stride_px = 0;
+    using_early_shadow = false;
+    has_dirty = false;
+
+    serial.serialWrite("[FB] source=PCI display adapter, ");
+    serial.serialWriteDec(width);
+    serial.serialWrite("x");
+    serial.serialWriteDec(height);
+    serial.serialWrite("x");
+    serial.serialWriteDec(bpp);
+    serial.serialWrite(" at 0x");
+    serial.serialWriteHex(addr);
+    serial.serialWrite("\n");
+    return true;
+}
+
 pub fn initFromMultiboot(mbi_ptr: u32) void {
     const mbi: [*]const u8 = @ptrFromInt(mbi_ptr);
 

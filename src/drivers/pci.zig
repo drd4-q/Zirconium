@@ -17,7 +17,57 @@ pub const PciDevice = struct {
     bar0: u32,
     bar1: u32,
     irq: u8,
+
+    /// The base address registers, all six of them, with their raw value.
+    ///
+    /// The first two are also in `bar0`/`bar1` because the older code used
+    /// those names; a display device needs more than two (the MMIO BAR, the
+    /// framebuffer BAR and sometimes a third one).
+    bars: [6]u32 = @splat(0),
+    /// True when the device has a memory space master bit that is set.
+    memory_space: bool = false,
+    /// True when the device can do bus mastering.
+    bus_master: bool = false,
+
+    /// The base address of a BAR, with the 64 bit halves joined.
+    ///
+    /// Returns null when the BAR is not a memory BAR or when its address is
+    /// above the identity map the kernel built (64 GB).
+    pub fn barAddress(self: *const PciDevice, index: usize) ?u64 {
+        if (index >= self.bars.len) return null;
+        const raw = self.bars[index];
+        if (raw == 0) return null;
+        // Bit 0 clear means memory; bit 1 clear means 32 bit.
+        if (raw & 1 != 0) return null;
+        const low = raw & 0xFFFF_FFF0;
+
+        // A 64 bit BAR keeps its high half in the next register.
+        if (raw & 0x6 == 0x4) {
+            if (index + 1 >= self.bars.len) return null;
+            const high = self.bars[index + 1];
+            const addr = @as(u64, high) << 32 | @as(u64, low);
+            if (addr == 0 or addr >= MAX_IDENTITY_MAP) return null;
+            return addr;
+        }
+
+        if (low == 0) return null;
+        return low;
+    }
+
+    /// True when the BAR is a prefetchable memory BAR.
+    pub fn barPrefetchable(self: *const PciDevice, index: usize) bool {
+        if (index >= self.bars.len) return false;
+        const raw = self.bars[index];
+        if (raw == 0 or raw & 1 != 0) return false;
+        // Bits 3:2 of a 32 bit memory BAR: 01 means prefetchable.
+        if (raw & 0x6 == 0x4) return true;
+        return (raw & 0xC) == 0x4;
+    }
 };
+
+/// The identity map covers the low 64 GB, so a BAR above it is not
+/// reachable without a mapping the kernel does not build.
+const MAX_IDENTITY_MAP: u64 = 64 * 1024 * 1024 * 1024;
 
 pub var devices: [512]PciDevice = undefined;
 pub var device_count: usize = 0;
@@ -110,6 +160,15 @@ pub fn scan() void {
                 const v10 = readConfig(@intCast(bus), dev, func, 0x10);
                 const v14 = readConfig(@intCast(bus), dev, func, 0x14);
                 const v3C = readConfig(@intCast(bus), dev, func, 0x3C);
+                const v04 = readConfig(@intCast(bus), dev, func, 0x04);
+
+                // All six base address registers: a display device needs
+                // more than the two the old code kept.
+                var bars: [6]u32 = @splat(0);
+                var bar_index: usize = 0;
+                while (bar_index < bars.len) : (bar_index += 1) {
+                    bars[bar_index] = readConfig(@intCast(bus), dev, func, @intCast(0x10 + bar_index * 4));
+                }
 
                 if (device_count < devices.len) {
                     devices[device_count] = PciDevice{
@@ -117,13 +176,16 @@ pub fn scan() void {
                         .dev = dev,
                         .func = func,
                         .vendor_id = vid,
-                        .device_id = @intCast((v0 >> 16) & 0xFFFF),
+                        .device_id = @as(u16, @truncate(v0 >> 16)),
                         .class = cls,
                         .subclass = sub,
                         .prog_if = pi,
                         .bar0 = v10,
                         .bar1 = v14,
-                        .irq = @intCast(v3C & 0xFF),
+                        .irq = @as(u8, @truncate(v3C & 0xFF)),
+                        .bars = bars,
+                        .memory_space = (v04 & 0x2) != 0,
+                        .bus_master = (v04 & 0x4) != 0,
                     };
                     device_count += 1;
                 }

@@ -159,6 +159,18 @@ fn stagePci() void {
     // virtio_blk/ahci/usb all resolve through pci.findDevice(), which only
     // sees what the last scan filled in.
     @import("../drivers/pci.zig").scan();
+
+    // The display adapters.  When the bootloader did not hand us a video mode
+    // - the text mode it falls back to is not shown on a display that only
+    // the adapter drives - a linear framebuffer on a PCI display adapter is
+    // the next best thing.
+    @import("../drivers/video/pcidisplay.zig").init();
+    const fb = @import("../system/framebuffer.zig");
+    if (!fb.active) {
+        if (@import("../drivers/video/pcidisplay.zig").bindFramebuffer()) {
+            serial.serialWrite("[BOOT] Console on the PCI display adapter\n");
+        }
+    }
 }
 
 fn stageStorage() void {

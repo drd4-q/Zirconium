@@ -75,6 +75,7 @@ const acpi = @import("arch/acpi.zig");
 const usb_prog = @import("programs/usb.zig");
 const bt_prog = @import("programs/bt.zig");
 const drm_prog = @import("programs/drm.zig");
+const pci_prog = @import("programs/pci.zig");
 const usb_drv = @import("drivers/usb.zig");
 const klog = @import("system/kernel_log.zig");
 
@@ -153,6 +154,7 @@ const command_table = [_]CmdEntry{
     .{ .name = "lsusb",      .run = runUsb,     .feature = .usb },
     .{ .name = "bt",         .run = bt_prog.run, .feature = .usb },
     .{ .name = "drm",        .run = drm_prog.run, .feature = .gui },
+    .{ .name = "pci",        .run = pci_prog.run },
     .{ .name = "klog",       .run = runKlog },
     .{ .name = "acpi",       .run = showAcpi },
     .{ .name = "ls",         .run = files.cmdLs },
@@ -1056,6 +1058,9 @@ fn printHelp(_: []const u8) void {
     }
     if (config.features.gui) {
         vga.write("    drm           display connector, modes and EDID\n");
+    }
+    {
+        vga.write("    pci           PCI devices on the bus\n");
     }
     vga.write("    klog          kernel log status/flush/dump/clear\n");
     vga.write("    usb storage   USB mass storage & disk status\n");
