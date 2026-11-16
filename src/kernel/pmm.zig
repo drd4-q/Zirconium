@@ -193,42 +193,49 @@ pub fn allocPage() ?usize {    var byte_idx: usize = 0;
     return null;
 }
 
+/// Allocate a *contiguous* run of `count` pages.
+///
+/// The memory of a real machine is not one block: the firmware reserves
+/// holes for the PCI address space and for the display adapters, so the
+/// largest run of free pages is usually a fraction of the memory there is.
+/// The old code restarted the walk at every free page, which is quadratic:
+/// a request that cannot be satisfied - a quarter of a 32 GB machine, for
+/// one - then takes longer than the age of the universe to *fail*, and the
+/// machine looks like it hangs.
+///
+/// This walks the bitmap once, remembering where the current run of free
+/// pages started, and takes the first run that is long enough.
 pub fn allocPages(count: usize) ?usize {
     if (count == 0) return null;
     if (count == 1) return allocPage();
 
-    var start_byte: usize = 0;
-    while (start_byte < BITMAP_SIZE) : (start_byte += 1) {
-        if (bitmap[start_byte] == 0xFF) continue;
+    var run_start: usize = 0;
+    var run_len: usize = 0;
 
-        var bit: u8 = 0;
-        while (bit < 8) : (bit += 1) {
-            if (bitmap[start_byte] & (@as(u8, 1) << @intCast(bit)) != 0) continue;
-
-            const start_page = start_byte * 8 + bit;
-            var found: usize = 0;
-            var check_page = start_page;
-
-            while (found < count and check_page < TOTAL_PAGES) {
-                const check_byte = check_page / 8;
-                const check_bit: u8 = @intCast(check_page % 8);
-                if (bitmap[check_byte] & (@as(u8, 1) << @intCast(check_bit)) != 0) break;
-                found += 1;
-                check_page += 1;
-            }
-
-            if (found >= count) {
-                var i: usize = 0;
-                while (i < count) : (i += 1) {
-                    const p = start_page + i;
-                    bitmap[p / 8] |= @as(u8, 1) << @intCast(p % 8);
-                    ref_counts[p] = 1;
-                }
-                free_pages -= count;
-                debugGuardCheck(start_page * PAGE_SIZE);
-                return start_page * PAGE_SIZE;
-            }
+    var page: usize = 0;
+    while (page < TOTAL_PAGES) : (page += 1) {
+        const byte_idx = page / 8;
+        const bit_idx: u3 = @intCast(page % 8);
+        if (bitmap[byte_idx] & (@as(u8, 1) << bit_idx) != 0) {
+            // The page is used: the run of free pages ends here.
+            run_len = 0;
+            run_start = page + 1;
+            continue;
         }
+
+        run_len += 1;
+        if (run_len < count) continue;
+
+        // The run is long enough: take it.
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            const p = run_start + i;
+            bitmap[p / 8] |= @as(u8, 1) << @intCast(p % 8);
+            ref_counts[p] = 1;
+        }
+        free_pages -= count;
+        debugGuardCheck(run_start * PAGE_SIZE);
+        return run_start * PAGE_SIZE;
     }
     return null;
 }

@@ -84,9 +84,18 @@ pub fn init() void {
     // is at ram_base + X and its page tables point straight at that - so the
     // block is reserved once, here, rather than the memory manager being
     // asked for a contiguous run per machine.
+    //
+    // The memory of a real machine is not one block: the firmware reserves
+    // holes for the PCI address space and for the display adapters, so the
+    // largest run of free pages is a fraction of the memory there is.  A
+    // request for three quarters of it can therefore fail even when there is
+    // plenty of memory - so the size is halved until it fits, and the
+    // guests get what the machine can really hand out.
     const pmm = @import("../kernel/pmm.zig");
-    const pool_pages = res.total_ram_bytes / 4096;
-    if (pool_pages != 0) {
+    const wanted_pool_pages = res.total_ram_bytes / 4096;
+    var pool_pages = wanted_pool_pages;
+    const min_pool_pages: usize = (16 * 1024 * 1024) / 4096;
+    while (pool_pages >= min_pool_pages) {
         if (pmm.allocPages(pool_pages)) |pool| {
             res.ram_pool_base = pool;
             res.ram_pool_bytes = pool_pages * 4096;
@@ -95,10 +104,18 @@ pub fn init() void {
             // the pool is a whole number of pages and the total is not, and
             // the last machine would be squeezed out by the difference.
             res.total_ram_bytes = res.ram_pool_bytes;
-        } else {
-            serial.serialWrite("[KVM] Could not reserve a contiguous block for the guests' RAM\n");
-            res.total_ram_bytes = 0;
+            if (pool_pages != wanted_pool_pages) {
+                serial.serialWrite("[KVM] The memory is not one block; the guests' RAM pool is ");
+                serial.serialWriteDec(res.ram_pool_bytes / (1024 * 1024));
+                serial.serialWrite(" MB\n");
+            }
+            break;
         }
+        pool_pages /= 2;
+    }
+    if (res.ram_pool_bytes == 0) {
+        serial.serialWrite("[KVM] Could not reserve a contiguous block for the guests' RAM\n");
+        res.total_ram_bytes = 0;
     }
 
     serial.serialWrite("[KVM] DynamicalKVM ready: ");
