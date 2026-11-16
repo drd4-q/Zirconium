@@ -904,6 +904,17 @@ against:
 
 ## Two traps that cost real time
 
+- **The xHCI has two speed encodings, and they disagree.** The port status
+  register says "full speed" with the value 1 and "low speed" with 2
+  (`PORTSC_SPEED_FULL` / `PORTSC_SPEED_LOW` in Linux's
+  `drivers/usb/host/xhci.h`), while the *slot context* wants 2 for full
+  speed and 1 for low speed (`XHCI_SPEED_FULL` / `XHCI_SPEED_LOW` in the same
+  file). The driver wrote the port's value into the slot context, so every
+  full-speed device was programmed as a low-speed one: the devices behind a
+  hub never got an address (the controller aborts the command) and a
+  full-speed device on a root port enumerated as a generic one - a keyboard
+  that answers but is not a keyboard. `xhci.slotSpeedCode()` converts, and
+  the encoding is the reason the conversion exists at all.
 - **A global declared `undefined` does not get the field defaults of its type.** The virtual
   Bluetooth controller lives in such a global, so its address and its flags were silently
   zero. Declare it `.{}` — and give the type defaultable fields (a function pointer needs a

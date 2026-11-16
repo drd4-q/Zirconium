@@ -1050,6 +1050,25 @@ pub const XhciController = struct {
         );
     }
 
+    /// The slot context's speed field uses the xHCI's own encoding, and it
+    /// is *not* the one the port status register uses.
+    ///
+    /// The port status register says "full speed" with the value 1 and
+    /// "low speed" with 2 (`PORTSC_SPEED_FULL`/`PORTSC_SPEED_LOW` in Linux's
+    /// `drivers/usb/host/xhci.h`), while the slot context wants 2 for full
+    /// speed and 1 for low speed (`XHCI_SPEED_FULL`/`XHCI_SPEED_LOW` in the
+    /// same file).  Writing the port's value into the slot context programs
+    /// the wrong speed, and the controller then aborts the Address Device
+    /// command: the devices behind a hub never get an address, and a
+    /// full-speed device on a root port enumerates as a generic one.
+    pub fn slotSpeedCode(port_speed: u8) u8 {
+        return switch (port_speed) {
+            1 => 2, // full speed in the port status register
+            2 => 1, // low speed in the port status register
+            else => port_speed,
+        };
+    }
+
     pub fn addressDeviceWithRoute(
         self: *XhciController,
         slot_idx: usize,
@@ -1074,7 +1093,9 @@ pub const XhciController = struct {
         self.setInputContextFlags(slot, (1 << 0) | (1 << 1)); // A0 + A1
 
         const slot_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + ctx_size));
-        var slot_info = (@as(u32, speed_code) << 20) |
+        // The speed goes into the slot context in the slot context's own
+        // encoding, not the port status register's.
+        var slot_info = (@as(u32, slotSpeedCode(speed_code)) << 20) |
             (slot.route_string & 0xFFFFF) | (1 << 27);
         if (parent_is_hs_hub and parent_multi_tt) slot_info |= 1 << 25; // DEV_MTT
         slot_ctx[0] = slot_info;
