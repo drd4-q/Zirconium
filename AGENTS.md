@@ -340,8 +340,9 @@ that is not an error.
 - `src/drivers/` — keyboard (IRQ1), mouse (PS/2), input (unified input facade, see USB),
   timer, apic, pci, e1000, rtl8169, virtio_blk, ahci, `usb.zig` (re-export shim) + `usb/`
   (16-file stack, see below), plus `hid/` (the HID++ protocol for the 2.4GHz receivers),
-  `bluetooth/` (the HCI stack) and `drm/` (the display model). The xHCI driver lives in
-  `usb/xhci.zig` — there is no `src/drivers/xhci.zig`.
+  `bluetooth/` (the HCI stack), `drm/` (the display model) and `video/`
+  (`pcidisplay.zig`, the FB_SIMPLE interface, and `vga_mode.zig`, the legacy VGA text mode).
+  The xHCI driver lives in `usb/xhci.zig` — there is no `src/drivers/xhci.zig`.
 - `src/net/` — arp, arp_cache, ip, icmp, tcp, udp, dns, dhcp, http; `mod.zig` is the public
   surface **and** the NIC dispatcher.
 - `src/fs/` — vfs (including append flags and cursor-aware directory reads), ramfs (mounted
@@ -744,19 +745,77 @@ chain is:
 2. the linear framebuffer of a PCI display adapter
    (`drivers/video/pcidisplay.zig`, the X.Org `FB_SIMPLE` interface);
 3. **the legacy VGA text mode**, where the kernel paints the characters
-   itself - software rendering, no adapter involved.
+   itself - software rendering, no adapter involved;
+4. **the serial port**, when there is no display at all.
 
 The fallback is what `probeLfbSafe()` decides, and it is **not** fatal: the
 console moves to the text mode and the boot goes on, so the machine still
 runs and the reason still reaches the kernel log. `screen text` and
 `screen fb` switch between the surfaces by hand.
 
+### A framebuffer above the identity map
+
+**The identity map covers the low 64 GB, and a framebuffer does not have to
+be inside it.** A discrete GPU's framebuffer BAR at 8 TB (`0x7FE0000000`) is
+perfectly normal - that is where the firmware puts it - and the old driver
+refused such an address and left the machine with no console at all.
+
+The range is now mapped where it is: `vmm.mapRange()` walks the current
+page tables and installs 2 MB pages at the *identity* virtual addresses, so
+the address the firmware reported can be used as it is - no relocation, no
+copy. The page tables come from the memory manager when it is up and from a
+small static pool in the kernel's .bss when it is not: the framebuffer is
+mapped in the boot stage *before* the memory one.
+
+The mapping is only made in the **kernel's** address space. A task that runs
+later does not get it: `AddressSpace.create()` copies the lower half and the
+kernel half of the PML4, and the framebuffer lives in the middle, where a
+user address space has nothing.
+
+Two checks say whether the mapping is really there: `fb_mapped` (the range
+was mapped) and `virtToPhys(fb_addr) == fb_addr` (the page walk resolves
+the address to itself). The second one is the line in the log that separates
+"the kernel cannot reach it" from "the hardware does not scan it out".
+
+### The legacy VGA text mode, programmed by hand
+
+Writing characters into 0xB8000 is not enough: the adapter has to be *in*
+the text mode for that buffer to be displayed at all. `drivers/video/
+vga_mode.zig` programs it - the register values are the ones Linux's own
+`arch/ppc/boot/vreset.c` uses ("Initialize VGA control registers to 80x25
+text mode"), the register names come from `include/linux/vga.h`, and the way
+the console uses the buffer comes from `arch/x86/kernel/video/vgacon.c`.
+
+The adapter's presence is decided by the graphics controller's miscellaneous
+register: it reads as all ones when there is no legacy VGA at all, which is
+the case on a machine whose only display is a discrete GPU. `screen text`
+refuses to switch the console there - the picture on the screen would stay
+the framebuffer's and the console would paint into a buffer nobody looks at.
+
+The registers are read back and logged (`[VGA] registers: SR4=.. GCR6=..
+AR=..`), because the adapter is the only witness of what the programming did.
+One adapter ignores it: **QEMU's Bochs VGA keeps the graphics mode while its
+VBE extensions are enabled** - the VBE code rewrites the graphics
+controller's miscellaneous register after every write to it - so the legacy
+text mode cannot be reached there once the firmware has switched to a VBE
+mode. That is a property of that adapter, not of the machine.
+
+### The serial port is the console when there is no display
+
+A machine with no usable framebuffer *and* no legacy VGA has no console at
+all. The shell is driven over the serial port, so its output has to come
+back the same way: `console.setSerialMirror()` mirrors every character that
+goes through the console engine (the one place they all pass, so a number
+written with `writeDec()` is mirrored too). The boot turns it on when there
+is no display at all, and `console serial on` turns it on by hand - which is
+the only way to see what the shell does on a machine whose screen stays
+black.
+
 Three rules the framebuffer driver follows so that a bad address cannot
 hurt the machine:
 
-- **Nothing is written to an address the kernel cannot reach.** The identity
-  map covers the low 64 GB; a framebuffer above it is refused before the
-  first pixel is written.
+- **Nothing is written to an address the kernel cannot reach.** The range is
+  mapped first, and the probe checks that the address resolves to itself.
 - **Nothing is written to an address the kernel has not checked.** The
   console renders into the shadow buffer (ordinary RAM) and nothing is
   pushed out until the probe has read back the pixel it wrote.  A loader
@@ -799,6 +858,29 @@ that leaves no file at all. So: **capture COM1** (115200, 8N1).
 The boot log now names the stage it is in (`[BOOT] stage 7/17 storage`), and
 the panic message repeats it, so a machine with a black screen still says how
 far it got.
+
+**A framebuffer above the identity map used to be the reason for a black
+screen.** The identity map covers the low 64 GB and a discrete GPU's
+framebuffer BAR at 8 TB is perfectly normal, so the driver refused the
+address and the machine was left with the text mode - which the same adapter
+does not scan out either. The range is mapped on demand now
+(`vmm.mapRange()`), and the log says which of the two it is:
+
+- `[FB] the LFB range is mapped (3072 KiB at its own address)` - the mapping
+  is there;
+- `[FB] probe OK: LFB is readable and writable` - the pixels can be written
+  and read back;
+- `[FB] probe MISMATCH` - the address is not backed by anything.
+
+If the probe passes and the screen is still black, the buffer is writable
+and the hardware is simply not scanning it out: that is the case of a GPU
+whose display engine was programmed for another mode, and the serial log is
+the console then (`console serial on`).
+
+**The PCI base address registers are printed for every display adapter**
+(`[DISP]   BAR0 0x...`). The address in the multiboot info and the address
+in the BAR have to be the same one - that is what says whether the mode the
+firmware set up lives on the adapter the kernel found.
 
 **A silent reboot is a triple fault**, and a triple fault means the failure
 was never reported: the CPU tried to handle a fault, could not do it on the

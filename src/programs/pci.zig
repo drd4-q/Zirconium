@@ -95,11 +95,15 @@ fn list() void {
             write(": 0x");
             writeHex16(@truncate(d.bars[b] >> 16));
             writeHex16(@truncate(d.bars[b]));
-            if (d.barAddress(b)) |addr| {
+            // The raw address: a BAR can sit above the 64 GB the boot page
+            // tables identity-map, and the kernel maps such a range on demand
+            // instead of refusing it.
+            if (d.barAddressRaw(b)) |addr| {
                 write(" -> 0x");
                 writeHex16(@truncate(addr >> 16));
                 writeHex16(@truncate(addr));
                 if (d.barPrefetchable(b)) write("  prefetchable");
+                if (d.barAddress(b) == null) write("  (above the 64 GB identity map)");
             }
             write("\n");
         }
@@ -140,14 +144,38 @@ fn display() void {
             write("x");
             writeDec(a.fb_bpp);
             write(" at 0x");
-            writeHex16(@truncate(a.fb_addr >> 16));
-            writeHex16(@truncate(a.fb_addr));
+            writeHex64(a.fb_addr);
             write("\n");
         } else {
             write("    ");
             write(a.note);
             write("\n");
         }
+
+        // The base address registers.  The framebuffer's address has to be
+        // one of them: that is what says whether the mode the firmware set
+        // up lives on this adapter.  A BAR above the 64 GB the boot page
+        // tables identity-map is normal for a discrete GPU.
+        var b: usize = 0;
+        while (b < a.dev.bars.len) : (b += 1) {
+            if (a.dev.bars[b] == 0) continue;
+            const addr = a.dev.barAddressRaw(b) orelse continue;
+            write("    BAR");
+            writeDec(b);
+            write(" : 0x");
+            writeHex64(addr);
+            if (a.dev.barPrefetchable(b)) write(" prefetchable");
+            write("\n");
+        }
     }
     write("\n");
+}
+
+/// A 64 bit number in hex.
+fn writeHex64(v: u64) void {
+    var i: u8 = 60;
+    while (true) : (i -= 4) {
+        writeHex8(@intCast((v >> @intCast(i)) & 0xF));
+        if (i == 0) break;
+    }
 }

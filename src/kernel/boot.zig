@@ -124,7 +124,18 @@ fn stageSystem() void {
         serial.serialWrite("[BOOT] The framebuffer is not usable; the console falls back to the VGA text mode\n");
         serial.serialWrite("[BOOT] On a machine whose display is driven by an adapter the text mode\n");
         serial.serialWrite("[BOOT] may not be scanned out either; the serial log is the console then.\n");
-        @import("../system/gfx/mod.zig").useText();
+        const gfx = @import("../system/gfx/mod.zig");
+        gfx.useTextFallback();
+
+        // Nothing can be shown at all: no framebuffer, and no legacy VGA to
+        // scan the text buffer out.  The serial port is then the console -
+        // the shell is driven over it, so its output has to come back the
+        // same way.
+        if (!gfx.vga_mode.present()) {
+            gfx.setSerialConsole(true);
+            serial.serialWrite("[BOOT] No display at all: the console is the serial port\n");
+            serial.serialWrite("[BOOT] Type 'help' and press Enter.\n");
+        }
     }
 
     // The DRM model around the bootloader's framebuffer: the connector,

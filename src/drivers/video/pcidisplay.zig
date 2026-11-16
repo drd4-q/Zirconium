@@ -87,6 +87,24 @@ pub fn init() void {
         serial.serialWriteHex(dev.subclass);
         serial.serialWrite("\n");
 
+        // The adapter's base address registers.  This is the number that
+        // says whether the framebuffer the firmware handed over belongs to
+        // this adapter: the address in the multiboot info and the address in
+        // the BAR have to be the same one.  A BAR above the 64 GB the boot
+        // page tables identity-map is normal for a discrete GPU - the kernel
+        // maps such a range on demand.
+        var bar: usize = 0;
+        while (bar < dev.bars.len) : (bar += 1) {
+            if (dev.bars[bar] == 0) continue;
+            const addr = dev.barAddressRaw(bar) orelse continue;
+            serial.serialWrite("[DISP]   BAR");
+            serial.serialWriteDec(bar);
+            serial.serialWrite(" 0x");
+            serial.serialWriteHex(addr);
+            if (dev.barPrefetchable(bar)) serial.serialWrite(" prefetchable");
+            serial.serialWrite("\n");
+        }
+
         findSimpleFramebuffer(&adapter);
 
         if (adapter.bound) {

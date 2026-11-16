@@ -68,6 +68,7 @@ const dhcp_mod = @import("net/dhcp.zig");
 const dns_mod = @import("net/dns.zig");
 const files = @import("programs/files.zig");
 const screen_prog = @import("programs/screen.zig");
+const console_prog = @import("programs/console.zig");
 const nano_prog = @import("programs/nano.zig");
 const vfs = @import("fs/vfs.zig");
 const smp = @import("arch/smp.zig");
@@ -143,6 +144,7 @@ const command_table = [_]CmdEntry{
     .{ .name = "mouse",      .run = showMouse },
     .{ .name = "screen",     .run = screen_prog.run },
     .{ .name = "video",      .run = screen_prog.run },
+    .{ .name = "console",    .run = console_prog.run },
     .{ .name = "resolution", .run = cmdResolution },
     .{ .name = "gui",        .run = cmdGui,     .feature = .gui },
     .{ .name = "dhcp",       .run = runDhcp,      .feature = .network },
@@ -1094,7 +1096,8 @@ fn printHelp(_: []const u8) void {
     vga.write("    screen        Framebuffer info (mode/pitch/grid)\n");
     vga.write("    screen redraw Repaint the text console\n");
     vga.write("    screen refresh  Force a full LFB refresh\n");
-    vga.write("    resolution    Rescale the viewport inside the boot mode\n\n");
+    vga.write("    resolution    Rescale the viewport inside the boot mode\n");
+    vga.write("    console       Where the console goes (serial on/off)\n\n");
     vga.write("  Keys: Tab=complete, Up/Down=history, PgUp/PgDn=scroll\n\n");
 }
 

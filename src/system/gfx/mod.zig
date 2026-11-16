@@ -16,6 +16,7 @@ pub const vga_text = @import("vga_text.zig");
 pub const surface_mod = @import("surface.zig");
 pub const palette = @import("palette.zig");
 pub const font = @import("font.zig");
+pub const vga_mode = @import("../../drivers/video/vga_mode.zig");
 
 pub const Surface = surface_mod.Surface;
 pub const Color = palette.Color;
@@ -29,6 +30,17 @@ var surface_bound: bool = false;
 /// Bind the VGA text buffer as the console backend.
 pub fn init() void {
     if (surface_bound) return;
+    bindText();
+}
+
+/// Program the legacy VGA into the text mode and bind the text buffer.
+///
+/// The mode is programmed by hand: a machine whose firmware left the
+/// adapter in a graphics mode shows nothing at all until the text mode is
+/// set up again, and the text buffer is the only console that needs no
+/// adapter.
+fn bindText() void {
+    _ = vga_mode.initTextMode();
     active_surface = vga_text.surface();
     surface_bound = true;
     console.setSurface(active_surface);
@@ -77,13 +89,43 @@ pub fn useFramebuffer() void {
 }
 
 /// Switch the console onto the VGA text buffer.
+///
+/// The legacy VGA is programmed into the 80x25 text mode first: without it
+/// the text buffer is not displayed at all.  A machine that has no legacy
+/// VGA (one whose display is driven by a discrete GPU) is left alone -
+/// there is nothing the text buffer could be shown on.
 pub fn useText() void {
-    active_surface = vga_text.surface();
-    surface_bound = true;
-    console.setSurface(active_surface);
+    if (!vga_mode.present()) return;
+    bindText();
+}
+
+/// Switch the console onto the text buffer, whatever the hardware says.
+///
+/// This is the last resort: the framebuffer is not usable and the serial
+/// log is the only other console.  The text buffer is written even when no
+/// legacy VGA answers - it costs nothing, and a machine whose adapter does
+/// scan it out (an emulated one, for instance) shows the console.
+pub fn useTextFallback() void {
+    bindText();
 }
 
 // ─── Console API ────────────────────────────────────────────────────
+
+/// Mirror the console output to the serial port.
+///
+/// A machine whose display cannot be driven has no console at all: the text
+/// buffer is not scanned out and there is no framebuffer.  The serial port
+/// is then the console - the shell is driven over it, so its output has to
+/// come back the same way.  The mirror itself lives in the console engine,
+/// which is where every character goes through.
+pub fn setSerialConsole(on: bool) void {
+    console.setSerialMirror(on);
+}
+
+/// True when the console output is mirrored to the serial port.
+pub fn serialConsole() bool {
+    return console.serial_mirror;
+}
 
 pub fn write(str: []const u8) void {
     console.write(str);

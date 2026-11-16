@@ -79,8 +79,14 @@ var dirty_x1: u32 = 0;
 var dirty_y1: u32 = 0;
 var has_dirty: bool = false;
 
-/// Upper bound of the identity map built by src/entry.S (64 PDs x 2 MB pages).
-const MAX_IDENTITY_MAP_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+/// True when the framebuffer's physical range is mapped in the kernel's
+/// address space.
+///
+/// The firmware can hand out a framebuffer that lives far above the memory
+/// the boot page tables identity-map: a discrete GPU's framebuffer BAR at
+/// 8 TB is perfectly normal.  The range is mapped on demand (see
+/// `vmm.mapRange`), and this flag says whether that worked.
+pub var fb_mapped: bool = false;
 
 /// Covers every resolution up to 4K (3840x2160).
 const MAX_SHADOW_PIXELS: usize = 3840 * 2160;
@@ -92,63 +98,22 @@ const EARLY_SHADOW_MAX: usize = 1024 * 768;
 var early_shadow: [EARLY_SHADOW_MAX]u32 align(4096) = @splat(0);
 var using_early_shadow: bool = false;
 
-/// Static page tables for mapping framebuffer when fb_addr is above the
-/// identity-mapped range.
-var early_page_tables: [16][512]u64 align(4096) = @splat(@splat(0));
-var early_pt_used: usize = 0;
-
 // ─── Page table mapping ─────────────────────────────────────────────
 
-fn mapFbRange(paddr: u64, size: u64) void {
-    if (paddr == 0 or size == 0) return;
-    // entry.S identity-maps only the first 64 GB with its static tables.  A
-    // framebuffer beyond that would be silently aliased somewhere else; refuse
-    // instead of corrupting unrelated memory.
-    if (paddr + size > MAX_IDENTITY_MAP_BYTES) {
-        serial.serialWrite("[FB] LFB range exceeds the 64 GB identity map; refusing to map\n");
-        return;
-    }
-    const cr3 = asm volatile ("movq %%cr3, %[ret]"
-        : [ret] "=r" (-> u64),
-    );
-    const pml4: [*]u64 = @ptrFromInt(cr3 & 0x000FFFFFFFFFF000);
-
-    var cur = paddr & ~@as(u64, 0x1FFFFF); // 2MB aligned
-    const end = (paddr + size + 0x1FFFFF) & ~@as(u64, 0x1FFFFF);
-
-    while (cur < end) : (cur += 0x200000) {
-        const pml4_idx = (cur >> 39) & 0x1FF;
-        const pdpt_idx = (cur >> 30) & 0x1FF;
-        const pd_idx = (cur >> 21) & 0x1FF;
-
-        var pdpt: [*]u64 = undefined;
-        if (pml4[pml4_idx] & 1 != 0) {
-            pdpt = @ptrFromInt(pml4[pml4_idx] & 0x000FFFFFFFFFF000);
-        } else {
-            if (early_pt_used >= early_page_tables.len) return;
-            pdpt = &early_page_tables[early_pt_used];
-            early_pt_used += 1;
-            pml4[pml4_idx] = @intFromPtr(pdpt) | 0x03; // PRESENT | WRITE
-        }
-
-        var pd: [*]u64 = undefined;
-        if (pdpt[pdpt_idx] & 1 != 0) {
-            if (pdpt[pdpt_idx] & 0x80 != 0) continue; // 1GB page
-            pd = @ptrFromInt(pdpt[pdpt_idx] & 0x000FFFFFFFFFF000);
-        } else {
-            if (early_pt_used >= early_page_tables.len) return;
-            pd = &early_page_tables[early_pt_used];
-            early_pt_used += 1;
-            pdpt[pdpt_idx] = @intFromPtr(pd) | 0x03; // PRESENT | WRITE
-        }
-
-        // Map 2MB page (PRESENT | WRITE | LARGE_PAGE = 0x83)
-        pd[pd_idx] = cur | 0x83;
-        asm volatile ("invlpg (%[addr])"
-            :
-            : [addr] "r" (cur),
-            : .{ .memory = true });
-    }
+/// Map the framebuffer's physical range so that it can be written to.
+///
+/// The address the firmware reported is used as it is: the range is mapped
+/// at the identity virtual address, which is the only way to keep the rest
+/// of the driver (and every other user of the address) unchanged.
+///
+/// Returns false when the mapping could not be built.
+fn mapFbRange(paddr: u64, size: u64) bool {
+    if (paddr == 0 or size == 0) return false;
+    if (root.vmm.mapRange(paddr, size)) return true;
+    serial.serialWrite("[FB] the LFB range at 0x");
+    serial.serialWriteHex(@truncate(paddr));
+    serial.serialWrite(" cannot be mapped\n");
+    return false;
 }
 
 // ─── Shadow allocation ──────────────────────────────────────────────
@@ -452,7 +417,12 @@ fn dumpMbiVideo(mbi: [*]const u8, flags: u32) void {
 pub fn initLinear(addr: u64, width: u32, height: u32, pitch: u32, bpp: u32) bool {
     if (addr == 0 or width == 0 or height == 0 or pitch == 0) return false;
     if (bpp != 16 and bpp != 24 and bpp != 32) return false;
-    if (addr + @as(u64, pitch) * height > MAX_IDENTITY_MAP_BYTES) return false;
+
+    // The adapter's memory can live above the window the boot page tables
+    // identity-map.  Map it where it is, so the address can be used as it
+    // is.
+    if (!mapFbRange(addr, @as(u64, pitch) * height)) return false;
+    fb_mapped = true;
 
     fb_addr = addr;
     fb_width = width;
@@ -590,24 +560,22 @@ pub fn initFromMultiboot(mbi_ptr: u32) void {
     boot_pitch = fb_pitch;
     viewport_scaled = false;
 
-    // Ensure framebuffer range is identity-mapped in page tables (crucial if
-    // fb_addr >= 8GB).
+    // Ensure framebuffer range is mapped in the page tables (crucial if
+    // fb_addr is above the 64 GB the boot tables identity-map - a discrete
+    // GPU's framebuffer BAR at 8 TB is normal).
     const total_fb_bytes = @as(u64, fb_pitch) * fb_height;
-    mapFbRange(fb_addr, total_fb_bytes);
-
-    // The address has to be inside the identity map before anything is
-    // written to it: a loader that hands out a framebuffer the kernel
-    // cannot reach would otherwise be written to blind.  The console falls
-    // back to the VGA text mode and the boot goes on.
-    if (fb_addr + total_fb_bytes > MAX_IDENTITY_MAP_BYTES) {
-        serial.serialWrite("[FB] LFB at 0x");
-        serial.serialWriteHex(@truncate(fb_addr));
-        serial.serialWrite(" is outside the 64 GB identity map; staying in text mode\n");
+    if (!mapFbRange(fb_addr, total_fb_bytes)) {
+        serial.serialWrite("[FB] the LFB cannot be mapped; staying in text mode\n");
         active = false;
         return;
     }
+    fb_mapped = true;
 
     active = true;
+
+    serial.serialWrite("[FB] the LFB range is mapped (");
+    serial.serialWriteDec(total_fb_bytes / 1024);
+    serial.serialWrite(" KiB at its own address)\n");
 
     // The LFB probe is deliberately NOT run here: initFromMultiboot runs
     // before the IDT is installed (main.zig calls vga.initFb ahead of
@@ -647,7 +615,6 @@ pub fn probeLfbSafe() bool {
         serial.serialWrite("[FB] probe SKIP: no framebuffer\n");
         return false;
     }
-    const total = @as(u64, fb_pitch) * fb_height;
     // A pitch LARGER than width*bpp is normal and must be accepted: 24bpp VBE
     // modes and anything with a scanline pad report one.  The dangerous
     // direction is a pitch too SMALL, where lfbOffset walks into the next
@@ -667,12 +634,34 @@ pub fn probeLfbSafe() bool {
         serial.serialWriteDec(fb_pitch - min_pitch);
         serial.serialWrite(" bytes of padding per scanline\n");
     }
-    // entry.S identity-maps the first 64 GB, so anything inside that window is
-    // safe to touch without help from mapFbRange (which cannot map above it).
-    if (fb_addr + total > MAX_IDENTITY_MAP_BYTES) {
-        serial.serialWrite("[FB] probe SKIP: LFB at 0x");
+    // The range has to be mapped before anything is written to it: a loader
+    // that hands out a framebuffer the kernel cannot reach would otherwise be
+    // written to blind.  The console falls back to the VGA text mode and the
+    // boot goes on.
+    if (!fb_mapped) {
+        serial.serialWrite("[FB] probe SKIP: the LFB at 0x");
         serial.serialWriteHex(@truncate(fb_addr));
-        serial.serialWrite(" is outside the 64 GB identity map - disabling the driver\n");
+        serial.serialWrite(" is not mapped - disabling the driver\n");
+        active = false;
+        return false;
+    }
+
+    // The page walk has to resolve the address to itself.  That is what says
+    // the mapping is really there: a framebuffer the kernel cannot reach is
+    // a black screen with a green probe in the log, and this is the line
+    // that says which of the two it is.
+    if (root.vmm.virtToPhys(fb_addr)) |phys| {
+        if (phys != fb_addr) {
+            serial.serialWrite("[FB] probe SKIP: the LFB address resolves to 0x");
+            serial.serialWriteHex(@truncate(phys));
+            serial.serialWrite(", not to itself - disabling the driver\n");
+            active = false;
+            return false;
+        }
+    } else {
+        serial.serialWrite("[FB] probe SKIP: the LFB at 0x");
+        serial.serialWriteHex(@truncate(fb_addr));
+        serial.serialWrite(" does not resolve - disabling the driver\n");
         active = false;
         return false;
     }

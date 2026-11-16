@@ -13,6 +13,16 @@ pub fn run(args: []const u8) void {
     // needs no adapter at all, and it is what the console falls back to when
     // the framebuffer cannot be used.
     if (eq(cmd, "text") or eq(cmd, "vga")) {
+        // The text buffer is only displayed by a legacy VGA.  Without one the
+        // picture on the screen would stay the framebuffer's and the console
+        // would paint into a buffer nobody looks at.
+        if (!gfx.vga_mode.present()) {
+            vga.setColor(.yellow, .black);
+            vga.write("\n  No legacy VGA: the text buffer is not scanned out.\n");
+            vga.write("  The console stays on the framebuffer.\n\n");
+            vga.setColor(.white, .black);
+            return;
+        }
         gfx.useText();
         vga.setColor(.light_green, .black);
         vga.write("\n  Console on the VGA text mode (software rendering).\n\n");
@@ -104,6 +114,16 @@ fn printInfo() void {
     vga.writeDec(fb.bytesPerPixel());
     vga.write("B  type=");
     vga.writeDec(fb.fb_type);
+    vga.write("\n");
+
+    vga.write("  Mapped:    ");
+    if (fb.fb_mapped) {
+        vga.write("yes - the address resolves to itself");
+    } else {
+        vga.setColor(.yellow, .black);
+        vga.write("no - the kernel cannot reach that address");
+        vga.setColor(.white, .black);
+    }
     vga.write("\n");
 
     vga.write("  State:     ");

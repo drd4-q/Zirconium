@@ -32,8 +32,22 @@ pub const PciDevice = struct {
     /// The base address of a BAR, with the 64 bit halves joined.
     ///
     /// Returns null when the BAR is not a memory BAR or when its address is
-    /// above the identity map the kernel built (64 GB).
+    /// above the identity map the kernel built (64 GB).  Use `barAddressRaw`
+    /// for the addresses that are not mapped yet: the kernel can map such a
+    /// range on demand.
     pub fn barAddress(self: *const PciDevice, index: usize) ?u64 {
+        const addr = self.barAddressRaw(index) orelse return null;
+        if (addr >= MAX_IDENTITY_MAP) return null;
+        return addr;
+    }
+
+    /// The base address of a memory BAR, with the 64 bit halves joined.
+    ///
+    /// There is no limit on the address: a BAR can sit far above the window
+    /// the boot page tables identity-map.  A discrete GPU's framebuffer BAR
+    /// at 8 TB is perfectly normal, and `vmm.mapRange` maps such a range on
+    /// demand.
+    pub fn barAddressRaw(self: *const PciDevice, index: usize) ?u64 {
         if (index >= self.bars.len) return null;
         const raw = self.bars[index];
         if (raw == 0) return null;
@@ -46,7 +60,7 @@ pub const PciDevice = struct {
             if (index + 1 >= self.bars.len) return null;
             const high = self.bars[index + 1];
             const addr = @as(u64, high) << 32 | @as(u64, low);
-            if (addr == 0 or addr >= MAX_IDENTITY_MAP) return null;
+            if (addr == 0) return null;
             return addr;
         }
 

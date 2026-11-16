@@ -192,6 +192,109 @@ pub fn virtToPhys(vaddr: u64) ?u64 {
     return (pt_entry & PAGE_ADDR_MASK) + offset;
 }
 
+// ─── Mapping a physical range ───────────────────────────────────────
+
+/// Page tables for the mappings that are made before the memory manager
+/// exists.
+///
+/// The framebuffer is mapped before the PMM is up - the console draws into
+/// it as soon as the IDT is live - and a framebuffer can sit far above the
+/// window the boot page tables identity-map.  A pool of static pages in the
+/// kernel's own .bss is enough for those: one page directory per gigabyte of
+/// the range, plus one page directory pointer table.
+const EARLY_TABLE_PAGES: usize = 24;
+var early_tables: [EARLY_TABLE_PAGES][512]u64 align(4096) = @splat(@splat(0));
+var early_tables_used: usize = 0;
+
+/// One page table for a mapping.  The memory manager is the right source of
+/// tables, but it does not exist yet when the framebuffer is mapped (that
+/// happens in the boot stage before the memory one), so there is a static
+/// pool for that case.
+fn allocTable() ?u64 {
+    if (pmm.total_pages != 0) {
+        const page = pmm.allocPage() orelse return null;
+        return @intCast(page);
+    }
+    if (early_tables_used >= EARLY_TABLE_PAGES) return null;
+    const page = @intFromPtr(&early_tables[early_tables_used]);
+    early_tables_used += 1;
+    return page;
+}
+
+/// Map a physical range at the *identity* virtual addresses.
+///
+/// A device's memory can live far above the memory the kernel identity-maps
+/// at boot: a discrete GPU's framebuffer BAR at 8 TB is perfectly normal,
+/// and so is a bridge that puts a register file above the 64 GB window.  The
+/// range is mapped where it is, so the address the firmware reported can be
+/// used as it is - no relocation, no copy.
+///
+/// The mapping is made in the *current* address space, which at boot is the
+/// one the boot page tables built.  A task that runs later does not get it:
+/// the framebuffer belongs to the kernel, and nothing in user space may
+/// touch the display.
+///
+/// Returns false when the page tables cannot be built.
+pub fn mapRange(paddr: u64, size: u64) bool {
+    if (paddr == 0 or size == 0) return false;
+    const start = paddr & ~@as(u64, 0x1FFFFF);
+    const end = (paddr + size + 0x1FFFFF) & ~@as(u64, 0x1FFFFF);
+    if (end <= start) return false;
+
+    const cr3 = getCurrentCr3();
+    const pml4: [*]u64 = @ptrFromInt(cr3 & PAGE_ADDR_MASK);
+
+    var cur = start;
+    while (cur < end) : (cur += 0x200000) {
+        const pml4_idx: usize = @intCast((cur >> 39) & 0x1FF);
+        const pdpt_idx: usize = @intCast((cur >> 30) & 0x1FF);
+        const pd_idx: usize = @intCast((cur >> 21) & 0x1FF);
+
+        // Page directory pointer table.
+        var pdpt: [*]u64 = undefined;
+        if (pml4[pml4_idx] & PAGE_PRESENT != 0) {
+            // A 512 GB page: the range is mapped already.
+            if (pml4[pml4_idx] & PAGE_SIZE != 0) continue;
+            pdpt = @ptrFromInt(pml4[pml4_idx] & PAGE_ADDR_MASK);
+        } else {
+            const page = allocTable() orelse return false;
+            @memset(@as([*]u8, @ptrFromInt(page))[0..4096], 0);
+            pml4[pml4_idx] = page | PAGE_PRESENT | PAGE_WRITE;
+            pdpt = @ptrFromInt(page);
+        }
+
+        // Page directory.
+        var pd: [*]u64 = undefined;
+        if (pdpt[pdpt_idx] & PAGE_PRESENT != 0) {
+            // A 1 GB page: the range is mapped already.
+            if (pdpt[pdpt_idx] & PAGE_SIZE != 0) continue;
+            pd = @ptrFromInt(pdpt[pdpt_idx] & PAGE_ADDR_MASK);
+        } else {
+            const page = allocTable() orelse return false;
+            @memset(@as([*]u8, @ptrFromInt(page))[0..4096], 0);
+            pdpt[pdpt_idx] = page | PAGE_PRESENT | PAGE_WRITE;
+            pd = @ptrFromInt(page);
+        }
+
+        // A 2 MB page: present, writable, large.  NX as well - this is
+        // device memory, never code.
+        //
+        // An entry that is already there is left alone: the boot page tables
+        // identity-map the low 64 GB, and rewriting those entries would
+        // change the flags of a range the kernel is already using.
+        if (pd[pd_idx] & PAGE_PRESENT == 0) {
+            pd[pd_idx] = cur | PAGE_PRESENT | PAGE_WRITE | PAGE_SIZE | PAGE_NX;
+        }
+    }
+
+    // The TLB can hold a "not present" entry for an address that was touched
+    // before the mapping existed, and the paging-structure caches can hold
+    // the levels that were missing a moment ago.  Reloading CR3 throws both
+    // away.
+    loadCr3(cr3 & PAGE_ADDR_MASK);
+    return true;
+}
+
 pub fn init() void {
     serial.serialWrite("[VMM] Virtual memory manager initialized\n");
     serial.serialWrite("[VMM] CR3=0x");

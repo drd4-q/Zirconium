@@ -145,9 +145,30 @@ fn clearMirror() void {
 
 // ─── Output ─────────────────────────────────────────────────────────
 
+/// True when the console output is mirrored to the serial port.
+///
+/// A machine whose display cannot be driven has no console at all: the text
+/// buffer is not scanned out and there is no framebuffer.  The serial port
+/// is then the console - the shell is driven over it, so its output has to
+/// come back the same way.
+pub var serial_mirror: bool = false;
+
+/// Mirror the console output to the serial port.
+pub fn setSerialMirror(on: bool) void {
+    serial_mirror = on;
+}
+
 /// Write one character at the cursor, handling the control characters.
 pub fn putChar(ch: u8) void {
     ensureBound();
+
+    // The serial console.  This is the one place every character goes
+    // through, so the mirror cannot miss a number written with writeDec()
+    // or a colour change.
+    if (serial_mirror) {
+        const buf = [_]u8{ch};
+        root.serial.serialWrite(&buf);
+    }
 
     if (scroll_view) exitScrollView();
 
