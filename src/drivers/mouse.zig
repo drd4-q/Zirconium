@@ -280,14 +280,27 @@ pub fn poll() void {
 /// used by QEMU's usb-tablet). Coordinates land in the same pixel space the
 /// PS/2 relative path uses.
 pub fn usbUpdate(x: u32, y: u32, left: bool, right: bool, middle: bool) void {
-    const max_c: u64 = 4095;
-    if (fb.active and fb.fb_width > 0) {
-        mx = @intCast(@min((@as(u64, x) * fb.fb_width) / max_c, fb.fb_width - 1));
-        my = @intCast(@min((@as(u64, y) * fb.fb_height) / max_c, fb.fb_height - 1));
-    } else {
-        mx = @intCast(@min((@as(u64, x) * 80) / max_c, 79));
-        my = @intCast(@min((@as(u64, y) * 25) / max_c, 24));
-    }
+    usbUpdateRange(x, y, 4095, 4095, left, right, middle);
+}
+
+/// Absolute-position update from a HID pointer whose logical range is not
+/// the digitizer's 0..4095.  QEMU's usb-tablet reports 0..32767, a real
+/// tablet may use another range; the report descriptor carries it.
+pub fn usbUpdateRange(
+    x: u32,
+    y: u32,
+    max_x: u32,
+    max_y: u32,
+    left: bool,
+    right: bool,
+    middle: bool,
+) void {
+    const width: u64 = if (fb.active and fb.fb_width > 0) fb.fb_width else 80;
+    const height: u64 = if (fb.active and fb.fb_height > 0) fb.fb_height else 25;
+    const rx: u64 = if (max_x > 0) @min((@as(u64, x) * width) / max_x, width - 1) else 0;
+    const ry: u64 = if (max_y > 0) @min((@as(u64, y) * height) / max_y, height - 1) else 0;
+    mx = @intCast(rx);
+    my = @intCast(ry);
     left_button = left;
     right_button = right;
     middle_button = middle;

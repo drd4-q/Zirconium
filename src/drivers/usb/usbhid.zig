@@ -72,6 +72,18 @@ pub const Urb = struct {
     }
 };
 
+/// GET_DESCRIPTOR for a HID report descriptor (`hid-core.c:usbhid_get_class_descriptor`).
+/// `bmRequestType` 0x81 is Device-to-Host, Standard, Interface.
+pub fn makeGetDescriptorPacket(iface_num: u8, desc_type: u8, desc_index: u8, length: u16) types.UsbSetupPacket {
+    return types.UsbSetupPacket{
+        .bmRequestType = 0x81,
+        .bRequest = types.REQ_GET_DESCRIPTOR,
+        .wValue = (@as(u16, desc_type) << 8) | @as(u16, desc_index),
+        .wIndex = iface_num,
+        .wLength = length,
+    };
+}
+
 // Build standard HID control request packets
 pub fn makeSetProtocolPacket(iface_num: u8, protocol: u16) types.UsbSetupPacket {
     return types.UsbSetupPacket{

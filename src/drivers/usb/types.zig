@@ -287,6 +287,11 @@ pub const UsbInterface = struct {
     endpoints: [MAX_DEVICE_ENDPOINTS]UsbEndpoint = @splat(.{ .ep_addr = 0, .transfer_type = .interrupt, .max_packet_size = 8, .interval_ms = 10, .toggle = 0, .active = false, .hw_endpoint_id = 0, .hw_queue_ptr = 0 }),
     endpoint_count: usize = 0,
 
+    /// `wDescriptorLength` of the HID report descriptor (the class
+    /// descriptor that follows the interface descriptor).  Zero when the
+    /// device did not supply one.
+    hid_report_len: u16 = 0,
+
     report_buf: [64]u8 = @splat(0),
     prev_report: [64]u8 = @splat(0),
     report_len: usize = 0,

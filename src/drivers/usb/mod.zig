@@ -166,6 +166,15 @@ fn enumerateCompositeInterfaces(dev: *device.UsbDevice, c_idx: u8, p: u8, is_low
     }
 }
 
+/// The interface record a logical UsbDevice stands for.
+fn findInterfaceByNumber(dev: *device.UsbDevice, iface_num: u8) ?*types.UsbInterface {
+    var i: usize = 0;
+    while (i < dev.interface_count) : (i += 1) {
+        if (dev.interfaces[i].interface_num == iface_num) return &dev.interfaces[i];
+    }
+    return null;
+}
+
 fn duplicateHidEndpoint(dev: *device.UsbDevice, upto: usize) bool {
     var i: usize = 0;
     while (i < upto) : (i += 1) {
@@ -625,17 +634,6 @@ pub fn init() void {
 
     initialized = true;
 
-    // ─── Initialize Linux-style USB HID Subsystem (hid-core.c) ───
-    hid_core.init();
-    var d_k: usize = 0;
-    while (d_k < usb_device_count) : (d_k += 1) {
-        const dev = &usb_devices[d_k];
-        if (!dev.active) continue;
-        if (dev.dev_type == .keyboard or dev.dev_type == .mouse) {
-            _ = hid_core.registerHidDevice(d_k, dev, dev.interface_num, dev.dev_type);
-        }
-    }
-
     // ─── Downstream USB Hub Port Power & Enumeration (Class 0x09) ───
     const CtrlFnPtr = *const fn (addr: u8, maxp0: u8, setup: *const types.UsbSetupPacket, dout: ?[]const u8, din: ?[]u8) bool;
     var d_h: usize = 0;
@@ -707,11 +705,36 @@ pub fn init() void {
                         false,
                     )) {
                         usb_device_count += 1;
+                        enumerateCompositeInterfaces(dev, hub_dev.ctrl_idx, hp.port - 1, hp.speed == .low, new_addr);
                     }
                 }
             }
         }
     }
+
+    // A UHCI hub whose children arrived in the pass above needs its
+    // periodic schedule rebuilt: the root-device schedule was linked before
+    // those devices existed.
+    var u_relink: usize = 0;
+    while (u_relink < uhci_count) : (u_relink += 1) {
+        relinkUhciControllerSchedule(&uhci_instances[u_relink], uhci_instances[u_relink].id);
+    }
+
+    // ─── Initialize Linux-style USB HID Subsystem (hid-core.c) ───
+    // This runs after the hub pass: a keyboard behind a hub is enumerated
+    // here, and `hid_core` has to see every interface before it reads a
+    // report descriptor (`hid_add_device` runs at probe time, and the probe
+    // happens for hub children too).
+    hid_core.init();
+    var d_k: usize = 0;
+    while (d_k < usb_device_count) : (d_k += 1) {
+        const dev = &usb_devices[d_k];
+        if (!dev.active) continue;
+        const iface = findInterfaceByNumber(dev, dev.interface_num) orelse continue;
+        if (iface.class_code != 0x03) continue;
+        _ = hid_core.registerHidDevice(d_k, dev, dev.interface_num, iface.driver_type);
+    }
+
     const storage_count = storage.init();
     if (storage_count > 0) {
         serial.serialWrite("[USB] USB Mass Storage initialized: ");
@@ -962,14 +985,25 @@ fn processHidReport(dev: *device.UsbDevice, len: usize) void {
     // Composite receivers often expose keyboard and mouse interfaces on the
     // same interrupt endpoint.  Only one physical QH is scheduled, so fan the
     // report out to the other logical interface records instead of dropping
-    // the mouse half of the device.
-    if (dev.report_buf[0] == 1 or dev.report_buf[0] == 2) {
+    // the mouse half of the device.  The report descriptor says which
+    // interface a numbered report belongs to; the boot protocol fallback
+    // keeps the old "report ID 1 or 2" guess.
+    const numbered = hid_core.hasNumberedInput(dev);
+    const legacy = !hid_core.hasDescriptor(dev) and (dev.report_buf[0] == 1 or dev.report_buf[0] == 2);
+    if (numbered or legacy) {
+        const report_id = dev.report_buf[0];
         var alias_idx: usize = 0;
         while (alias_idx < usb_device_count) : (alias_idx += 1) {
             const alias = &usb_devices[alias_idx];
             if (alias == dev or !alias.active or alias.ctrl_idx != dev.ctrl_idx or
                 alias.addr != dev.addr or alias.ep_in != dev.ep_in) continue;
             if (alias.dev_type != .keyboard and alias.dev_type != .mouse) continue;
+            if (numbered) {
+                // Only an interface whose own descriptor declares this
+                // report ID can decode it.
+                if (!hid_core.hasNumberedInput(alias)) continue;
+            }
+            if (!hid_core.acceptsReportId(alias, report_id)) continue;
             @memcpy(alias.report_buf[0..len], dev.report_buf[0..len]);
             alias.packet_count +%= 1;
             hid_core.processRawDeviceReport(alias, len);

@@ -273,6 +273,18 @@ pub fn enumerateDevice(
 
                 iface_count += 1;
             }
+        } else if (desc_type == 0x21 and desc_len >= 9) {
+            // HID class descriptor: it names the report descriptor and its
+            // length.  The length decides how much of the report descriptor
+            // has to be fetched, and a low-speed control endpoint cannot
+            // carry a 512 byte request (see hid_core.registerHidDevice).
+            if (current_iface) |iface| {
+                const count = cfg_buf[off + 5];
+                if (count > 0 and cfg_buf[off + 6] == 0x22) {
+                    iface.hid_report_len = @as(u16, cfg_buf[off + 7]) |
+                        (@as(u16, cfg_buf[off + 8]) << 8);
+                }
+            }
         } else if (desc_type == types.DESC_ENDPOINT and desc_len >= 7) {
             if (current_iface) |iface| {
                 if (iface.endpoint_count < types.MAX_DEVICE_ENDPOINTS) {
@@ -360,20 +372,10 @@ pub fn enumerateDevice(
     while (if_idx < iface_count) : (if_idx += 1) {
         const iface = &dev_out.interfaces[if_idx];
         if (iface.class_code == 0x03) {
-            // SET_PROTOCOL: 0 = Boot Protocol (only valid for boot interface subclass)
-            if (iface.subclass_code == 0x01) {
-                const set_proto_pkt = hid.makeSetProtocolPacket(iface.interface_num, hid.PROTOCOL_BOOT);
-                _ = ctrl_transfer_fn(new_addr, max_packet0, &set_proto_pkt, null, null);
-            }
-
-            // SET_IDLE: 0 = Report on change
-            const set_idle_pkt = hid.makeSetIdlePacket(iface.interface_num, 0, 0);
-            _ = ctrl_transfer_fn(new_addr, max_packet0, &set_idle_pkt, null, null);
-
-            if (iface.driver_type == .keyboard) {
-                // Turn on NumLock LED on keyboard by default
-                hid.setKeyboardLeds(new_addr, max_packet0, iface.interface_num, true, false, false, ctrl_transfer_fn);
-            }
+            // The HID protocol, the idle rate and the LEDs are decided by
+            // `hid_core.registerHidDevice()` after it has read the report
+            // descriptor: a boot interface stays in boot protocol only when
+            // the descriptor cannot be parsed (hid-core.c:usbhid_parse).
 
             if (primary_dtype == .unknown) {
                 primary_dtype = iface.driver_type;

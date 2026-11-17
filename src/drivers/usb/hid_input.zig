@@ -3,6 +3,7 @@ const root = @import("root");
 const serial = root.serial;
 const keyboard = @import("../keyboard.zig");
 const mouse = @import("../mouse.zig");
+const hid_report = @import("../hid/hid_report.zig");
 
 /// Emit raw HID reports and decoded USB keys on the serial console when the
 /// user runs `usb debug on`.  It is intentionally opt-in because a keyboard
@@ -205,4 +206,250 @@ pub fn handleMouseReport(report: []const u8, prev_report: []u8) void {
     if (prev_report.len > 0) {
         prev_report[0] = buttons;
     }
+}
+
+// ─── Report descriptor driven decoding (Linux hid-input.c) ───────────────
+//
+// The boot protocol decoder above guesses the layout of a report: eight
+// bytes, modifiers first, six key slots.  A modern keyboard is rarely that
+// layout, and a dongle behind an interface can prefix every report with a
+// report ID.  This decoder takes the layout from the parsed report
+// descriptor instead, the way `hid-input.c` walks `hid_field`s: a variable
+// field names one usage per bit range, an array field's value names the
+// usage that is currently down, and the usages decide what the value means.
+
+pub const MAX_REPORT_KEYS: usize = 24;
+
+/// The keyboard and mouse state that a descriptor driven report needs in
+/// order to tell a press from a repeat: an array report lists every key
+/// that is down, not the key that changed.
+pub const State = struct {
+    keys: [MAX_REPORT_KEYS]u16 = @splat(0),
+    key_count: u8 = 0,
+    buttons: u8 = 0,
+
+    fn contains(self: *const State, usage: u16) bool {
+        var i: usize = 0;
+        while (i < @as(usize, self.key_count)) : (i += 1) {
+            if (self.keys[i] == usage) return true;
+        }
+        return false;
+    }
+
+    fn add(self: *State, usage: u16) void {
+        if (self.key_count >= MAX_REPORT_KEYS or self.contains(usage)) return;
+        self.keys[@as(usize, self.key_count)] = usage;
+        self.key_count += 1;
+    }
+};
+
+fn addReportKey(keys: *[MAX_REPORT_KEYS]u16, count: *usize, usage: u16) void {
+    if (count.* >= MAX_REPORT_KEYS) return;
+    var i: usize = 0;
+    while (i < count.*) : (i += 1) {
+        if (keys[i] == usage) return;
+    }
+    keys[count.*] = usage;
+    count.* += 1;
+}
+
+/// Decode one input report using the layout in `table`.
+///
+/// Returns false when the report is not an input report of this interface
+/// (an unknown report ID, or a report the descriptor does not describe), so
+/// the caller can leave it for the interface it belongs to.
+pub fn handleDescriptorReport(
+    table: *const hid_report.Table,
+    report: []const u8,
+    state: *State,
+    on_led_change: ?LedCallback,
+) bool {
+    if (report.len == 0) return false;
+
+    // A numbered report starts with its report ID; an unnumbered one does
+    // not (`hid_report_len` and `hid_report_enum` in hid-core.c).
+    var report_id: u8 = 0;
+    var payload: []const u8 = report;
+    if (table.numbered(.input)) {
+        report_id = report[0];
+        payload = report[1..];
+    }
+    if (table.findReport(.input, report_id) == null) return false;
+    if (payload.len == 0) return false;
+
+    var modifiers: u8 = 0;
+    var keys: [MAX_REPORT_KEYS]u16 = @splat(0);
+    var key_count: usize = 0;
+
+    var buttons: u8 = 0;
+    var dx: i32 = 0;
+    var dy: i32 = 0;
+    var wheel: i32 = 0;
+    var abs_x: i32 = 0;
+    var abs_y: i32 = 0;
+    var abs_max_x: i32 = 0;
+    var abs_max_y: i32 = 0;
+    var have_axes = false;
+    var have_wheel = false;
+    var absolute = false;
+
+    var field_idx: usize = 0;
+    while (field_idx < @as(usize, table.field_count)) : (field_idx += 1) {
+        const field = &table.fields[field_idx];
+        if (field.report_type != .input or field.report_id != report_id) continue;
+        if (field.isConstant() or field.report_size == 0) continue;
+
+        var index: u16 = 0;
+        while (index < field.report_count) : (index += 1) {
+            const value = field.valueAt(payload, index) orelse continue;
+            const usage = if (field.isVariable())
+                field.usageAt(index)
+            else
+                (field.usageForValue(value) orelse continue);
+
+            switch (usage.page) {
+                hid_report.USAGE_PAGE_KEYBOARD => {
+                    if (value == 0 or usage.id == 0) continue;
+                    if (usage.id >= 0xE0 and usage.id <= 0xE7) {
+                        // The modifier usages are one bit each: 0xE0 left
+                        // ctrl ... 0xE7 right GUI (`hidinput_configure_usage`).
+                        modifiers |= @as(u8, 1) << @intCast(usage.id - 0xE0);
+                    } else {
+                        addReportKey(&keys, &key_count, usage.id);
+                    }
+                },
+                hid_report.USAGE_PAGE_BUTTON => {
+                    if (value == 0) continue;
+                    if (usage.id >= 1 and usage.id <= 8) {
+                        buttons |= @as(u8, 1) << @intCast(usage.id - 1);
+                    }
+                },
+                hid_report.USAGE_PAGE_GENERIC_DESKTOP => switch (usage.id) {
+                    hid_report.USAGE_GD_X => {
+                        have_axes = true;
+                        if (field.isRelative()) {
+                            dx += value;
+                        } else {
+                            abs_x = value;
+                            abs_max_x = @max(abs_max_x, field.logical_max);
+                            absolute = true;
+                        }
+                    },
+                    hid_report.USAGE_GD_Y => {
+                        have_axes = true;
+                        if (field.isRelative()) {
+                            dy += value;
+                        } else {
+                            abs_y = value;
+                            abs_max_y = @max(abs_max_y, field.logical_max);
+                            absolute = true;
+                        }
+                    },
+                    hid_report.USAGE_GD_WHEEL => {
+                        have_wheel = true;
+                        wheel += value;
+                    },
+                    else => {},
+                },
+                else => {},
+            }
+        }
+    }
+
+    // The keyboard half: an array report lists the keys that are down, so
+    // the press is the usage that was not down before.
+    const shift = (modifiers & 0x22) != 0; // left/right shift
+    const ctrl = (modifiers & 0x11) != 0; // left/right ctrl
+    var next_state = State{ .buttons = buttons };
+    var led_changed = false;
+
+    var key_idx: usize = 0;
+    while (key_idx < key_count) : (key_idx += 1) {
+        const key = keys[key_idx];
+        if (!state.contains(key)) {
+            switch (key) {
+                0x39 => {
+                    caps_lock_state = !caps_lock_state;
+                    led_changed = true;
+                },
+                0x53 => {
+                    num_lock_state = !num_lock_state;
+                    led_changed = true;
+                },
+                0x47 => {
+                    scroll_lock_state = !scroll_lock_state;
+                    led_changed = true;
+                },
+                else => {
+                    if (hidUsageToAscii(@intCast(key), shift, ctrl, caps_lock_state, num_lock_state)) |ch| {
+                        keyboard.pushKey(ch);
+                        if (debug) {
+                            serial.serialWrite("[USB-HID] key=");
+                            serial.serialWriteHex(ch);
+                            serial.serialWrite("\n");
+                        }
+                    }
+                },
+            }
+        }
+        next_state.add(key);
+    }
+    state.keys = next_state.keys;
+    state.key_count = next_state.key_count;
+
+    if (led_changed) {
+        if (on_led_change) |cb| cb(num_lock_state, caps_lock_state, scroll_lock_state);
+    }
+
+    // The pointer half.  A tablet reports absolute coordinates in its own
+    // logical range; a mouse reports a displacement.
+    const left = (buttons & 0x01) != 0;
+    const right = (buttons & 0x02) != 0;
+    const middle = (buttons & 0x04) != 0;
+    const axes_changed = dx != 0 or dy != 0 or wheel != 0 or buttons != state.buttons;
+    if (absolute) {
+        mouse.usbUpdateRange(
+            @intCast(@max(abs_x, 0)),
+            @intCast(@max(abs_y, 0)),
+            @intCast(@max(abs_max_x, 0)),
+            @intCast(@max(abs_max_y, 0)),
+            left,
+            right,
+            middle,
+        );
+    } else if (have_axes and axes_changed) {
+        mouse.updateFromUsbWithWheel(buttons, dx, dy, wheel);
+    } else if (have_wheel and axes_changed) {
+        mouse.updateFromUsbWithWheel(buttons, 0, 0, wheel);
+    }
+    state.buttons = buttons;
+
+    if (debug and (have_axes or have_wheel)) {
+        serial.serialWrite("[USB-HID] pointer ");
+        if (absolute) {
+            serial.serialWrite("abs ");
+            serial.serialWriteDec(@intCast(@max(abs_x, 0)));
+            serial.serialWrite(",");
+            serial.serialWriteDec(@intCast(@max(abs_y, 0)));
+            serial.serialWrite("/");
+            serial.serialWriteDec(@intCast(@max(abs_max_x, 0)));
+            serial.serialWrite(",");
+            serial.serialWriteDec(@intCast(@max(abs_max_y, 0)));
+        } else {
+            serial.serialWrite("rel ");
+            if (dx < 0) serial.serialWrite("-");
+            serial.serialWriteDec(@intCast(if (dx < 0) -dx else dx));
+            serial.serialWrite(",");
+            if (dy < 0) serial.serialWrite("-");
+            serial.serialWriteDec(@intCast(if (dy < 0) -dy else dy));
+            serial.serialWrite(" wheel=");
+            if (wheel < 0) serial.serialWrite("-");
+            serial.serialWriteDec(@intCast(if (wheel < 0) -wheel else wheel));
+        }
+        serial.serialWrite(" buttons=");
+        serial.serialWriteDec(buttons);
+        serial.serialWrite("\n");
+    }
+
+    return true;
 }

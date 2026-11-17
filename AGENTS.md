@@ -119,17 +119,19 @@ multi-controller USB, and — when `disk.img` exists — one with
 | `tools/test_edid.zig` | Host-side test of the EDID parser (`zig run --dep edid -Mroot=tools/test_edid.zig -Medid=src/drivers/drm/edid.zig`). It imports the real parser. |
 | `tools/test_ftdi.zig` | Host-side test of the FTDI chip protocol: the baud divisors, the chip IDs, the status bits. |
 | `tools/test_hidpp.zig` | Host-side test of the HID++ protocol: the report formats, the requests, the feature table. |
+| `tools/test_hid_report.zig` | Host-side test of the HID report descriptor parser, using QEMU's keyboard/tablet descriptors and a numbered receiver descriptor. |
 | `tools/test_fat32_log.py` | Boots a FAT32 image and checks mount, `KERNEL.LOG`, nested dirs, multi-cluster append/copy. |
 | `tools/create_guest_disk.py` | Builds the sample guest kernels and copies them into `disk.img` under `/vms/`. |
 
 **The host-side tests import the real code**, not a copy of it: the modules they need
-(`edid.zig`, `ftdi_proto.zig`, `hidpp_proto.zig`) are free of kernel dependencies for
-exactly that reason. Run them with:
+(`edid.zig`, `ftdi_proto.zig`, `hidpp_proto.zig`, `hid_report.zig`) are free of kernel
+dependencies for exactly that reason. Run them with:
 
 ```bash
-zig run --dep edid  -Mroot=tools/test_edid.zig  -Medid=src/drivers/drm/edid.zig
-zig run --dep ftdi  -Mroot=tools/test_ftdi.zig  -Mftdi=src/drivers/usb/serial/ftdi_proto.zig
-zig run --dep hidpp -Mroot=tools/test_hidpp.zig -Mhidpp=src/drivers/hid/hidpp_proto.zig
+zig run --dep edid      -Mroot=tools/test_edid.zig      -Medid=src/drivers/drm/edid.zig
+zig run --dep ftdi      -Mroot=tools/test_ftdi.zig      -Mftdi=src/drivers/usb/serial/ftdi_proto.zig
+zig run --dep hidpp     -Mroot=tools/test_hidpp.zig     -Mhidpp=src/drivers/hid/hidpp_proto.zig
+zig run --dep hidreport -Mroot=tools/test_hid_report.zig -Mhidreport=src/drivers/hid/hid_report.zig
 ```
 
 ## Test programs & samples
@@ -493,6 +495,29 @@ accessors, and adds `pollHid()`.
   0x03 devices, `hid_input.zig` = usage-page → keycode/mouse mapping incl. Num/Caps/Scroll-Lock
   LED state. Legacy `hid.zig` still does boot-protocol report decoding and 2.4 GHz
   wireless-dongle profiles (`hid.isWirelessDongle` is called from `device.zig`).
+- **The report descriptor is the layout.** `hid_report.zig` is a port of the item parser,
+  report/field model and bit-stream helpers in `drivers/hid/hid-core.c`: main/global/local
+  items, push/pop, usage ranges, `snto32`, `__extract`/`__implement`, and the top-level
+  application collection that names a keyboard or a pointer. `hid_core.registerHidDevice()`
+  reads the descriptor with GET_DESCRIPTOR(0x22) — the length comes from the HID class
+  descriptor's `wDescriptorLength`, because a low-speed control endpoint can only carry about
+  112 bytes in one UHCI transfer — and parses it. A parsed descriptor puts a boot interface
+  into **report** protocol; only a descriptor that fails to parse leaves it in **boot**
+  protocol. `hid_input.handleDescriptorReport()` then walks the fields the way
+  `drivers/hid/hid-input.c` does: variable fields name one usage per bit range, array fields
+  name the usage that is currently down (the press is the usage that was not down in the
+  previous report), and the LED output field (Usage Page 0x08) is what SET_REPORT writes.
+  LEDs are never guessed from a report ID any more.
+- **HID registration happens after the hub pass.** `mod.zig:init()` initializes `hid_core`
+  only after the downstream hubs have been enumerated; registering first means a keyboard
+  behind a hub never gets a descriptor table (and therefore never leaves the boot protocol).
+  The class drivers are still probed from `usb.poll()`, but the HID *descriptor* read is a
+  boot-time control transfer.
+- **Composite receivers fan out only by report ID.** When keyboard and mouse share one
+  interrupt endpoint, `processRawDeviceReport()` copies a numbered report to the aliases whose
+  own descriptor declares that input report ID. The old "byte 0 is 1 or 2" guess is only the
+  fallback for an interface with no descriptor — a boot keyboard's modifier byte can be 1
+  (left Ctrl) or 2 (left Shift), which used to deliver phantom reports to the mouse half.
 - **Unified input layer:** `src/drivers/input.zig` gives one API over USB HID
   keyboards/mice (wired + wireless dongles) and legacy PS/2 (kbd IRQ1, mouse IRQ12),
   re-exporting the key constants, and calls `usb.poll()` itself.
