@@ -653,10 +653,17 @@ pub fn init() void {
             setControlContext(hub_dev);
             var hub_ports: [8]hub.HubPortInfo = undefined;
             var hub_num_ports: u8 = 0;
-            const num_conn = hub.configureHubPorts(hub_dev.addr, hub_dev.ep0_max_packet, cfn, hub_ports[0..], &hub_num_ports);
+            var hub_think_time: u8 = 0;
+            const num_conn = hub.configureHubPorts(hub_dev.addr, hub_dev.ep0_max_packet, cfn, hub_ports[0..], &hub_num_ports, &hub_think_time);
             if (ctrl.ctrl_type == .xhci and hub_dev.xhci_slot_id != 0 and ctrl.inst_idx < xhci_count) {
                 const x = &xhci_instances[ctrl.inst_idx];
-                if (!x.markHub(hub_dev.xhci_slot_idx, hub_num_ports, hub_dev.speed == .high and hub_dev.xhci_hub_multi_tt)) {
+                const hub_is_high_speed = hub_dev.speed == .high;
+                if (!x.markHub(
+                    hub_dev.xhci_slot_idx,
+                    hub_num_ports,
+                    hub_is_high_speed and hub_dev.xhci_hub_multi_tt,
+                    hub_think_time,
+                )) {
                     serial.serialWrite("[XHCI] Hub context update failed\n");
                 }
             }

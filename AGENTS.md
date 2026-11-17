@@ -902,19 +902,45 @@ against:
   status bit, or wake the card up), so only *prefetchable* BARs are probed
   for a framebuffer: a register file is not prefetchable, a framebuffer is.
 
-## Two traps that cost real time
+## Traps that cost real time
 
-- **The xHCI has two speed encodings, and they disagree.** The port status
-  register says "full speed" with the value 1 and "low speed" with 2
-  (`PORTSC_SPEED_FULL` / `PORTSC_SPEED_LOW` in Linux's
-  `drivers/usb/host/xhci.h`), while the *slot context* wants 2 for full
-  speed and 1 for low speed (`XHCI_SPEED_FULL` / `XHCI_SPEED_LOW` in the same
-  file). The driver wrote the port's value into the slot context, so every
-  full-speed device was programmed as a low-speed one: the devices behind a
-  hub never got an address (the controller aborts the command) and a
-  full-speed device on a root port enumerated as a generic one - a keyboard
-  that answers but is not a keyboard. `xhci.slotSpeedCode()` converts, and
-  the encoding is the reason the conversion exists at all.
+- **The xHCI slot context's speed is the port status register's encoding.**
+  Linux's `drivers/usb/host/xhci.h` says so in as many words ("Device speed -
+  values defined by PORTSC Device Speed field"): 1 = full speed, 2 = low
+  speed, 3 = high speed, 4 = super speed, 5 = super speed plus. Writing a
+  converted value programs a *different* device class into the slot, and the
+  xHC answers with a Parameter Error for the Address Device command. The
+  driver writes `port_status.speed` straight through; there is nothing to
+  convert.
+- **A hub's slot context is updated with Configure Endpoint, not Evaluate
+  Context.** Linux (`xhci_update_hub_device()` in `drivers/usb/host/xhci.c`)
+  distinguishes them by the controller revision: above 0.95 it sends
+  Configure Endpoint, 0.95 and older use Evaluate Context. Only the former
+  makes the xHC treat the slot as a hub, so with Evaluate Context every
+  Address Device command for a device below the hub comes back a Parameter
+  Error - and the hub's downstream ports look empty. The same command is
+  where the TT think time (`wHubCharacteristics` bits 6:5) and the port
+  count go. QEMU stores the context as it is given and never checks, so the
+  emulator enumerates hub children either way.
+- **The interrupt endpoint's Interval is an exponent, and the encoding
+  differs by speed.** A high-speed endpoint's `bInterval` is already
+  `2^(bInterval-1)` microframes, so the field is `bInterval - 1`
+  (`xhci_parse_exponent_interval` in `drivers/usb/host/xhci-mem.c`). A
+  full- or low-speed `bInterval` is a count of *frames* (milliseconds),
+  which is `log2(bInterval * 8)` microframes clamped to 3..10
+  (`xhci_parse_frame_interval`). Using the high-speed formula for both - or
+  adding a constant to both - makes a full-speed keyboard be polled every
+  16 ms or worse. QEMU ignores the field and delivers the pending report on
+  the next IN token, which is why the emulator test passes while the
+  keyboard on the bench needs every key held down.
+- **The Input Context has a leading context, the Output Context does not.**
+  In an Input Context, DCI N lives at `(N + 1) * ctx_size` because the Input
+  Control Context comes first; in the Output Device Context there is no such
+  header, so DCI N is at `N * ctx_size`. Copying an endpoint context out of
+  the output with the input's offset reads the *next* endpoint (or past the
+  end of a fresh slot), so the follow-up command carries a zeroed context
+  and the controller rejects it while the emulator quietly accepts it.
+
 - **A global declared `undefined` does not get the field defaults of its type.** The virtual
   Bluetooth controller lives in such a global, so its address and its flags were silently
   zero. Declare it `.{}` — and give the type defaultable fields (a function pointer needs a

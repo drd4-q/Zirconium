@@ -101,6 +101,7 @@ pub fn configureHubPorts(
     ctrl_transfer_fn: *const fn (addr: u8, maxp0: u8, setup: *const types.UsbSetupPacket, dout: ?[]const u8, din: ?[]u8) bool,
     out_ports: []HubPortInfo,
     out_num_ports: ?*u8,
+    out_think_time: ?*u8,
 ) usize {
     serial.serialWrite("[HUB] Querying Hub Descriptor for addr=");
     serial.serialWriteDec(addr);
@@ -115,6 +116,14 @@ pub fn configureHubPorts(
 
     const num_ports = hub_desc[2];
     if (out_num_ports) |out| out.* = num_ports;
+    // wHubCharacteristics bits 6:5 are the TT think time: 0 = 8 full-speed
+    // bit times, 1 = 16, 2 = 24, 3 = 32.  The xHCI wants the same three-bit
+    // value in the hub's slot context and uses it to space the split
+    // transactions for the devices below the hub (Linux's
+    // xhci_update_hub_device() reads it the same way).
+    const hub_chars: u16 = @as(u16, hub_desc[3]) | (@as(u16, hub_desc[4]) << 8);
+    const think_time: u8 = @intCast((hub_chars >> 5) & 0x3);
+    if (out_think_time) |out| out.* = think_time;
     const pwr_good_time: u32 = @as(u32, hub_desc[5]) * 2; // bPwrOn2PwrGood is in 2ms units
 
     serial.serialWrite("[HUB] Found ");

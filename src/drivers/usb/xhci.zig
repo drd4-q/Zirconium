@@ -96,6 +96,11 @@ inline fn readMmio8(addr: usize) u8 {
     return p.*;
 }
 
+inline fn readMmio16(addr: usize) u16 {
+    const p: *const volatile u16 = @ptrFromInt(addr);
+    return p.*;
+}
+
 fn spinDelayMs(ms: u32) void {
     if (timer.ticks > 0) {
         const needed: u64 = if (ms == 0) 0 else ((@as(u64, ms) + 9) / 10);
@@ -178,6 +183,11 @@ pub const XhciController = struct {
     num_ports: u8 = 0,
     max_slots: u8 = 0,
     csz_64: bool = false,
+    /// HCIVERSION (the xHCI spec revision, 0x0100 = 1.0).  A hub's slot
+    /// context is updated with a Configure Endpoint command from 1.0 on and
+    /// with an Evaluate Context command before that
+    /// (`xhci_update_hub_device()` in Linux's `drivers/usb/host/xhci.c`).
+    hci_version: u16 = 0,
     ports: [32]UsbPortStatus = undefined,
     slots: [16]XhciSlot = @splat(.{ .active = false, .slot_id = 0, .port_idx = 0, .speed_code = 0, .root_port = 0, .route_string = 0, .parent_slot_id = 0, .parent_port = 0, .dev_ctx_phys = 0, .input_ctx_phys = 0, .ep0_ring_phys = 0, .ep0_ring = undefined, .ep0_enqueue = 0, .ep0_cycle = 1, .intr_ring_phys = 0, .intr_ring = undefined, .intr_enqueue = 0, .intr_cycle = 1, .intr_dci = 0, .intr2_ring_phys = 0, .intr2_ring = undefined, .intr2_enqueue = 0, .intr2_cycle = 1, .intr2_dci = 0, .bulk_in_ring_phys = 0, .bulk_in_ring = undefined, .bulk_in_enqueue = 0, .bulk_in_cycle = 1, .bulk_in_dci = 0, .bulk_in_max_packet = 512, .bulk_out_ring_phys = 0, .bulk_out_ring = undefined, .bulk_out_enqueue = 0, .bulk_out_cycle = 1, .bulk_out_dci = 0, .bulk_out_max_packet = 512, .bulk_buf_phys = 0, .bulk_buf = undefined, .ctrl_buf_phys = 0, .ctrl_buf = undefined }),
 
@@ -286,8 +296,15 @@ pub const XhciController = struct {
 
     fn copyEndpointContextToInput(self: *XhciController, slot: *XhciSlot, dci: u8) void {
         const ctx_size: usize = if (self.csz_64) 64 else 32;
+        // The Input Context begins with the Input Control Context, so DCI N
+        // is at (N + 1) * ctx_size.  The Output Device Context has no such
+        // leading context: DCI N is at N * ctx_size there.  Reading the
+        // output with the input's offset copies the *next* endpoint's
+        // context - for EP0 that is a context that does not exist at all,
+        // so the Evaluate Context command carried a zeroed EP0 context and
+        // the controller rejected it on real hardware.
         const input_ep = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + (@as(usize, dci) + 1) * ctx_size));
-        const output_ep = @as([*]u32, @ptrFromInt(slot.dev_ctx_phys + (@as(usize, dci) + 1) * ctx_size));
+        const output_ep = @as([*]u32, @ptrFromInt(slot.dev_ctx_phys + @as(usize, dci) * ctx_size));
         const words: usize = ctx_size / 4;
         var i: usize = 0;
         while (i < words) : (i += 1) input_ep[i] = output_ep[i];
@@ -334,6 +351,7 @@ pub const XhciController = struct {
             return false;
         }
         self.op_regs = self.mmio_base + cap_len;
+        self.hci_version = readMmio16(self.mmio_base + 0x02);
 
         const hcs1 = readMmio32(self.mmio_base + 0x04);
         if (hcs1 == 0 or hcs1 == 0xFFFFFFFF) {
@@ -1050,25 +1068,6 @@ pub const XhciController = struct {
         );
     }
 
-    /// The slot context's speed field uses the xHCI's own encoding, and it
-    /// is *not* the one the port status register uses.
-    ///
-    /// The port status register says "full speed" with the value 1 and
-    /// "low speed" with 2 (`PORTSC_SPEED_FULL`/`PORTSC_SPEED_LOW` in Linux's
-    /// `drivers/usb/host/xhci.h`), while the slot context wants 2 for full
-    /// speed and 1 for low speed (`XHCI_SPEED_FULL`/`XHCI_SPEED_LOW` in the
-    /// same file).  Writing the port's value into the slot context programs
-    /// the wrong speed, and the controller then aborts the Address Device
-    /// command: the devices behind a hub never get an address, and a
-    /// full-speed device on a root port enumerates as a generic one.
-    pub fn slotSpeedCode(port_speed: u8) u8 {
-        return switch (port_speed) {
-            1 => 2, // full speed in the port status register
-            2 => 1, // low speed in the port status register
-            else => port_speed,
-        };
-    }
-
     pub fn addressDeviceWithRoute(
         self: *XhciController,
         slot_idx: usize,
@@ -1093,9 +1092,11 @@ pub const XhciController = struct {
         self.setInputContextFlags(slot, (1 << 0) | (1 << 1)); // A0 + A1
 
         const slot_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + ctx_size));
-        // The speed goes into the slot context in the slot context's own
-        // encoding, not the port status register's.
-        var slot_info = (@as(u32, slotSpeedCode(speed_code)) << 20) |
+        // The speed goes into the slot context in the port status register's
+        // own encoding: Linux's xhci.h defines the slot context's speed as
+        // "values defined by PORTSC Device Speed field" (1 = full speed,
+        // 2 = low speed, 3 = high speed, ...), so no conversion is involved.
+        var slot_info = (@as(u32, speed_code) << 20) |
             (slot.route_string & 0xFFFFF) | (1 << 27);
         if (parent_is_hs_hub and parent_multi_tt) slot_info |= 1 << 25; // DEV_MTT
         slot_ctx[0] = slot_info;
@@ -1127,14 +1128,35 @@ pub const XhciController = struct {
         return self.sendCommandRaw(@as(u64, slot.input_ctx_phys), 0, cmd_ctrl, null);
     }
 
-    pub fn markHub(self: *XhciController, slot_idx: usize, max_ports: u8, multi_tt: bool) bool {
+    /// Mark a slot as a hub, the way Linux's `xhci_update_hub_device()`
+    /// (`drivers/usb/host/xhci.c`) does after the hub descriptor is read.
+    ///
+    /// This has to be a **Configure Endpoint** command (Evaluate Context
+    /// before xHCI 1.0): Evaluate Context cannot make the controller treat
+    /// the slot as a hub, so the Address Device command for a device plugged
+    /// into one of its ports is rejected with a Parameter Error.  QEMU keeps
+    /// the context as it is told and never checks, which is why the emulator
+    /// always enumerated hub children and real hardware did not.
+    ///
+    /// The slot context also carries the hub's TT think time - Linux's
+    /// xhci_update_hub_device() puts it there from the hub descriptor's
+    /// wHubCharacteristics - and the TT think time is what the controller
+    /// uses to schedule the split transactions for the full- and low-speed
+    /// devices below the hub.
+    pub fn markHub(
+        self: *XhciController,
+        slot_idx: usize,
+        max_ports: u8,
+        multi_tt: bool,
+        tt_think_time: u8,
+    ) bool {
         if (slot_idx >= self.slots.len) return false;
         const slot = &self.slots[slot_idx];
         if (!slot.active) return false;
 
         const ctx_size: usize = if (self.csz_64) 64 else 32;
         self.copySlotContextToInput(slot);
-        self.setInputContextFlags(slot, 1 << 0); // A0
+        self.setInputContextFlags(slot, 1 << 0); // A0: the slot context only
         const slot_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + ctx_size));
         slot_ctx[0] |= 1 << 26; // Hub
         if (multi_tt) {
@@ -1143,8 +1165,26 @@ pub const XhciController = struct {
             slot_ctx[0] &= ~(@as(u32, 1) << 25);
         }
         slot_ctx[1] = (slot_ctx[1] & 0x00FFFFFF) | (@as(u32, max_ports) << 24);
+        // TT think time: only a high-speed hub has one (xHCI 1.0, 6.2.2.1);
+        // the encoding is the hub descriptor's own (0 = 8 FS bit times).
+        const ttt: u32 = if (slot.speed_code == 3)
+            (@as(u32, tt_think_time & 0x3) << 16)
+        else
+            0;
+        slot_ctx[2] = (slot_ctx[2] & ~(@as(u32, 0x3) << 16)) | ttt;
+        // Linux zeroes the device state too: the input context carries no
+        // address, that field is the output context's.
+        slot_ctx[3] = 0;
 
-        const cmd_ctrl = (TRB_TYPE_EVAL_CONTEXT << 10) |
+        // Linux draws the line at 0.95, not 1.0: the early 0.96 controllers
+        // (the NEC uPD720200, for one) already implement Configure Endpoint,
+        // and only 0.95 needs Evaluate Context.  See the `hci_version > 0x95`
+        // test in xhci_update_hub_device().
+        const cmd_type: u32 = if (self.hci_version > 0x0095)
+            TRB_TYPE_CONFIG_ENDPOINT
+        else
+            TRB_TYPE_EVAL_CONTEXT;
+        const cmd_ctrl = (cmd_type << 10) |
             (@as(u32, slot.slot_id) << 24) | @as(u32, self.cmd_cycle);
         return self.sendCommandRaw(@as(u64, slot.input_ctx_phys), 0, cmd_ctrl, null);
     }
@@ -1372,10 +1412,29 @@ pub const XhciController = struct {
 
         const ep_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + (@as(usize, dci) + 1) * ctx_size));
 
-        var p_exp: u32 = 0;
-        const target_iv: u32 = if (interval > 0) interval else 10;
-        while ((@as(u32, 1) << @as(u5, @intCast(p_exp))) < target_iv and p_exp < 8) : (p_exp += 1) {}
-        const interval_val: u32 = @min(p_exp + 3, 15);
+        // The Interval field is an exponent, and the two encodings are not
+        // the same.  A high-speed interrupt endpoint's bInterval is already
+        // 2^(bInterval-1) microframes, so the exponent is bInterval - 1
+        // (Linux: xhci_parse_exponent_interval in xhci-mem.c).  A full- and
+        // low-speed bInterval is a number of *milliseconds* (frames), which
+        // becomes log2(bInterval * 8) microframes, clamped to 3..10 (Linux:
+        // xhci_parse_frame_interval).  Adding three for both - which is what
+        // this used to do - turns a full-speed keyboard's bInterval=10 into
+        // 2^(4+3) * 125us = 16 ms instead of 2^6 * 125us = 8 ms, and a
+        // low-speed device's bInterval is clamped differently again.  A key
+        // that is pressed and released between two polls is reported as
+        // never having been down, so the keyboard looks dead while it
+        // enumerates perfectly.  QEMU's usb-kbd delivers the pending report
+        // on the next IN token whatever the interval says, which is why the
+        // emulator never showed this.
+        const interval_val: u32 = if (slot.speed_code >= 3)
+            @min(if (interval > 0) @as(u32, interval) - 1 else 0, 15)
+        else blk: {
+            const uframes: u32 = @as(u32, interval) * 8;
+            var exp: u32 = 0;
+            while (exp < 10 and (@as(u32, 1) << @as(u5, @intCast(exp + 1))) <= uframes) : (exp += 1) {}
+            break :blk @min(@max(exp, 3), 10);
+        };
 
         const max_p: u32 = @min(@max(max_packet, 8), 64);
         ep_ctx[0] = interval_val << 16;
