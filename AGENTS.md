@@ -1117,10 +1117,14 @@ A machine's RAM is one contiguous block of host memory, so the two differ by a c
 the hardware does, reading each level out of the guest's RAM, and short-circuits on a huge
 page. It returns the *host* physical address, which is what a CPU emulator needs.
 
-- Each machine's RAM is allocated from the PMM according to its budget. The hypervisor keeps
-  **a quarter of the free memory for itself** (`total_ram_bytes` is three quarters of the
-  pool): the guests' display buffers, the kernel heap and the shadow buffer all come out of
-  the same pool, and handing every free page to a guest would leave nothing for them.
+- Each machine's RAM is allocated from the PMM according to its budget. The pool is
+  **sized to what the configured machines ask for** — their profiles' `ram_mb`, or an
+  explicit `ram_mb` in `config/kernel.json` — capped at three quarters of the free memory
+  so the guests' display buffers, the kernel heap and the shadow buffer always have room.
+  It used to be three quarters of the free memory unconditionally, which on a 32 GB host
+  handed 24 GB to two guests that had asked for 1.5 GB. A configuration that names no
+  machines still gets the whole fraction, because the operator is going to add machines at
+  runtime and the pool cannot grow after it has been reserved.
 - The guest's RAM is mapped into the guest driver's address space (`GUEST_RAM_VADDR`), so
   the driver can build page tables in it — which is exactly what a guest kernel does at boot.
   The mapping's offset *is* the guest physical address, so the driver can compute a guest

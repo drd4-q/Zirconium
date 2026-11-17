@@ -58,11 +58,34 @@ var suspend_repartition: bool = false;
 /// A counter that makes each machine's identity differ from the others'.
 var machine_serial: u64 = 0;
 
+/// The memory the machines in the configuration ask for, in bytes.
+///
+/// A profile carries the amount of RAM its guest expects - a Linux 2.4 guest
+/// wants 32 MB, a modern x86_64 one a gigabyte - and a machine's entry in
+/// `config/kernel.json` may override it.  Summing the asks is what sizes the
+/// guests' RAM pool: the host keeps the rest of its memory, which is what an
+/// operator who boots a hypervisor on a 32 GB machine expects to see.
+fn configuredDemand() usize {
+    const config = @import("config");
+    var asked: usize = 0;
+    for (config.machines) |spec| {
+        const p = if (std.mem.eql(u8, spec.profile, "auto"))
+            profile.findProfile("linux-x86_64") orelse continue
+        else
+            profile.findProfile(spec.profile) orelse continue;
+        const mb: u32 = if (spec.ram_mb != 0) spec.ram_mb else p.ram_mb;
+        asked += @as(usize, mb) * 1024 * 1024;
+    }
+    return asked;
+}
+
 /// Bring the hypervisor up.
 ///
-/// The host's own resources are the budget: every core the host has and all
-/// the memory the physical memory manager can give out are available to be
-/// divided between the guests.
+/// The host's own resources are the budget: every core the host has, and as
+/// much memory as the machines in the configuration ask for.  A guest that
+/// needs more gets it by asking for more - in its profile or in its entry in
+/// `config/kernel.json` - not by taking whatever the host happens to have
+/// free.
 pub fn init() void {
     if (initialized) return;
     initialized = true;
@@ -72,12 +95,23 @@ pub fn init() void {
     const cpu_count = @import("../arch/smp.zig").cpuCount();
     res.setTotalCores(@intCast(@min(cpu_count, @as(usize, resources.MAX_CORES))));
 
-    // Memory the host can hand out.  Not all of it: the hypervisor needs
-    // memory of its own - the guests' display buffers, the kernel heap, the
-    // shadow buffer - and handing every free page to a guest would leave
-    // nothing for them.
-    const free_pages = @import("../kernel/pmm.zig").free_pages;
-    res.total_ram_bytes = (free_pages * 4096) * 3 / 4;
+    // Memory the host can hand out.  The pool is sized to what the machines
+    // in the configuration actually ask for, not to a fraction of the
+    // machine's RAM: a 32 GB host whose two guests asked for a gigabyte and
+    // a half must not hand 24 GB to them, or the kernel looks as if it had
+    // eaten three quarters of the memory.  Each profile carries the amount
+    // of RAM its guest expects, and a machine may override it.
+    //
+    // The three-quarter cap stays: a configuration that asks for more than
+    // the host can spare gets what is left, so the guests' display buffers,
+    // the shadow buffer and the kernel heap still have room of their own.
+    const pmm = @import("../kernel/pmm.zig");
+    const host_cap = (pmm.free_pages * 4096) * 3 / 4;
+    const demand = configuredDemand();
+    // A configuration that names no machines keeps the whole fraction: the
+    // operator is going to add machines at runtime, and the pool cannot be
+    // grown after it has been reserved.
+    res.total_ram_bytes = if (demand != 0) @min(demand, host_cap) else host_cap;
 
     // The guests' RAM is one contiguous block, carved up per machine.  A
     // guest's physical memory has to be contiguous - guest physical address X
@@ -88,10 +122,9 @@ pub fn init() void {
     // The memory of a real machine is not one block: the firmware reserves
     // holes for the PCI address space and for the display adapters, so the
     // largest run of free pages is a fraction of the memory there is.  A
-    // request for three quarters of it can therefore fail even when there is
+    // request for the whole pool can therefore fail even when there is
     // plenty of memory - so the size is halved until it fits, and the
     // guests get what the machine can really hand out.
-    const pmm = @import("../kernel/pmm.zig");
     const wanted_pool_pages = res.total_ram_bytes / 4096;
     var pool_pages = wanted_pool_pages;
     const min_pool_pages: usize = (16 * 1024 * 1024) / 4096;
@@ -122,7 +155,9 @@ pub fn init() void {
     serial.serialWriteDec(cpu_count);
     serial.serialWrite(" cores, ");
     serial.serialWriteDec(res.total_ram_bytes / (1024 * 1024));
-    serial.serialWrite(" MB of RAM available\n");
+    serial.serialWrite(" MB of guest RAM, ");
+    serial.serialWriteDec((pmm.free_pages * 4096) / (1024 * 1024));
+    serial.serialWrite(" MB free for the host\n");
 
     // The seed the machine identities are derived from.  It has to be
     // different on every boot, or a guest could recognise the machine it was
@@ -607,9 +642,9 @@ pub fn printStatus(
     writeDecFn(MAX_MACHINES);
     writeFn("\n  Policy:   ");
     writeFn(res.policy.name());
-    writeFn("\n  Host:     ");
+    writeFn("\n  Cores:    ");
     writeDecFn(res.total_cores);
-    writeFn(" cores, ");
+    writeFn(" host cores\n  Guest RAM: ");
     writeDecFn(res.total_ram_bytes / (1024 * 1024));
     writeFn(" MB\n\n");
 
