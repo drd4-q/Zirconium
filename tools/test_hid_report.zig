@@ -164,6 +164,8 @@ fn testQemuKeyboard() void {
     checkEq(table.report_count, 2, "one input and one output report");
     checkEq(table.findReport(.input, 0).?.len(), 8, "the input report is 8 bytes");
     checkEq(table.findReport(.output, 0).?.len(), 1, "the output report is 1 byte");
+    checkEq(table.maxReportLen(.input), 8, "an unnumbered input report is 8 bytes on the wire");
+    checkEq(table.maxReportLen(.output), 1, "an unnumbered output report is 1 byte on the wire");
 
     // The modifier field: eight one-bit variable usages at bit zero.
     const modifiers = &table.fields[0];
@@ -243,6 +245,7 @@ fn testNumberedComposite() void {
     check(!table.hasInputReport(3), "report ID 3 is not an input report");
     checkEq(table.findReport(.input, 1).?.len(), 8, "keyboard report length");
     checkEq(table.findReport(.input, 2).?.len(), 4, "mouse report length");
+    checkEq(table.maxReportLen(.input), 9, "the numbered keyboard report is 9 bytes on the wire");
 
     // The mouse report declares three relative axes with logical -127..127.
     const wheel_field = &table.fields[3];

@@ -10,6 +10,11 @@ const hid_report = @import("../hid/hid_report.zig");
 /// can produce a report for every held/released key.
 pub var debug: bool = false;
 
+/// One line, ever: the first key the descriptor decoder turned into a
+/// character.  It separates "the interrupt transfer never completed" from
+/// "the key was decoded and the shell did not see it".
+var first_key_logged: bool = false;
+
 // USB HID Input Mapping (corresponds to Linux drivers/hid/hid-input.c)
 // Translates raw HID reports (Usage Page 0x07 Keyboard, Mouse REL_X/REL_Y)
 // into system keyboard keycodes and mouse movement.
@@ -168,6 +173,14 @@ pub fn handleKeyboardReport(
                 }
             } else if (hidUsageToAscii(key, shift, ctrl, caps_lock_state, num_lock_state)) |ch| {
                 keyboard.pushKey(ch);
+                if (!first_key_logged) {
+                    first_key_logged = true;
+                    serial.serialWrite("[HID] first boot-protocol key usage=0x");
+                    serial.serialWriteHex(key);
+                    serial.serialWrite(" char=0x");
+                    serial.serialWriteHex(ch);
+                    serial.serialWrite("\n");
+                }
                 if (debug) {
                     serial.serialWrite("[USB-HID] key=");
                     serial.serialWriteHex(ch);
@@ -383,6 +396,14 @@ pub fn handleDescriptorReport(
                 else => {
                     if (hidUsageToAscii(@intCast(key), shift, ctrl, caps_lock_state, num_lock_state)) |ch| {
                         keyboard.pushKey(ch);
+                        if (!first_key_logged) {
+                            first_key_logged = true;
+                            serial.serialWrite("[HID] first decoded key usage=0x");
+                            serial.serialWriteHex(key);
+                            serial.serialWrite(" char=0x");
+                            serial.serialWriteHex(ch);
+                            serial.serialWrite("\n");
+                        }
                         if (debug) {
                             serial.serialWrite("[USB-HID] key=");
                             serial.serialWriteHex(ch);

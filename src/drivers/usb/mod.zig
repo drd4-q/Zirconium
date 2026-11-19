@@ -878,7 +878,7 @@ fn configureXhciDeviceEndpoints(x: *xhci.XhciController, dev: *device.UsbDevice)
                         slot_idx,
                         queue_dci,
                         @intFromPtr(&dev.report_buf),
-                        @intCast(@min(@max(ep.max_packet_size, 8), 64)),
+                        @intCast(hidTransferLen(dev)),
                     );
                     x.logEndpointContext(slot_idx, queue_dci);
                     serial.serialWrite("[XHCI] HID endpoint queued id=");
@@ -943,6 +943,28 @@ fn processHidReport(dev: *device.UsbDevice, len: usize) void {
         (dev.report_buf[0] == 0x10 or dev.report_buf[0] == 0x11))
     {
         if (hidpp.handleReport(dev, dev.report_buf[0..len])) return;
+    }
+
+    if (dev.dev_type == .keyboard and !usb_keyboard_report_logged) {
+        // One line, ever: the first interrupt report the keyboard half
+        // delivered, byte for byte.  If no key follows but this line is
+        // here, the transfer works and the report layout is the problem;
+        // if the line is absent, the endpoint never completed a transfer.
+        serial.serialWrite("[USB-HID] First keyboard report id=");
+        serial.serialWriteDec(dev.id);
+        serial.serialWrite(" addr=");
+        serial.serialWriteDec(dev.addr);
+        serial.serialWrite(" len=");
+        serial.serialWriteDec(len);
+        serial.serialWrite(" data=");
+        const dump_len = @min(len, 16);
+        var kb_trace_i: usize = 0;
+        while (kb_trace_i < dump_len) : (kb_trace_i += 1) {
+            serial.serialWriteHex(dev.report_buf[kb_trace_i]);
+            serial.serialWrite(" ");
+        }
+        serial.serialWrite("\n");
+        usb_keyboard_report_logged = true;
     }
 
     if (dev.dev_type == .mouse and !usb_mouse_report_logged) {
@@ -1016,9 +1038,25 @@ var current_poll_ctrl_idx: u8 = 0;
 var xhci_hid_event_logged: bool = false;
 var xhci_mouse_event_logged: bool = false;
 var usb_mouse_report_logged: bool = false;
+var usb_keyboard_report_logged: bool = false;
+var xhci_unmatched_logged: u8 = 0;
+
+/// Bytes one HID interrupt transfer should ask for.
+///
+/// The report descriptor is the authority, exactly as `hid->rsize` is in
+/// `usbhid_start()`.  The endpoint's max packet is only the fallback before
+/// the descriptor has been read: a full-speed endpoint may advertise 8 bytes
+/// while a numbered keyboard report is 9 (report ID + modifiers + reserved +
+/// six keys), and asking for 8 leaves the last byte to be read as the start
+/// of the next report.  The buffers are 64 bytes, which bounds the request.
+fn hidTransferLen(d: *device.UsbDevice) u32 {
+    const reported: u32 = if (hid_core.inputReportLen(d)) |len| @intCast(len) else 0;
+    return @min(@max(@max(@as(u32, d.ep_max_packet), reported), 8), 64);
+}
 
 fn onXhciTransfer(slot_id: u8, dci: u8, rem_bytes: u32, comp_code: u32) void {
     if (current_poll_xhci) |x| {
+        var matched = false;
         var d_k: usize = 0;
         while (d_k < usb_device_count) : (d_k += 1) {
             var d = &usb_devices[d_k];
@@ -1055,19 +1093,36 @@ fn onXhciTransfer(slot_id: u8, dci: u8, rem_bytes: u32, comp_code: u32) void {
                     xhci_hid_event_logged = true;
                 }
                 if (comp_code == 1 or comp_code == 13) {
-                    const max_p = @min(@max(d.ep_max_packet, 8), 64);
+                    const max_p = hidTransferLen(d);
                     const actual_len: usize = if (max_p >= rem_bytes) @as(usize, @intCast(max_p - rem_bytes)) else max_p;
                     if (actual_len > 0) {
                         d.packet_count +%= 1;
                         processHidReport(d, actual_len);
                     }
-                    x.queueInterruptTransfer(d.xhci_slot_idx, dci, @intFromPtr(&d.report_buf), @min(@max(d.ep_max_packet, 8), 64));
+                    x.queueInterruptTransfer(d.xhci_slot_idx, dci, @intFromPtr(&d.report_buf), @intCast(max_p));
                 } else {
                     _ = usbClearHalt(d, d.ep_in, true);
-                    x.queueInterruptTransfer(d.xhci_slot_idx, dci, @intFromPtr(&d.report_buf), @min(@max(d.ep_max_packet, 8), 64));
+                    x.queueInterruptTransfer(d.xhci_slot_idx, dci, @intFromPtr(&d.report_buf), @intCast(hidTransferLen(d)));
                 }
+                matched = true;
                 break;
             }
+        }
+        if (!matched and xhci_unmatched_logged < 8 and (comp_code == 1 or comp_code == 13)) {
+            // The controller completed a transfer that belongs to no device
+            // in our table.  That is what a slot/endpoint bookkeeping bug
+            // looks like from the outside: the event arrives, and nobody
+            // consumes it.
+            xhci_unmatched_logged += 1;
+            serial.serialWrite("[XHCI] transfer event for no device slot=");
+            serial.serialWriteDec(slot_id);
+            serial.serialWrite(" dci=");
+            serial.serialWriteDec(dci);
+            serial.serialWrite(" code=");
+            serial.serialWriteDec(comp_code);
+            serial.serialWrite(" residual=");
+            serial.serialWriteDec(rem_bytes);
+            serial.serialWrite("\n");
         }
     }
 }

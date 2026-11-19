@@ -209,6 +209,19 @@ pub fn acceptsReportId(dev: *device.UsbDevice, report_id: u8) bool {
     return inst.table.hasInputReport(report_id);
 }
 
+/// Length of one input report for this interface, including the report ID
+/// byte when the descriptor numbers its reports.  `usbhid_start()` submits
+/// its interrupt URB with `hid->rsize`, and so must an xHCI transfer: a
+/// transfer sized to the endpoint's max packet truncates a report that is
+/// one byte longer (a numbered 8-byte keyboard report is 9 bytes on the
+/// wire), and the tail of the report is then read as the start of the next.
+pub fn inputReportLen(dev: *device.UsbDevice) ?usize {
+    const inst = findForDevice(dev) orelse return null;
+    if (!inst.has_table) return null;
+    const len = inst.table.maxReportLen(.input);
+    return if (len == 0) null else len;
+}
+
 /// Read and parse the report descriptor, then select the protocol the
 /// descriptor needs.  This is `usbhid_parse()` followed by the SET_PROTOCOL
 /// half of `usbhid_start()`: report protocol when the descriptor is
@@ -285,6 +298,12 @@ fn loadReportDescriptor(inst: *HidDevice, dev: *device.UsbDevice) void {
     serial.serialWriteDec(table.field_count);
     serial.serialWrite(" reports=");
     serial.serialWriteDec(table.report_count);
+    serial.serialWrite(" in_len=");
+    serial.serialWriteDec(table.maxReportLen(.input));
+    serial.serialWrite(" out_len=");
+    serial.serialWriteDec(table.maxReportLen(.output));
+    serial.serialWrite(" mps=");
+    serial.serialWriteDec(dev.ep_max_packet);
     serial.serialWrite("\n");
 }
 

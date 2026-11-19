@@ -236,6 +236,22 @@ pub const Table = struct {
         return false;
     }
 
+    /// Length of the longest report of `report_type`, in bytes, including the
+    /// report ID byte when the reports are numbered.  This is
+    /// `hid->rsize` in `usbhid_start()`: the interrupt URB must ask for
+    /// exactly one report, because a longer request makes the controller
+    /// keep the transfer open for the next report and a shorter one leaves
+    /// the tail of the report in the device.
+    pub fn maxReportLen(self: *const Table, report_type: ReportType) usize {
+        var max_len: usize = 0;
+        for (self.reports[0..@as(usize, self.report_count)]) |report| {
+            if (report.report_type != report_type) continue;
+            max_len = @max(max_len, report.len());
+        }
+        if (max_len != 0 and self.numbered(report_type)) max_len += 1;
+        return max_len;
+    }
+
     pub fn kind(self: *const Table) ?Kind {
         // The usages in the fields decide, not only the application
         // collection: a composite receiver has one keyboard and one mouse

@@ -218,6 +218,15 @@ pub const XhciController = struct {
     scratchpad_pages: [MAX_SCRATCHPADS]usize = @splat(0),
     scratchpad_count: usize = 0,
 
+    // Bring-up diagnostics.  A real xHCI can enumerate a keyboard, configure
+    // its interrupt endpoint and then never deliver a report; the only way to
+    // tell "the event never arrives" from "the report arrived and the HID
+    // layer dropped it" is a log of what the event ring actually contained.
+    diag_polls: u32 = 0,
+    diag_transfer_events: u32 = 0,
+    diag_logged: [16]u64 = @splat(0),
+    diag_port_change_logged: bool = false,
+
     dma_pool: dma.UsbDmaPool = dma.UsbDmaPool.init(),
 
     fn queuePendingEvent(self: *XhciController, event: XhciTrb) void {
@@ -578,13 +587,20 @@ pub const XhciController = struct {
         self.event_ring = @ptrCast(@alignCast(@as([*]XhciTrb, @ptrFromInt(event_page))));
         self.event_dequeue = 0;
         self.event_cycle = 1;
-        // Event Ring Segments must terminate in a Link TRB.  The software
-        // dequeue pointer wraps at the same boundary and maintains the cycle.
-        self.event_ring[255] = XhciTrb{
-            .parameter = @as(u64, self.event_ring_phys),
-            .status = 0,
-            .control = (TRB_TYPE_LINK << 10) | (1 << 1),
-        };
+        // An Event Ring segment has **no Link TRB**.  It is a plain array of
+        // 256 TRBs (ERSTSZ = 1, segment size = 256 below): when the xHC
+        // reaches the end it wraps to the start of the segment as described
+        // by the ERST, not by following a Link TRB.  Linux says the same in
+        // xhci_alloc_segments_for_ring() (`drivers/usb/host/xhci-mem.c`):
+        // only the command/transfer rings convert their last TRB to a Link
+        // TRB, the event ring is left alone.  `dma.allocPage()` already
+        // zeroed the page, which is the initial cycle state the HC expects.
+        //
+        // This used to write a Link TRB at index 255 and wrap the software
+        // dequeue at 255, so the event the HC legitimately wrote into slot
+        // 255 was skipped and the cycle state flipped one TRB too early -
+        // after which *every* following event was invisible.  That is a
+        // silently dead interrupt endpoint.
 
         const erst_page = dma.allocPage() orelse return false;
         self.erst_phys = erst_page;
@@ -867,11 +883,12 @@ pub const XhciController = struct {
     }
 
     fn advanceEvent(self: *XhciController) void {
-        // Index 255 is the Event Ring Link TRB, not an event slot.  Wrap to
-        // index 0 and toggle the software cycle exactly as the HC follows
-        // that Link TRB.
+        // All 256 slots of the segment carry events: the Event Ring has no
+        // Link TRB, so the wrap is at the segment size from the ERST, not one
+        // before it.  Wrapping at 255 skipped the event in the last slot and
+        // toggled the cycle state a TRB early.
         self.event_dequeue += 1;
-        if (self.event_dequeue == 255) {
+        if (self.event_dequeue >= 256) {
             self.event_dequeue = 0;
             self.event_cycle ^= 1;
         }
@@ -1212,6 +1229,7 @@ pub const XhciController = struct {
         // control/slot offset instead).
         const output_ep = @as([*]u32, @ptrFromInt(slot.dev_ctx_phys + @as(usize, dci) * ctx_size));
         const ep_state = output_ep[0] & 0x7;
+        const ep_interval = (output_ep[0] >> 16) & 0xFF;
         const ep_type = (output_ep[1] >> 3) & 0x7;
         const max_packet = (output_ep[1] >> 16) & 0xFFFF;
         const deq = @as(u64, output_ep[2]) | (@as(u64, output_ep[3]) << 32);
@@ -1227,6 +1245,8 @@ pub const XhciController = struct {
         serial.serialWriteDec(ep_type);
         serial.serialWrite(" mps=");
         serial.serialWriteDec(max_packet);
+        serial.serialWrite(" interval=");
+        serial.serialWriteDec(ep_interval);
         serial.serialWrite(" entries=");
         serial.serialWriteDec(entries);
         serial.serialWrite(" deq=0x");
@@ -1437,6 +1457,12 @@ pub const XhciController = struct {
         };
 
         const max_p: u32 = @min(@max(max_packet, 8), 64);
+        // Endpoint Context dword 0: Endpoint State (2:0, output only),
+        // Mult (9:8), Max Primary Streams (14:10), LSA (15), Interval
+        // (23:16), Max ESIT Payload Hi (31:24, only with LEC).  Linux's
+        // xhci.h spells the interval out as
+        // `EP_INTERVAL(p) (((p) & 0xff) << 16)`, and `xhci_endpoint_init()`
+        // writes it with a zero Mult and Max Burst Size.
         ep_ctx[0] = interval_val << 16;
         // Interrupt IN is endpoint type 7 in the xHCI context encoding.
         ep_ctx[1] = (7 << 3) | (3 << 1) | (max_p << 16);
@@ -1805,7 +1831,45 @@ pub const XhciController = struct {
         return @intCast((status >> 10) & 0x0F);
     }
 
+    /// Log what the controller and the event ring look like right now.
+    ///
+    /// Called on power-of-two poll counts only: a few dozen lines over a long
+    /// uptime, enough to see whether polling is alive and whether the
+    /// controller has halted, without drowning the serial log.
+    fn diagLogState(self: *XhciController) void {
+        const usbsts = readMmio32(self.op_regs + 0x04);
+        const iman = readMmio32(self.rt_regs + 0x20);
+        serial.serialWrite("[XHCI] poll ctrl=");
+        serial.serialWriteDec(self.id);
+        serial.serialWrite(" n=");
+        serial.serialWriteDec(self.diag_polls);
+        serial.serialWrite(" events=");
+        serial.serialWriteDec(self.diag_transfer_events);
+        serial.serialWrite(" usbsts=0x");
+        serial.serialWriteHex(usbsts);
+        serial.serialWrite(" iman=0x");
+        serial.serialWriteHex(iman);
+        serial.serialWrite(" deq=");
+        serial.serialWriteDec(self.event_dequeue);
+        serial.serialWrite(" cycle=");
+        serial.serialWriteDec(self.event_cycle);
+        serial.serialWrite("\n");
+        if ((usbsts & 1) != 0) {
+            serial.serialWrite("[XHCI] controller is HALTED (USBSTS.HCH)\n");
+        }
+        var s_idx: usize = 0;
+        while (s_idx < self.slots.len) : (s_idx += 1) {
+            const slot = &self.slots[s_idx];
+            if (!slot.active) continue;
+            if (slot.intr_dci != 0) self.logEndpointContext(s_idx, slot.intr_dci);
+            if (slot.intr2_dci != 0) self.logEndpointContext(s_idx, slot.intr2_dci);
+        }
+    }
+
     pub fn pollEvents(self: *XhciController, on_transfer: *const fn (slot_id: u8, dci: u8, rem_bytes: u32, comp_code: u32) void) void {
+        self.diag_polls +%= 1;
+        if ((self.diag_polls & (self.diag_polls -% 1)) == 0) self.diagLogState();
+
         // Transfer events may have been deferred by a synchronous command,
         // control, or bulk transfer.  Dispatch those before reading the
         // hardware event ring so HID reports are not stranded in the queue.
@@ -1835,7 +1899,33 @@ pub const XhciController = struct {
             self.advanceEvent();
 
             if (ev_type == TRB_TYPE_TRANSFER_EVENT) {
+                self.diag_transfer_events +%= 1;
+                // One line per (slot, endpoint) ever.  A missing line for a
+                // configured interrupt endpoint means the hardware never
+                // completed the transfer - not that the HID decoder is wrong.
+                if (ev_slot < self.diag_logged.len and dci < 64) {
+                    const bit = @as(u64, 1) << @as(u6, @intCast(dci));
+                    if ((self.diag_logged[ev_slot] & bit) == 0) {
+                        self.diag_logged[ev_slot] |= bit;
+                        serial.serialWrite("[XHCI] transfer event slot=");
+                        serial.serialWriteDec(ev_slot);
+                        serial.serialWrite(" dci=");
+                        serial.serialWriteDec(dci);
+                        serial.serialWrite(" code=");
+                        serial.serialWriteDec(comp_code);
+                        serial.serialWrite(" residual=");
+                        serial.serialWriteDec(rem_bytes);
+                        serial.serialWrite("\n");
+                    }
+                }
                 on_transfer(ev_slot, dci, rem_bytes, comp_code);
+            } else if (ev_type == TRB_TYPE_PORT_STATUS_CHANGE) {
+                if (!self.diag_port_change_logged) {
+                    serial.serialWrite("[XHCI] port status change event port=");
+                    serial.serialWriteDec((event.parameter >> 24) & 0xFF);
+                    serial.serialWrite("\n");
+                    self.diag_port_change_logged = true;
+                }
             }
         }
     }
