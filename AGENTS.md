@@ -508,6 +508,16 @@ accessors, and adds `pollHid()`.
   name the usage that is currently down (the press is the usage that was not down in the
   previous report), and the LED output field (Usage Page 0x08) is what SET_REPORT writes.
   LEDs are never guessed from a report ID any more.
+- **A descriptor that does not decode the device falls back to the boot protocol.**
+  The descriptor method is tried first, but a keyboard can ignore
+  SET_PROTOCOL(REPORT), number its reports differently, or deliver a report whose ID its
+  descriptor does not name. `hid_core` tracks that per interface and, after three rejected
+  reports, four changed keyboard reports that decoded to no key, or 30 s with no report at
+  all on a boot-subclass keyboard, sends SET_PROTOCOL(BOOT) + SET_IDLE and decodes with
+  `hid_generic.processReport` — the path commit 7247d67 used for every interface. The
+  parsed table is kept for diagnostics but no longer decodes; `[HID] boot protocol fallback
+  active id=… iface=… reason=… set_protocol=…` names the switch and its cause in
+  `KERNEL.LOG`, and `[HID] decode path … method=…` records which path an interface is on.
 - **HID registration happens after the hub pass.** `mod.zig:init()` initializes `hid_core`
   only after the downstream hubs have been enumerated; registering first means a keyboard
   behind a hub never gets a descriptor table (and therefore never leaves the boot protocol).
