@@ -965,6 +965,21 @@ against:
   the output with the input's offset reads the *next* endpoint (or past the
   end of a fresh slot), so the follow-up command carries a zeroed context
   and the controller rejects it while the emulator quietly accepts it.
+- **The Event Ring is a plain segment, not a Link-TRB ring.** With
+  `ERSTSZ = 1` and a 256-TRB segment, the xHC writes the last slot and wraps
+  to the start; it does not follow a Link TRB (`xhci_alloc_segments_for_ring`
+  in `drivers/usb/host/xhci-mem.c` converts the last TRB only for the
+  command and transfer rings). The driver used to put a Link TRB at index
+  255 and wrap there, so the event in the last slot was never read - and if
+  that was a keyboard's first interrupt report, the transfer was never
+  re-armed and the keyboard stayed dead with a perfectly configured endpoint.
+- **An interrupt IN transfer asks for one report, not one max packet.**
+  Linux submits `hid->urbin` with `hid->rsize` (`usbhid_start()` in
+  `drivers/hid/usbhid/hid-core.c`). A numbered eight-byte keyboard report is
+  nine bytes on the wire; asking for the endpoint's eight-byte max packet
+  leaves the tail in the device, and the next transfer starts one byte late.
+  The HID report descriptor's longest input report (including the report ID)
+  is the size.
 
 - **A global declared `undefined` does not get the field defaults of its type.** The virtual
   Bluetooth controller lives in such a global, so its address and its flags were silently
