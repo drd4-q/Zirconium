@@ -10,7 +10,6 @@ const vfs = @import("../fs/vfs.zig");
 // deliberate for the first distribution-friendly bring-up phase.
 const BUFFER_SIZE: usize = 64 * 1024;
 const FLUSH_THRESHOLD: usize = 16 * 1024;
-const MAX_LOG_SIZE: u64 = 768 * 1024 * 1024;
 
 var buffer: [BUFFER_SIZE]u8 = undefined;
 var buffered: usize = 0;
@@ -71,26 +70,16 @@ pub fn init(mount_point: []const u8) bool {
     @memcpy(log_path[0..pos], file_path[0..pos]);
     log_path_len = pos;
 
-    const handle = vfs.open(file_path[0..pos], .{ .read = true, .write = true, .create = true, .append = true }) orelse {
+    // Every boot starts a new log.  The file is a transcript of *this* boot,
+    // not an accumulation across boots: the old append-and-seek made the
+    // interesting part the tail of a file that grew forever, and there was no
+    // way to tell where one boot ended and the next began.
+    const handle = vfs.open(file_path[0..pos], .{ .read = true, .write = true, .create = true, .truncate = true }) orelse {
         serial.serialWrite("[KLOG] Failed to open ");
         serial.serialWrite(file_path[0..pos]);
         serial.serialWrite("\n");
         return false;
     };
-
-    // Append to an existing boot log. FAT32 honors the append flag; the
-    // explicit seek keeps the FAT16 fallback on the same code path.
-    if (vfs.stat(file_path[0..pos])) |st| {
-        if (st.file_type == .file) {
-            if (st.size >= MAX_LOG_SIZE) {
-                _ = vfs.truncate(handle, 0);
-                _ = vfs.seek(handle, 0);
-                serial.serialWrite("[KLOG] log rotated at size limit\n");
-            } else {
-                _ = vfs.seek(handle, st.size);
-            }
-        }
-    }
     log_file = handle;
 
     // Messages emitted before FAT32 was mounted are already in serial's boot
