@@ -15,6 +15,15 @@ pub var debug: bool = false;
 /// "the key was decoded and the shell did not see it".
 var first_key_logged: bool = false;
 
+/// Bumped whenever a descriptor report contains a non-zero keyboard-page
+/// usage (a modifier, a key, a lock), and whenever one actually reaches the
+/// keyboard ring or toggles a lock.  `hid_core` compares the two around a
+/// report: a report that carries keyboard usages but produces no key is a
+/// layout that does not fit the device, which is what puts the interface
+/// back into the boot protocol.
+pub var keyboard_activity: u32 = 0;
+pub var key_events: u32 = 0;
+
 // USB HID Input Mapping (corresponds to Linux drivers/hid/hid-input.c)
 // Translates raw HID reports (Usage Page 0x07 Keyboard, Mouse REL_X/REL_Y)
 // into system keyboard keycodes and mouse movement.
@@ -173,6 +182,7 @@ pub fn handleKeyboardReport(
                 }
             } else if (hidUsageToAscii(key, shift, ctrl, caps_lock_state, num_lock_state)) |ch| {
                 keyboard.pushKey(ch);
+                key_events +%= 1;
                 if (!first_key_logged) {
                     first_key_logged = true;
                     serial.serialWrite("[HID] first boot-protocol key usage=0x");
@@ -323,6 +333,7 @@ pub fn handleDescriptorReport(
             switch (usage.page) {
                 hid_report.USAGE_PAGE_KEYBOARD => {
                     if (value == 0 or usage.id == 0) continue;
+                    keyboard_activity +%= 1;
                     if (usage.id >= 0xE0 and usage.id <= 0xE7) {
                         // The modifier usages are one bit each: 0xE0 left
                         // ctrl ... 0xE7 right GUI (`hidinput_configure_usage`).
@@ -384,18 +395,22 @@ pub fn handleDescriptorReport(
                 0x39 => {
                     caps_lock_state = !caps_lock_state;
                     led_changed = true;
+                    key_events +%= 1;
                 },
                 0x53 => {
                     num_lock_state = !num_lock_state;
                     led_changed = true;
+                    key_events +%= 1;
                 },
                 0x47 => {
                     scroll_lock_state = !scroll_lock_state;
                     led_changed = true;
+                    key_events +%= 1;
                 },
                 else => {
                     if (hidUsageToAscii(@intCast(key), shift, ctrl, caps_lock_state, num_lock_state)) |ch| {
                         keyboard.pushKey(ch);
+                        key_events +%= 1;
                         if (!first_key_logged) {
                             first_key_logged = true;
                             serial.serialWrite("[HID] first decoded key usage=0x");

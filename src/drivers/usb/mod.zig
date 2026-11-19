@@ -1222,6 +1222,10 @@ pub fn poll() void {
     // is polled, so the class drivers get their chance here as well.
     serial_mod.ftdi.poll();
     hidpp.poll();
+    // A keyboard that never delivers a report is switched to the boot
+    // protocol here, in the deferred path, because the switch sends control
+    // requests and the tick handler must never block.
+    hid_core.poll();
 }
 
 pub fn printUsbStatus(writeFn: *const fn (s: []const u8) void, writeDecFn: *const fn (v: u64) void, writeHexFn: *const fn (v: u64) void) void {
