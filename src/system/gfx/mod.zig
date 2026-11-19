@@ -44,6 +44,7 @@ fn bindText() void {
     active_surface = vga_text.surface();
     surface_bound = true;
     console.setSurface(active_surface);
+    logConsoleSurface("vga-text");
 }
 
 /// Push the console background colour into the framebuffer's scroll path,
@@ -52,6 +53,29 @@ fn syncFramebufferBackground() void {
     if (!fb.active) return;
     const c = palette.rgb(console.bg);
     fb.setConsoleBackground(@intCast((c >> 16) & 0xFF), @intCast((c >> 8) & 0xFF), @intCast(c & 0xFF));
+}
+
+/// Say which surface the console is drawing into, and how big its grid is.
+///
+/// A machine can report a working framebuffer and still show nothing: the
+/// console may be bound to the text buffer, the grid may be one cell, or the
+/// flush may never run.  This is the line that names the surface in the log.
+fn logConsoleSurface(kind: []const u8) void {
+    root.serial.serialWrite("[GFX] console surface=");
+    root.serial.serialWrite(kind);
+    root.serial.serialWrite(" grid=");
+    root.serial.serialWriteDec(console.cols);
+    root.serial.serialWrite("x");
+    root.serial.serialWriteDec(console.rows);
+    if (fb.active) {
+        root.serial.serialWrite(" viewport=");
+        root.serial.serialWriteDec(fb.fb_width);
+        root.serial.serialWrite("x");
+        root.serial.serialWriteDec(fb.fb_height);
+        root.serial.serialWrite(" bpp=");
+        root.serial.serialWriteDec(fb.fb_bpp);
+    }
+    root.serial.serialWrite("\n");
 }
 
 /// Discover the video mode the firmware set up and, if there is one, switch
@@ -68,6 +92,7 @@ pub fn initFb(mbi_ptr: u32) void {
         surface_bound = true;
         console.setSurface(active_surface);
         syncFramebufferBackground();
+        logConsoleSurface("framebuffer");
     } else {
         init();
     }
@@ -86,6 +111,7 @@ pub fn useFramebuffer() void {
     surface_bound = true;
     console.setSurface(active_surface);
     syncFramebufferBackground();
+    logConsoleSurface("framebuffer");
 }
 
 /// Switch the console onto the VGA text buffer.

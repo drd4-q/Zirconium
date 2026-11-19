@@ -79,6 +79,15 @@ var dirty_x1: u32 = 0;
 var dirty_y1: u32 = 0;
 var has_dirty: bool = false;
 
+/// Number of shadow-to-LFB pushes that actually reached the hardware.
+///
+/// This is the line between "the console drew" and "the console's pixels
+/// reached the screen": a probe can pass and the console can hold a full
+/// grid of text, but if this stays at zero the flush path never ran.
+pub var flush_count: u64 = 0;
+pub var flushed_bytes: u64 = 0;
+var first_flush_logged: bool = false;
+
 /// True when the framebuffer's physical range is mapped in the kernel's
 /// address space.
 ///
@@ -861,6 +870,26 @@ pub fn flush() void {
     if (@as(u64, y1) * shadow_stride_px > shadow_pixels) return;
 
     const w = x1 - x0;
+    flush_count +%= 1;
+    flushed_bytes +%= @as(u64, w) * (y1 - y0) * fb_bytes_pp;
+    if (!first_flush_logged) {
+        first_flush_logged = true;
+        serial.serialWrite("[FB] first flush: ");
+        serial.serialWriteDec(w);
+        serial.serialWrite("x");
+        serial.serialWriteDec(y1 - y0);
+        serial.serialWrite(" at ");
+        serial.serialWriteDec(x0);
+        serial.serialWrite(",");
+        serial.serialWriteDec(y0);
+        serial.serialWrite(" addr=0x");
+        serial.serialWriteHex(@truncate(fb_addr));
+        serial.serialWrite(" bytes=");
+        serial.serialWriteDec(@as(u64, w) * (y1 - y0) * fb_bytes_pp);
+        serial.serialWrite(" bpp=");
+        serial.serialWriteDec(fb_bpp);
+        serial.serialWrite("\n");
+    }
     var y: u32 = y0;
     while (y < y1) : (y += 1) {
         const row_off = shadowIndex(x0, y);

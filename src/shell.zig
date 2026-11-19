@@ -193,6 +193,29 @@ pub fn run() void {
     vga.clear();
     printBanner();
 
+    // The shell is the first thing an operator sees.  Report what the console
+    // is actually drawing into, and whether the banner reached the LFB: a
+    // working probe with zero flushes is a screen that stays black.
+    {
+        const fb = @import("system/framebuffer.zig");
+        const gfx = @import("system/gfx/mod.zig");
+        root.serial.serialWrite("[SHELL] console: fb_active=");
+        root.serial.serialWrite(if (gfx.isFbActive()) "yes" else "no");
+        root.serial.serialWrite(" verified=");
+        root.serial.serialWrite(if (fb.verified) "yes" else "no");
+        root.serial.serialWrite(" grid=");
+        root.serial.serialWriteDec(vga.getCols());
+        root.serial.serialWrite("x");
+        root.serial.serialWriteDec(vga.getRows());
+        root.serial.serialWrite(" flushes=");
+        root.serial.serialWriteDec(fb.flush_count);
+        root.serial.serialWrite(" bytes=");
+        root.serial.serialWriteDec(fb.flushed_bytes);
+        root.serial.serialWrite(" serial_mirror=");
+        root.serial.serialWrite(if (gfx.serialConsole()) "on" else "off");
+        root.serial.serialWrite("\n");
+    }
+
     vga.setColor(.light_gray, .black);
     vga.write("  IRQ-based: keyboard (IRQ1), timer 100Hz (IRQ0/APIC)\n");
     if (net.hasNic()) {
