@@ -166,6 +166,10 @@ pub const XhciSlot = struct {
 
     ctrl_buf_phys: usize = 0,
     ctrl_buf: *[512]u8 = undefined,
+
+    /// Last dequeue pointer `diagLogState` printed per endpoint, so the
+    /// `Output EP` line appears only when the dequeue moves.
+    diag_last_deq: [64]u64 = @splat(0),
 };
 
 pub const XhciController = struct {
@@ -1254,6 +1258,14 @@ pub const XhciController = struct {
         serial.serialWrite("\n");
     }
 
+    /// Read the output context's dequeue pointer for one endpoint, the same
+    /// value `logEndpointContext` prints.
+    fn outputEpDeq(self: *const XhciController, slot: *const XhciSlot, dci: u8) u64 {
+        const ctx_size: usize = if (self.csz_64) 64 else 32;
+        const output_ep = @as([*]const u32, @ptrFromInt(slot.dev_ctx_phys + @as(usize, dci) * ctx_size));
+        return @as(u64, output_ep[2]) | (@as(u64, output_ep[3]) << 32);
+    }
+
     pub fn updateEp0MaxPacket(self: *XhciController, slot_idx: usize, max_packet: u8) bool {
         if (slot_idx >= self.slots.len or max_packet == 0) return false;
         const slot = &self.slots[slot_idx];
@@ -1861,8 +1873,20 @@ pub const XhciController = struct {
         while (s_idx < self.slots.len) : (s_idx += 1) {
             const slot = &self.slots[s_idx];
             if (!slot.active) continue;
-            if (slot.intr_dci != 0) self.logEndpointContext(s_idx, slot.intr_dci);
-            if (slot.intr2_dci != 0) self.logEndpointContext(s_idx, slot.intr2_dci);
+            // One line per endpoint, and only when the dequeue moved (or
+            // the endpoint was not logged yet): on the power-of-two polls
+            // below this used to re-print the same lines, so the log filled
+            // with text that never changed.
+            inline for (0..2) |k| {
+                const dci: u8 = if (k == 0) slot.intr_dci else slot.intr2_dci;
+                if (dci != 0 and dci < slot.diag_last_deq.len) {
+                    const deq = self.outputEpDeq(slot, dci);
+                    if (slot.diag_last_deq[dci] != deq) {
+                        slot.diag_last_deq[dci] = deq;
+                        self.logEndpointContext(s_idx, dci);
+                    }
+                }
+            }
         }
     }
 
