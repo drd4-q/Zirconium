@@ -518,6 +518,17 @@ accessors, and adds `pollHid()`.
   parsed table is kept for diagnostics but no longer decodes; `[HID] boot protocol fallback
   active id=… iface=… reason=… set_protocol=…` names the switch and its cause in
   `KERNEL.LOG`, and `[HID] decode path … method=…` records which path an interface is on.
+- **The interface protocol is checked against the descriptor before any report arrives.**
+  A boot interface's protocol code is part of the contract — 1 is a keyboard, 2 is a mouse —
+  so a descriptor that lacks what its protocol promises (keyboard usages for a keyboard,
+  pointer fields for a mouse) is not the table the reports follow (a short control transfer,
+  or the other interface's descriptor) and the interface is put in boot protocol at
+  registration. The check is a capability, not
+  `Table.kind()`: the second interface of a combo receiver is a mouse whose descriptor
+  (report ID 1) is followed by the keyboard collections the receiver multiplexes onto the
+  same endpoint, and `kind()` sees those keyboard usages and calls the whole interface a
+  keyboard. `[HID] descriptor does not fit interface protocol=…` names the rejection;
+  `[HID] protocol report|boot id=… iface=…` records the protocol the interface was put in.
 - **HID registration happens after the hub pass.** `mod.zig:init()` initializes `hid_core`
   only after the downstream hubs have been enumerated; registering first means a keyboard
   behind a hub never gets a descriptor table (and therefore never leaves the boot protocol).

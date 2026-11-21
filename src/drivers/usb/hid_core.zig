@@ -546,43 +546,47 @@ fn loadReportDescriptor(inst: *HidDevice, dev: *device.UsbDevice) void {
 
     // A boot interface's protocol code is part of the interface contract:
     // 1 is a keyboard, 2 is a mouse, and the device sends the fixed boot
-    // report when asked.  When the descriptor that was read describes the
-    // other kind of device, it is not the descriptor the reports follow (a
-    // combo receiver whose second descriptor read returned the first
-    // interface's table, or trailing zeroes from a short control transfer).
-    // Trust the interface: decode the boot report instead.  `has_table`
-    // stays false, so `registerHidDevice()` sends SET_PROTOCOL(BOOT).
+    // report when asked.  When the descriptor that was read describes
+    // neither the axes nor the keys the protocol promises, it is not the
+    // descriptor the reports follow (a combo receiver whose second
+    // descriptor read returned the first interface's table, or trailing
+    // zeroes from a short control transfer).  Trust the interface: decode
+    // the boot report instead.  `has_table` stays false, so
+    // `registerHidDevice()` sends SET_PROTOCOL(BOOT).
+    //
+    // The second interface of a combo receiver is a mouse even though its
+    // descriptor also carries the keyboard and consumer collections the
+    // receiver multiplexes onto the same endpoint, which is why the check
+    // is a capability and not `kind()`: `kind()` sees the keyboard usages
+    // and calls the whole interface a keyboard.
     if (iface) |desc| {
-        const expected: ?hid_report.Kind = switch (desc.protocol_code) {
-            1 => .keyboard,
-            2 => .mouse,
-            else => null,
+        const compatible = switch (desc.protocol_code) {
+            1 => table.kind() == .keyboard,
+            2 => table.hasPointerFields(),
+            else => true,
         };
-        if (expected) |protocol_kind| {
+        if (!compatible) {
+            serial.serialWrite("[HID] descriptor does not fit interface protocol=");
+            serial.serialWriteDec(desc.protocol_code);
+            serial.serialWrite(" (kind=");
             if (table.kind()) |kind| {
-                if (kind != protocol_kind) {
-                    serial.serialWrite("[HID] descriptor kind=");
-                    serial.serialWrite(switch (kind) {
-                        .keyboard => "keyboard",
-                        .mouse => "mouse",
-                    });
-                    serial.serialWrite(" contradicts interface protocol=");
-                    serial.serialWrite(switch (protocol_kind) {
-                        .keyboard => "keyboard",
-                        .mouse => "mouse",
-                    });
-                    serial.serialWrite(", using boot protocol id=");
-                    serial.serialWriteDec(inst.id);
-                    serial.serialWrite(" iface=");
-                    serial.serialWriteDec(inst.interface_num);
-                    serial.serialWrite(" fields=");
-                    serial.serialWriteDec(table.field_count);
-                    serial.serialWrite(" reports=");
-                    serial.serialWriteDec(table.report_count);
-                    serial.serialWrite("\n");
-                    return;
-                }
+                serial.serialWrite(switch (kind) {
+                    .keyboard => "keyboard",
+                    .mouse => "mouse",
+                });
+            } else {
+                serial.serialWrite("none");
             }
+            serial.serialWrite("), using boot protocol id=");
+            serial.serialWriteDec(inst.id);
+            serial.serialWrite(" iface=");
+            serial.serialWriteDec(inst.interface_num);
+            serial.serialWrite(" fields=");
+            serial.serialWriteDec(table.field_count);
+            serial.serialWrite(" reports=");
+            serial.serialWriteDec(table.report_count);
+            serial.serialWrite("\n");
+            return;
         }
     }
 
@@ -590,23 +594,32 @@ fn loadReportDescriptor(inst: *HidDevice, dev: *device.UsbDevice) void {
     inst.has_table = true;
 
     // The top-level application collection identifies a HID interface
-    // whose USB protocol code is zero (many keyboards and all tablets).
-    if (table.kind()) |kind| {
-        const corrected: types.UsbDeviceType = switch (kind) {
-            .keyboard => .keyboard,
-            .mouse => .mouse,
-        };
-        if (inst.dev_type != corrected) {
-            serial.serialWrite("[HID] interface type corrected id=");
-            serial.serialWriteDec(inst.id);
-            serial.serialWrite(" ");
-            serial.serialWrite(inst.dev_type.name());
-            serial.serialWrite(" -> ");
-            serial.serialWrite(corrected.name());
-            serial.serialWrite("\n");
+    // whose USB protocol code is zero (many keyboards and all tablets).  A
+    // protocol code of 1 or 2 already names the device, and must not be
+    // overruled by a descriptor that also carries the other half of a
+    // combo receiver.
+    const protocol_declares_kind = if (iface) |desc|
+        desc.protocol_code == 1 or desc.protocol_code == 2
+    else
+        false;
+    if (!protocol_declares_kind) {
+        if (table.kind()) |kind| {
+            const corrected: types.UsbDeviceType = switch (kind) {
+                .keyboard => .keyboard,
+                .mouse => .mouse,
+            };
+            if (inst.dev_type != corrected) {
+                serial.serialWrite("[HID] interface type corrected id=");
+                serial.serialWriteDec(inst.id);
+                serial.serialWrite(" ");
+                serial.serialWrite(inst.dev_type.name());
+                serial.serialWrite(" -> ");
+                serial.serialWrite(corrected.name());
+                serial.serialWrite("\n");
+            }
+            inst.dev_type = corrected;
+            dev.dev_type = corrected;
         }
-        inst.dev_type = corrected;
-        dev.dev_type = corrected;
     }
 
     serial.serialWrite("[HID] report descriptor id=");
@@ -625,6 +638,21 @@ fn loadReportDescriptor(inst: *HidDevice, dev: *device.UsbDevice) void {
     serial.serialWriteDec(table.maxReportLen(.input));
     serial.serialWrite(" out_len=");
     serial.serialWriteDec(table.maxReportLen(.output));
+    serial.serialWrite(" in_ids=");
+    {
+        var report_idx: usize = 0;
+        var first = true;
+        while (report_idx < @as(usize, table.report_count)) : (report_idx += 1) {
+            const report = table.reports[report_idx];
+            if (report.report_type != .input) continue;
+            if (!first) serial.serialWrite(",");
+            serial.serialWriteDec(report.id);
+            serial.serialWrite(":");
+            serial.serialWriteDec(report.len());
+            first = false;
+        }
+        if (first) serial.serialWrite("none");
+    }
     serial.serialWrite(" mps=");
     serial.serialWriteDec(dev.ep_max_packet);
     serial.serialWrite("\n");
@@ -686,6 +714,20 @@ pub fn registerHidDevice(dev_idx: usize, dev: *device.UsbDevice, iface_num: u8, 
         const protocol: u16 = if (inst.has_table) usbhid.PROTOCOL_REPORT else usbhid.PROTOCOL_BOOT;
         const set_proto_pkt = usbhid.makeSetProtocolPacket(iface_num, protocol);
         const switched = mod.usbControlTransferById(dev.id, max_p0, &set_proto_pkt, null, null);
+        if (switched) {
+            // Which protocol an interface was actually put in is the first
+            // thing to look at when its endpoint goes quiet: a mouse that
+            // was left in boot protocol sends its fixed report, and a mouse
+            // that was put in report protocol sends the numbered report the
+            // descriptor describes.
+            serial.serialWrite("[HID] protocol ");
+            serial.serialWrite(if (inst.has_table) "report" else "boot");
+            serial.serialWrite(" id=");
+            serial.serialWriteDec(inst.id);
+            serial.serialWrite(" iface=");
+            serial.serialWriteDec(inst.interface_num);
+            serial.serialWrite("\n");
+        }
         if (!switched and inst.has_table) {
             // The interface refused the report protocol, so it will keep
             // sending the fixed boot report whatever its report descriptor

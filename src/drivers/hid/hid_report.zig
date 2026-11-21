@@ -280,6 +280,37 @@ pub const Table = struct {
         if (mouse_axes) return .mouse;
         return null;
     }
+
+    /// True when the descriptor has what a pointer report is made of: X/Y
+    /// axes, a wheel, or buttons.  `kind()` answers "which interface is
+    /// this", and a combo receiver's mouse interface also carries the
+    /// keyboard collections the receiver multiplexes onto the same endpoint,
+    /// so it says keyboard; this answers "can this interface send pointer
+    /// reports", which is what a mouse protocol promises and what the
+    /// interface must be kept on the report protocol for.
+    pub fn hasPointerFields(self: *const Table) bool {
+        if (self.application.page == USAGE_PAGE_GENERIC_DESKTOP and
+            (self.application.id == USAGE_GD_MOUSE or self.application.id == USAGE_GD_POINTER))
+        {
+            return true;
+        }
+
+        for (self.fields[0..@as(usize, self.field_count)]) |field| {
+            if (field.report_type != .input or field.isConstant()) continue;
+            var i: u32 = 0;
+            while (i < field.report_count) : (i += 1) {
+                const usage = field.usageAt(i);
+                if (usage.page == USAGE_PAGE_BUTTON) return true;
+                if (usage.page == USAGE_PAGE_GENERIC_DESKTOP and
+                    (usage.id == USAGE_GD_X or usage.id == USAGE_GD_Y or
+                        usage.id == USAGE_GD_WHEEL))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
 };
 
 pub const Kind = enum { keyboard, mouse };
