@@ -299,7 +299,11 @@ fn logDecodePath(inst: *HidDevice) void {
     serial.serialWriteDec(inst.id);
     serial.serialWrite(" iface=");
     serial.serialWriteDec(inst.interface_num);
-    serial.serialWrite(if (inst.boot_fallback) " method=boot-protocol" else " method=report-descriptor");
+    // `has_table` false means the interface never got a descriptor table
+    // (read/parse failure, or a boot protocol that contradicts it), and the
+    // boot decoder below is what runs.
+    const boot = inst.boot_fallback or !inst.has_table;
+    serial.serialWrite(if (boot) " method=boot-protocol" else " method=report-descriptor");
     serial.serialWrite(" type=");
     serial.serialWrite(inst.dev_type.name());
     serial.serialWrite("\n");
@@ -540,6 +544,48 @@ fn loadReportDescriptor(inst: *HidDevice, dev: *device.UsbDevice) void {
     };
     if (!table.valid) return;
 
+    // A boot interface's protocol code is part of the interface contract:
+    // 1 is a keyboard, 2 is a mouse, and the device sends the fixed boot
+    // report when asked.  When the descriptor that was read describes the
+    // other kind of device, it is not the descriptor the reports follow (a
+    // combo receiver whose second descriptor read returned the first
+    // interface's table, or trailing zeroes from a short control transfer).
+    // Trust the interface: decode the boot report instead.  `has_table`
+    // stays false, so `registerHidDevice()` sends SET_PROTOCOL(BOOT).
+    if (iface) |desc| {
+        const expected: ?hid_report.Kind = switch (desc.protocol_code) {
+            1 => .keyboard,
+            2 => .mouse,
+            else => null,
+        };
+        if (expected) |protocol_kind| {
+            if (table.kind()) |kind| {
+                if (kind != protocol_kind) {
+                    serial.serialWrite("[HID] descriptor kind=");
+                    serial.serialWrite(switch (kind) {
+                        .keyboard => "keyboard",
+                        .mouse => "mouse",
+                    });
+                    serial.serialWrite(" contradicts interface protocol=");
+                    serial.serialWrite(switch (protocol_kind) {
+                        .keyboard => "keyboard",
+                        .mouse => "mouse",
+                    });
+                    serial.serialWrite(", using boot protocol id=");
+                    serial.serialWriteDec(inst.id);
+                    serial.serialWrite(" iface=");
+                    serial.serialWriteDec(inst.interface_num);
+                    serial.serialWrite(" fields=");
+                    serial.serialWriteDec(table.field_count);
+                    serial.serialWrite(" reports=");
+                    serial.serialWriteDec(table.report_count);
+                    serial.serialWrite("\n");
+                    return;
+                }
+            }
+        }
+    }
+
     inst.table = table;
     inst.has_table = true;
 
@@ -567,6 +613,8 @@ fn loadReportDescriptor(inst: *HidDevice, dev: *device.UsbDevice) void {
     serial.serialWriteDec(inst.id);
     serial.serialWrite(" iface=");
     serial.serialWriteDec(inst.interface_num);
+    serial.serialWrite(" proto=");
+    serial.serialWriteDec(if (iface) |desc| desc.protocol_code else 0);
     serial.serialWrite(" type=");
     serial.serialWrite(inst.dev_type.name());
     serial.serialWrite(" fields=");
@@ -619,6 +667,14 @@ pub fn registerHidDevice(dev_idx: usize, dev: *device.UsbDevice, iface_num: u8, 
 
     const iface = findInterface(dev, iface_num);
     inst.subclass_boot = if (iface) |desc| desc.subclass_code == 0x01 else false;
+    // A non-zero protocol code is the interface saying it speaks the boot
+    // protocol: 1 for a keyboard, 2 for a mouse.  A combo receiver may
+    // declare it without subclass 1, and it still has to be told which
+    // protocol to use.
+    const declares_boot = if (iface) |desc|
+        desc.protocol_code == 1 or desc.protocol_code == 2
+    else
+        false;
 
     // 1. The descriptor is the layout.  When it parses, the device is put
     //    into report protocol; otherwise a boot keyboard stays in boot
@@ -626,7 +682,7 @@ pub fn registerHidDevice(dev_idx: usize, dev: *device.UsbDevice, iface_num: u8, 
     loadReportDescriptor(inst, dev);
 
     const max_p0: u8 = @min(dev.ep0_max_packet, 64);
-    if (inst.subclass_boot) {
+    if (inst.subclass_boot or (declares_boot and !inst.has_table)) {
         const protocol: u16 = if (inst.has_table) usbhid.PROTOCOL_REPORT else usbhid.PROTOCOL_BOOT;
         const set_proto_pkt = usbhid.makeSetProtocolPacket(iface_num, protocol);
         const switched = mod.usbControlTransferById(dev.id, max_p0, &set_proto_pkt, null, null);
