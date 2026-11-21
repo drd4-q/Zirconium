@@ -158,8 +158,21 @@ pub fn setSerialMirror(on: bool) void {
     serial_mirror = on;
 }
 
-/// Write one character at the cursor, handling the control characters.
+/// Write one character at the cursor, handling the control characters, and
+/// push it to the surface.
+///
+/// The surface is flushed here because the shell echoes a typed character
+/// with a bare `putChar()`: without the flush the character reaches the
+/// shadow buffer and stays invisible until the next `write()` (i.e. until
+/// Enter runs a command).  `write()` uses `putCharInternal()` and flushes
+/// once at the end, so a long string is still one flush.
 pub fn putChar(ch: u8) void {
+    putCharInternal(ch);
+    if (have_surface) surface.flush();
+}
+
+/// `putChar` without the surface flush; the caller flushes once.
+fn putCharInternal(ch: u8) void {
     ensureBound();
 
     // The serial console.  This is the one place every character goes
@@ -222,9 +235,9 @@ pub fn putChar(ch: u8) void {
 pub fn write(str: []const u8) void {
     ensureBound();
     for (str) |ch| {
-        putChar(ch);
+        putCharInternal(ch);
     }
-    surface.flush();
+    if (have_surface) surface.flush();
 }
 
 /// Erase the screen and reset the cursor.
