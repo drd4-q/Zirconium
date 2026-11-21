@@ -213,6 +213,15 @@ fn putCharInternal(ch: u8) void {
             }
             return;
         },
+        // Backspace is cursor-left, never a glyph.  The shell erases a
+        // character with 0x08 ' ' 0x08: the space overwrites the cell, and
+        // the two backspaces put the cursor back on it.  Falling through to
+        // the draw path (the old behaviour) advanced the cursor each time
+        // and painted a visible mark to the right of the text being erased.
+        0x08 => {
+            if (cursor_col > 0) cursor_col -= 1;
+            return;
+        },
         else => {},
     }
 
