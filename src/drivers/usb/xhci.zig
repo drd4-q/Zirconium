@@ -1075,7 +1075,7 @@ pub const XhciController = struct {
         return null;
     }
 
-    pub fn addressDevice(self: *XhciController, slot_idx: usize, port_idx: u8, speed_code: u8) bool {
+    pub fn addressDevice(self: *XhciController, slot_idx: usize, port_idx: u8, speed_code: u8, max_packet0: ?u8) bool {
         return self.addressDeviceWithRoute(
             slot_idx,
             port_idx,
@@ -1086,6 +1086,7 @@ pub const XhciController = struct {
             0,
             false,
             false,
+            max_packet0,
         );
     }
 
@@ -1100,6 +1101,7 @@ pub const XhciController = struct {
         parent_port: u8,
         parent_is_hs_hub: bool,
         parent_multi_tt: bool,
+        max_packet0: ?u8,
     ) bool {
         if (slot_idx >= self.slots.len) return false;
         const slot = &self.slots[slot_idx];
@@ -1129,7 +1131,7 @@ pub const XhciController = struct {
         slot_ctx[3] = 0;
 
         const ep0_ctx = @as([*]u32, @ptrFromInt(slot.input_ctx_phys + 2 * ctx_size));
-        const max_p0: u32 = switch (speed_code) {
+        const max_p0: u32 = if (max_packet0) |mp| @as(u32, mp) else switch (speed_code) {
             4, 5 => 512,
             3 => 64,
             1 => 64,
@@ -1300,10 +1302,26 @@ pub const XhciController = struct {
         data_out: ?[]const u8,
         data_in: ?[]u8,
     ) bool {
-        _ = max_p0;
         if (slot_idx >= self.slots.len) return false;
         const slot = &self.slots[slot_idx];
         if (!slot.active) return false;
+
+        // EP0's Max Packet Size decides how the controller splits a control
+        // data stage into packets, and `addressDeviceWithRoute()` can only
+        // guess it from the speed (full speed -> 64).  That guess is wrong
+        // for the many cheap devices whose bMaxPacketSize0 is 8 or 16: the
+        // controller then waits for a single 64 byte packet, the device
+        // answers with an 8 byte one, the controller retires the transfer as
+        // a Short Packet after the first chunk and the rest of the
+        // descriptor is never requested.  `enumerateDevice()` reads the real
+        // value from the first eight descriptor bytes and passes it to every
+        // transfer, so programme EP0 with it before the data stage runs.
+        // `updateEp0MaxPacket()` compares against the xHC's own context and
+        // does nothing when the value already matches.
+        if (max_p0 != 0) {
+            const mps: u8 = @intCast(@min(max_p0, 64));
+            _ = self.updateEp0MaxPacket(slot_idx, mps);
+        }
 
         const requested_len: usize = @intCast(setup.wLength);
         const supplied_len: usize = if (data_in) |d| d.len else if (data_out) |d| d.len else 0;

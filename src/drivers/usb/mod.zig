@@ -454,9 +454,48 @@ pub fn init() void {
                                     const speed_code = x.getPortSpeedCode(p);
                                     if (x.enableSlot()) |slot_id| {
                                         if (x.allocSlot(slot_id, p, speed_code)) |slot_idx| {
-                                            if (x.addressDevice(slot_idx, p, speed_code)) {
+                                            // Address the device first (with guessed MPS=64 for full-speed).
+                                            // This assigns a USB address and programs EP0 context.
+                                            if (x.addressDevice(slot_idx, p, speed_code, null)) {
                                                 current_xhci_ctrl = x;
                                                 current_xhci_slot_idx = slot_idx;
+
+                                                // Get the assigned USB address.
+                                                const assigned_addr = x.assignedAddress(slot_idx) orelse {
+                                                    serial.serialWrite("[XHCI] Root port device has no assigned USB address\n");
+                                                    x.disableSlot(slot_id);
+                                                    continue;
+                                                };
+
+                                                // Read first 8 bytes of device descriptor at the ASSIGNED address
+                                                // to get the real bMaxPacketSize0. Use max_packet0=8 for this
+                                                // initial read: it works for all bMaxPacketSize0 values (8, 16, 32, 64)
+                                                // because the device will send exactly 8 bytes and the transfer
+                                                // completes as a normal short packet.
+                                                var dev_desc_8: [8]u8 = @splat(0);
+                                                const get_desc_pkt = UsbSetupPacket{
+                                                    .bmRequestType = 0x80,
+                                                    .bRequest = types.REQ_GET_DESCRIPTOR,
+                                                    .wValue = 0x0100,
+                                                    .wIndex = 0,
+                                                    .wLength = 8,
+                                                };
+                                                var max_packet0: ?u8 = null;
+                                                if (x.controlTransfer(slot_idx, 8, &get_desc_pkt, null, &dev_desc_8)) {
+                                                    max_packet0 = switch (dev_desc_8[7]) {
+                                                        16 => 16,
+                                                        32 => 32,
+                                                        64 => 64,
+                                                        else => 8,
+                                                    };
+                                                }
+
+                                                // Update EP0 Max Packet Size with the real value from the descriptor.
+                                                if (max_packet0) |mp| {
+                                                    if (!x.updateEp0MaxPacket(slot_idx, mp)) {
+                                                        serial.serialWrite("[XHCI] EP0 max-packet update failed\n");
+                                                    }
+                                                }
 
                                                 var dev = &usb_devices[usb_device_count];
                                                 dev.* = .{};
@@ -476,22 +515,22 @@ pub fn init() void {
                                                     .super_speed
                                                 else
                                                     .full;
-                                                const new_addr: u8 = x.assignedAddress(slot_idx) orelse @intCast(usb_device_count + 1);
 
+                                                // Enumerate with already_addressed=true (device already has its USB address).
                                                 if (device.enumerateDevice(
                                                     c_idx,
                                                     p,
                                                     is_low_speed,
                                                     dev_speed,
                                                     dev,
-                                                    new_addr,
+                                                    assigned_addr,
                                                     xhciCtrlTransferWrapper,
                                                     true,
                                                 )) {
                                                     ctrl.ports[p].device_desc = dev.dev_type.name();
                                                     usb_device_count += 1;
                                                     const extra_start = usb_device_count;
-                                                    enumerateCompositeInterfaces(dev, c_idx, p, is_low_speed, new_addr);
+enumerateCompositeInterfaces(dev, c_idx, p, is_low_speed, assigned_addr);
 
                                                     // Configure endpoints from the parsed interface class. HID gets interrupt-IN
                                                     // queues; storage and Wi-Fi get bulk endpoints.
@@ -772,6 +811,7 @@ fn enumerateXhciHubChild(
         return false;
     };
 
+    // Address the device first (with guessed MPS). This assigns a USB address.
     const parent_is_hs_hub = hub_dev.speed == .high;
     serial.serialWrite("[XHCI] Hub child address: root=");
     serial.serialWriteDec(root_port);
@@ -792,6 +832,7 @@ fn enumerateXhciHubChild(
         hp.port,
         parent_is_hs_hub,
         hub_dev.xhci_hub_multi_tt,
+        null,
     )) {
         serial.serialWrite("[XHCI] Hub child Address Device failed\n");
         x.disableSlot(slot_id);
@@ -803,6 +844,40 @@ fn enumerateXhciHubChild(
         x.disableSlot(slot_id);
         return false;
     };
+
+    // Read first 8 bytes of device descriptor at the ASSIGNED address
+    // to get the real bMaxPacketSize0.
+    current_xhci_ctrl = x;
+    current_xhci_slot_idx = slot_idx;
+    // Read first 8 bytes of device descriptor at the ASSIGNED address
+    // to get the real bMaxPacketSize0. Use max_packet0=8 for this
+    // initial read: it works for all bMaxPacketSize0 values (8, 16, 32, 64)
+    // because the device will send exactly 8 bytes and the transfer
+    // completes as a normal short packet.
+    var dev_desc_8: [8]u8 = @splat(0);
+    const get_desc_pkt = UsbSetupPacket{
+        .bmRequestType = 0x80,
+        .bRequest = types.REQ_GET_DESCRIPTOR,
+        .wValue = 0x0100,
+        .wIndex = 0,
+        .wLength = 8,
+    };
+    var max_packet0: ?u8 = null;
+    if (x.controlTransfer(slot_idx, 8, &get_desc_pkt, null, &dev_desc_8)) {
+        max_packet0 = switch (dev_desc_8[7]) {
+            16 => 16,
+            32 => 32,
+            64 => 64,
+            else => 8,
+        };
+    }
+
+    // Update EP0 Max Packet Size with the real value from the descriptor.
+    if (max_packet0) |mp| {
+        if (!x.updateEp0MaxPacket(slot_idx, mp)) {
+            serial.serialWrite("[XHCI] EP0 max-packet update failed\n");
+        }
+    }
 
     dev.* = .{};
     dev.id = allocateUsbDeviceId();
