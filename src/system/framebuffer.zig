@@ -1126,9 +1126,12 @@ pub fn scrollRegionUp(rows: u32, cols: u32) void {
     const region_h = @min(rows * cell_h, fb_height);
     if (region_h <= cell_h) return;
 
-    // Move every row up by one cell, then clear the exposed bottom row.  The
-    // console repaints that row's cells afterwards, but clearing it here keeps
-    // the shadow self-consistent even if the repaint is partial.
+    // Move every cell row up by one, then blank the exposed bottom cell row.
+    // Blanking only its last pixel row used to leave the previous bottom text
+    // in place, so every scroll duplicated the line above it - the console
+    // engine considers the mirror's row blank and does not repaint it.  The
+    // exposed *cell* row is `cell_h` pixel rows tall and all of them have to
+    // go (the VGA text surface blanks its whole exposed row the same way).
     const stride = shadow_stride_px;
     var y: u32 = 0;
     while (y + cell_h < region_h) : (y += 1) {
@@ -1137,8 +1140,11 @@ pub fn scrollRegionUp(rows: u32, cols: u32) void {
         @memcpy(dst[0..region_w], src[0..region_w]);
     }
     const bg_col: u32 = (@as(u32, bg_r) << 16) | (@as(u32, bg_g) << 8) | @as(u32, bg_b);
-    const bottom = shadow + @as(usize, region_h - 1) * stride;
-    @memset(bottom[0..region_w], bg_col);
+    var exposed: u32 = region_h - cell_h;
+    while (exposed < region_h) : (exposed += 1) {
+        const row = shadow + @as(usize, exposed) * stride;
+        @memset(row[0..region_w], bg_col);
+    }
     markDirtyRect(0, 0, region_w, region_h);
 }
 
