@@ -30,10 +30,10 @@
 
   "network": {
     "$comment": "Static addressing used until (and unless) DHCP replaces it.",
-    "ip": "10.0.2.15",
+    "ip": "192.168.1.100",
     "prefix": 24,
-    "gateway": "10.0.2.2",
-    "dns": "10.0.2.3"
+    "gateway": "192.168.1.1",
+    "dns": "192.168.1.1"
   },
 
   "features": {

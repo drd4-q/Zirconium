@@ -3,6 +3,7 @@ const root = @import("root");
 const vga = root.vga;
 const port = root.serial;
 const pci = @import("pci.zig");
+const tsc = @import("../arch/tsc.zig");
 
 // Realtek RTL8169/8168/8111 register offsets (from Linux r8169_main.c)
 const MAC0: u32 = 0x00;
@@ -19,6 +20,26 @@ const RxMaxSize: u32 = 0xDA;
 const CPlusCmd: u32 = 0xE0;
 const RxDescAddrLow: u32 = 0xE4;
 const RxDescAddrHigh: u32 = 0xE8;
+const PHYAR: u32 = 0x60; // MDIO access register
+const PHYStatus: u32 = 0x6C; // link/speed status (8-bit)
+
+// PHYStatus bits
+const PHY_FULLDUP: u8 = 0x01;
+const PHY_LINK: u8 = 0x02;
+const PHY_10M: u8 = 0x04;
+const PHY_100M: u8 = 0x08;
+const PHY_1000M: u8 = 0x10;
+
+// Standard MII registers
+const MII_BMCR: u32 = 0x00;
+const MII_BMSR: u32 = 0x01;
+const MII_ADVERTISE: u32 = 0x04;
+const MII_CTRL1000: u32 = 0x09;
+const MII_PAGE: u32 = 0x1F; // Realtek PHY page select
+
+const BMCR_RESET: u16 = 0x8000;
+const BMCR_ANENABLE: u16 = 0x1000;
+const BMCR_ANRESTART: u16 = 0x0200;
 
 // ChipCmd bits
 const CmdReset: u8 = 0x10;
@@ -93,10 +114,97 @@ fn mmioWrite32(offset: u32, val: u32) void {
     ptr.* = val;
 }
 
+/// MDIO write through PHYAR (Linux: r8169_mdio.c). Bit 31 is the "write" flag
+/// and is cleared by the chip when the access is done.
+fn mdioWrite(reg: u32, val: u16) void {
+    mmioWrite32(PHYAR, 0x80000000 | ((reg & 0x1F) << 16) | val);
+    var i: u32 = 0;
+    while (i < 20) : (i += 1) {
+        tsc.delayUs(25);
+        if ((mmioRead32(PHYAR) & 0x80000000) == 0) break;
+    }
+    tsc.delayUs(20);
+}
+
+/// MDIO read through PHYAR: bit 31 is *set* by the chip when the data is valid.
+fn mdioRead(reg: u32) u16 {
+    mmioWrite32(PHYAR, (reg & 0x1F) << 16);
+    var v: u32 = 0;
+    var i: u32 = 0;
+    while (i < 20) : (i += 1) {
+        tsc.delayUs(25);
+        v = mmioRead32(PHYAR);
+        if ((v & 0x80000000) != 0) break;
+    }
+    tsc.delayUs(20);
+    return @intCast(v & 0xFFFF);
+}
+
+/// Reset the PHY (this also clears the power-down bit) and restart
+/// auto-negotiation advertising 10/100/1000 half and full duplex. The driver
+/// never touched the PHY before, so a PHY left powered down by the firmware or
+/// the previous OS stayed dead: no link, no LEDs.
+fn phyStart() void {
+    mdioWrite(MII_PAGE, 0x0000);
+    mdioWrite(MII_BMCR, BMCR_RESET);
+    var i: u32 = 0;
+    while (i < 50) : (i += 1) {
+        tsc.delayUs(10_000);
+        if ((mdioRead(MII_BMCR) & BMCR_RESET) == 0) break;
+    }
+    mdioWrite(MII_ADVERTISE, 0x01E1); // 10/100 half+full, IEEE 802.3 selector
+    mdioWrite(MII_CTRL1000, 0x0300); // 1000 half+full
+    mdioWrite(MII_BMCR, BMCR_ANENABLE | BMCR_ANRESTART);
+}
+
+/// Wait for the link. Auto-negotiation takes 1-3 seconds on a real switch.
+fn waitLink(max_ms: u32) bool {
+    const step_ms: u32 = 10;
+    // Without a calibrated TSC delayUs() is a rough spin; bound the wait.
+    const steps: u32 = if (tsc.frequency != 0) max_ms / step_ms else 20;
+    var i: u32 = 0;
+    while (i < steps) : (i += 1) {
+        if ((mmioRead8(PHYStatus) & PHY_LINK) != 0) return true;
+        tsc.delayUs(step_ms * 1000);
+    }
+    return (mmioRead8(PHYStatus) & PHY_LINK) != 0;
+}
+
+fn reportLink() void {
+    // BMSR link status is latched-low: read it twice.
+    _ = mdioRead(MII_BMSR);
+    const bmsr = mdioRead(MII_BMSR);
+    const bmcr = mdioRead(MII_BMCR);
+    const st = mmioRead8(PHYStatus);
+    port.serialWrite("[RTL8169] PHY BMCR=0x");
+    port.serialWriteHex(@as(u64, bmcr));
+    port.serialWrite(" BMSR=0x");
+    port.serialWriteHex(@as(u64, bmsr));
+    port.serialWrite(" PHYStatus=0x");
+    port.serialWriteHex(@as(u64, st));
+    port.serialWrite("\n");
+    if ((st & PHY_LINK) != 0) {
+        port.serialWrite("[RTL8169] Link UP, ");
+        if ((st & PHY_1000M) != 0) {
+            port.serialWrite("1000 Mbit/s");
+        } else if ((st & PHY_100M) != 0) {
+            port.serialWrite("100 Mbit/s");
+        } else if ((st & PHY_10M) != 0) {
+            port.serialWrite("10 Mbit/s");
+        }
+        port.serialWrite(if ((st & PHY_FULLDUP) != 0) " full duplex\n" else " half duplex\n");
+    } else {
+        port.serialWrite("[RTL8169] Link DOWN (no carrier after wait)\n");
+    }
+}
+
 pub fn isRealtekNic(vendor_id: u16, device_id: u16) bool {
     if (vendor_id != 0x10EC) return false;
+    // 0x8125 (RTL8125, 2.5G) and 0x8139 (RTL8139) are deliberately absent:
+    // they have a different register set / no descriptor rings, so this driver
+    // cannot drive them and would only claim the NIC and break it.
     return switch (device_id) {
-        0x8169, 0x8168, 0x8167, 0x8111, 0x8101, 0x8136, 0x8125, 0x8139, 0x8161 => true,
+        0x8169, 0x8168, 0x8167, 0x8111, 0x8101, 0x8136, 0x8161 => true,
         else => false,
     };
 }
@@ -165,6 +273,10 @@ pub fn init(dev: *pci.PciDevice) bool {
     while ((mmioRead8(ChipCmd) & CmdReset) != 0 and reset_timeout < 100_000) : (reset_timeout += 1) {
         asm volatile ("pause" ::: .{ .memory = true });
     }
+
+    // Power up the PHY and start auto-negotiation now; it runs while the rest
+    // of the init proceeds and is waited for at the end.
+    phyStart();
 
     // Read MAC address from MAC0..MAC5
     var i: usize = 0;
@@ -236,6 +348,8 @@ pub fn init(dev: *pci.PciDevice) bool {
     mmioWrite8(Cfg9346, Cfg9346_Lock);
 
     initialized = true;
+    _ = waitLink(4000);
+    reportLink();
     port.serialWrite("[RTL8169] Driver initialized successfully\n");
     return true;
 }

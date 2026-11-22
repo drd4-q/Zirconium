@@ -242,6 +242,11 @@ var discover_buf: [548]u8 align(16) = undefined;
 pub fn sendDiscover(requested_ip: [4]u8) void {
     dhcp_xid +%= 0x12345678;
 
+    const serial = @import("../system/serial.zig");
+    serial.serialWrite("[DHCP] Sending DISCOVER (xid=0x");
+    serial.serialWriteHex(dhcp_xid);
+    serial.serialWrite(")\n");
+
     vga.setColor(.light_cyan, .black);
     vga.write("[DHCP] Sending DISCOVER...\n");
     vga.setColor(.white, .black);
@@ -264,6 +269,13 @@ pub fn sendRequest(offered_ip: [4]u8, server_ip: [4]u8) void {
     // Keep the DISCOVER's xid: a REQUEST with a fresh transaction ID does not
     // belong to the offer, and servers ignore it (the old code bumped dhcp_xid
     // here, so the ACK never came).
+    const serial = @import("../system/serial.zig");
+    serial.serialWrite("[DHCP] Sending REQUEST for ");
+    net.printIpSerial(offered_ip);
+    serial.serialWrite(" (xid=0x");
+    serial.serialWriteHex(dhcp_xid);
+    serial.serialWrite(")\n");
+
     vga.setColor(.light_cyan, .black);
     vga.write("[DHCP] Sending REQUEST for ");
     net.printIp(offered_ip);
@@ -378,6 +390,13 @@ pub fn handleResponse(frame: []const u8, ihl: usize, udp_hdr_len: usize) void {
 
     switch (msg_type) {
         DHCP_OFFER => {
+            const serial = @import("../system/serial.zig");
+            serial.serialWrite("[DHCP] OFFER received: ");
+            net.printIpSerial(offered_ip);
+            serial.serialWrite(" from server ");
+            net.printIpSerial(server_ip);
+            serial.serialWrite("\n");
+
             vga.setColor(.light_green, .black);
             vga.write("[DHCP] OFFER received: ");
             net.printIp(offered_ip);
@@ -388,6 +407,9 @@ pub fn handleResponse(frame: []const u8, ihl: usize, udp_hdr_len: usize) void {
             sendRequest(offered_ip, server_ip);
         },
         DHCP_ACK => {
+            const serial = @import("../system/serial.zig");
+            serial.serialWrite("[DHCP] ACK received!\n");
+
             vga.setColor(.light_green, .black);
             vga.write("[DHCP] ACK received!\n");
             vga.setColor(.white, .black);
@@ -406,6 +428,18 @@ pub fn handleResponse(frame: []const u8, ihl: usize, udp_hdr_len: usize) void {
             if (lease_dns[0] != 0) {
                 udp.dns_server = lease_dns;
             }
+
+            serial.serialWrite("[DHCP] Configuration applied: IP=");
+            net.printIpSerial(net.our_ip);
+            serial.serialWrite(" Mask=");
+            net.printIpSerial(lease_mask);
+            serial.serialWrite(" GW=");
+            net.printIpSerial(lease_router);
+            serial.serialWrite(" DNS=");
+            net.printIpSerial(lease_dns);
+            serial.serialWrite(" Lease=");
+            serial.serialWriteDec(lease_lease_sec);
+            serial.serialWrite("s\n");
 
             vga.setColor(.light_green, .black);
             vga.write("[DHCP] Configuration applied:\n");
@@ -426,6 +460,9 @@ pub fn handleResponse(frame: []const u8, ihl: usize, udp_hdr_len: usize) void {
             arp.resolve(net.gateway_ip);
         },
         DHCP_NAK => {
+            const serial = @import("../system/serial.zig");
+            serial.serialWrite("[DHCP] NAK received - request rejected\n");
+
             vga.setColor(.light_red, .black);
             vga.write("[DHCP] NAK received - request rejected\n");
             vga.setColor(.white, .black);
@@ -449,26 +486,44 @@ pub fn run() void {
     net.our_ip = .{ 0, 0, 0, 0 };
 
     const timer = @import("../drivers/timer.zig");
+    const serial = @import("../system/serial.zig");
+
+    serial.serialWrite("[DHCP] Starting DHCP discovery...\n");
 
     // Up to 3 DISCOVERs, 2s each — tick-based instead of a nop-count spin whose
     // real duration changed between Debug and ReleaseFast.
     var attempt: u32 = 0;
     while (attempt < 3 and !lease_valid) : (attempt += 1) {
+        serial.serialWrite("[DHCP] Attempt ");
+        serial.serialWriteDec(attempt);
+        serial.serialWrite("/3: sending DISCOVER\n");
         sendDiscover(saved_ip);
 
-        const deadline = timer.tickCount() +% 200;
+        const deadline = timer.tickCount() +% 1000; // 10s per attempt
         while (timer.tickCount() < deadline and !lease_valid) {
             net.poll();
         }
     }
 
     if (!lease_valid) {
+        serial.serialWrite("[DHCP] Failed to get lease after 3 attempts, restoring static IP\n");
         vga.setColor(.light_red, .black);
         vga.write("[DHCP] Failed to get lease, restoring static IP\n");
         vga.setColor(.white, .black);
         net.our_ip = saved_ip;
     } else {
         net.netmask = lease_mask;
+        serial.serialWrite("[DHCP] Lease acquired: IP=");
+        net.printIpSerial(lease_ip);
+        serial.serialWrite(" Mask=");
+        net.printIpSerial(lease_mask);
+        serial.serialWrite(" GW=");
+        net.printIpSerial(lease_router);
+        serial.serialWrite(" DNS=");
+        net.printIpSerial(lease_dns);
+        serial.serialWrite(" Lease=");
+        serial.serialWriteDec(lease_lease_sec);
+        serial.serialWrite("s\n");
         // The gateway MAC must be re-resolved: our source IP changed and the old
         // cache entry may be for a different subnet.
         _ = net.resolveGateway();

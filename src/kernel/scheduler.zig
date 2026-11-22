@@ -598,6 +598,8 @@ pub fn pollDeferred() void {
     if (@import("config").features.kvm) {
         @import("../vm/mod.zig").poll();
     }
+    // Poll network stack to receive packets (ARP replies, etc.) on real hardware.
+    @import("../net/mod.zig").poll();
     if (tick_count % 100 == 0) {
         @import("../net/mod.zig").tick();
     }

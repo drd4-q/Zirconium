@@ -280,6 +280,10 @@ fn stageNetwork() void {
     }
     @import("../net/mod.zig").init();
     @import("../net/mod.zig").refreshUsbNic();
+
+    // Try DHCP to get IP config on real hardware (QEMU slirp uses static config).
+    @import("../net/dhcp.zig").run();
+
     serial.serialWrite("[BOOT] Network init done\n");
     vga.write("[BOOT] Network initialized\n");
 }
