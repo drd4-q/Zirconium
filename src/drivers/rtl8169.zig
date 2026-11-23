@@ -20,6 +20,10 @@ const RxMaxSize: u32 = 0xDA;
 const CPlusCmd: u32 = 0xE0;
 const RxDescAddrLow: u32 = 0xE4;
 const RxDescAddrHigh: u32 = 0xE8;
+const MISC: u32 = 0xF0; // 8168g+ only (aliases FuncEvent on older chips)
+const RXDV_GATED_EN: u32 = 1 << 19;
+const TXCFG_AUTO_FIFO: u32 = 1 << 7; // 8168evl and newer
+const DESC_RES: u32 = 1 << 21; // RX error summary
 const PHYAR: u32 = 0x60; // MDIO access register
 const PHYStatus: u32 = 0x6C; // link/speed status (8-bit)
 
@@ -334,15 +338,25 @@ pub fn init(dev: *pci.PciDevice) bool {
     // Configure Rx Max Size (1536)
     mmioWrite16(RxMaxSize, 1536);
 
-    // Configure Tx/Rx (Max DMA burst 7 << 8, Rx FIFO 7 << 13, Accept Physical/Multicast/Broadcast)
-    mmioWrite32(TxConfig, (7 << 8) | (3 << 24));
-    mmioWrite32(RxConfig, (7 << 8) | (7 << 13) | 0x0F);
-
     // Enable CPlus features (Rx Checksum offload + Dual Address)
     mmioWrite16(CPlusCmd, 0x0020);
 
-    // Enable RX and TX
+    // RTL8168g and newer (this includes the 8168h) gate the receiver's RXDV
+    // line while the driver quiesces the chip around a reset (Linux:
+    // rtl_enable_rxdvgate). The gate has to be opened again or nothing is ever
+    // received, even with the link up. Clearing a bit that is already clear is
+    // harmless on the older chips.
+    mmioWrite32(MISC, mmioRead32(MISC) & ~RXDV_GATED_EN);
+
+    // Enable RX and TX *first*, then program TxConfig/RxConfig: that is the
+    // order Linux uses (rtl_hw_start), and the config registers are only
+    // reliably latched once the engines are on.
     mmioWrite8(ChipCmd, CmdRxEnb | CmdTxEnb);
+
+    // Configure Tx/Rx (Max DMA burst 7 << 8, Rx FIFO 7 << 13, Accept Physical/Multicast/Broadcast).
+    // TXCFG_AUTO_FIFO is set on 8168evl and newer (Linux: rtl_set_tx_config_registers).
+    mmioWrite32(TxConfig, (7 << 8) | (3 << 24) | TXCFG_AUTO_FIFO);
+    mmioWrite32(RxConfig, (7 << 8) | (7 << 13) | 0x0F);
 
     // Lock config registers
     mmioWrite8(Cfg9346, Cfg9346_Lock);
@@ -360,9 +374,11 @@ pub fn transmit(data: []const u8) void {
 
     const idx = tx_cur;
     // Wait if descriptor is currently owned by hardware. OWN is DMA-written by
-    // the NIC, hence the volatile read.
+    // the NIC, hence the volatile read. It has to be a 32-bit read: OWN is bit
+    // 31, and the old 16-bit read only saw bits 15:0, so this loop (and the
+    // equivalent one in receive()) never saw the flag at all.
     var spins: u32 = 0;
-    while ((@as(*const volatile u16, @ptrCast(&tx_ring[idx].opts1)).* & DESC_OWN) != 0 and spins < 1_000_000) : (spins += 1) {
+    while ((@as(*const volatile u32, @ptrCast(&tx_ring[idx].opts1)).* & DESC_OWN) != 0 and spins < 1_000_000) : (spins += 1) {
         asm volatile ("pause" ::: .{ .memory = true });
     }
 
@@ -374,12 +390,26 @@ pub fn transmit(data: []const u8) void {
 
     tx_ring[idx].opts2 = 0;
     tx_ring[idx].addr = @intFromPtr(&tx_bufs[idx]);
-    tx_ring[idx].opts1 = opts;
+    // The frame data, opts2 and addr must be visible before OWN is handed over.
+    asm volatile ("mfence" ::: .{ .memory = true });
+    @as(*volatile u32, @ptrCast(&tx_ring[idx].opts1)).* = opts;
+    asm volatile ("mfence" ::: .{ .memory = true });
 
     // Trigger normal priority TX poll
     mmioWrite8(TxPoll, 0x40);
 
     tx_cur = (tx_cur + 1) % TX_DESC_COUNT;
+}
+
+/// Give an RX descriptor back to the NIC. OWN is written last, after a fence,
+/// so the chip never sees a half-updated descriptor.
+fn rearmRx(idx: usize) void {
+    var new_opts: u32 = DESC_OWN | @as(u32, @intCast(PKT_SIZE));
+    if (idx == RX_DESC_COUNT - 1) new_opts |= DESC_EOR;
+    rx_ring[idx].opts2 = 0;
+    rx_ring[idx].addr = @intFromPtr(&rx_bufs[idx]);
+    asm volatile ("mfence" ::: .{ .memory = true });
+    @as(*volatile u32, @ptrCast(&rx_ring[idx].opts1)).* = new_opts;
 }
 
 pub fn receive(buf: []u8) ?usize {
@@ -388,34 +418,37 @@ pub fn receive(buf: []u8) ?usize {
     const idx = rx_cur;
     // opts1 is set by the NIC over DMA: read it volatile, otherwise the check
     // below can be hoisted and we would read a buffer the controller owns.
-    const opts = @as(*const volatile u16, @ptrCast(&rx_ring[idx].opts1)).*;
+    //
+    // It must be read as 32 bits: OWN is bit 31. The previous 16-bit read could
+    // never see it, so receive() treated every descriptor as already filled and
+    // handed the stack a bogus 2 KB "frame" on every call, while the real
+    // frames were never matched with their descriptors.
+    const opts = @as(*const volatile u32, @ptrCast(&rx_ring[idx].opts1)).*;
 
     // If OWN bit is set, hardware still owns descriptor (no packet ready)
     if ((opts & DESC_OWN) != 0) {
         return null;
     }
 
+    // The NIC has finished writing the descriptor; make sure the buffer
+    // contents are read after the ownership check.
+    asm volatile ("mfence" ::: .{ .memory = true });
+
     const len = @as(usize, @intCast(opts & 0x3FFF));
-    if (len > 4) { // Realtek includes 4-byte CRC at the end
+    // A whole frame sits in one descriptor (FS and LS), without an error.
+    const whole = (opts & DESC_FS) != 0 and (opts & DESC_LS) != 0 and (opts & DESC_RES) == 0;
+    if (whole and len > 4) { // Realtek includes 4-byte CRC at the end
         const data_len = len - 4;
         const copy_len = @min(data_len, buf.len);
         @memcpy(buf[0..copy_len], rx_bufs[idx][0..copy_len]);
 
-        // Hand descriptor back to hardware
-        var new_opts: u32 = DESC_OWN | @as(u32, @intCast(PKT_SIZE));
-        if (idx == RX_DESC_COUNT - 1) new_opts |= DESC_EOR;
-        rx_ring[idx].opts2 = 0;
-        rx_ring[idx].addr = @intFromPtr(&rx_bufs[idx]);
-        rx_ring[idx].opts1 = new_opts;
-
+        rearmRx(idx);
         rx_cur = (rx_cur + 1) % RX_DESC_COUNT;
         return copy_len;
     }
 
     // Reset corrupted/short descriptor
-    var reset_opts: u32 = DESC_OWN | @as(u32, @intCast(PKT_SIZE));
-    if (idx == RX_DESC_COUNT - 1) reset_opts |= DESC_EOR;
-    rx_ring[idx].opts1 = reset_opts;
+    rearmRx(idx);
     rx_cur = (rx_cur + 1) % RX_DESC_COUNT;
     return null;
 }
